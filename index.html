@@ -919,7 +919,7 @@ function excelSerialToDate(n) {
   // timezone (this bit us before with Asia/Dhaka's LMT offset). Excel serial 1 = 01/01/1900, and
   // serials ≥ 61 carry Lotus 1-2-3's phantom 29/02/1900, hence the −1 / −2 adjustment.
   const d = new Date(1900, 0, 1, 12, 0, 0, 0);
-  d.setDate(d.getDate() + Math.round(n) - (n < 61 ? 1 : 2));
+  d.setDate(d.getDate() + Math.floor(n) - (n < 61 ? 1 : 2)); // floor: 44123.95 is 22:48 on day 44123, not day 44124
   return d;
 }
 
@@ -2001,7 +2001,9 @@ async function connectFolder(existingHandle, forceNew) {
     loadStatus.textContent = `Connected to "${dirHandle.name}". Searching for your Master File and Work Orders folder...`;
     loadStatus.className = 'status';
 
-    const masterSearch = await findFileRecursive(dirHandle, name => /master/i.test(name), 6);
+    // ~$xxx.xlsx is Excel's lock file (an artifact, not data) — it rode along in folder uploads and
+    // once got picked as "the Master File", which silently produced an empty dataset and a dead Ask box.
+    const masterSearch = await findFileRecursive(dirHandle, name => /master/i.test(name) && !/^~\$/.test(name) && !/\.tmp$/i.test(name), 6);
     piRootHandle = await findFolderRecursive(dirHandle, name => /work\s*orders?/i.test(name), 4);
 
     const bits = [];
@@ -2204,6 +2206,7 @@ const PI_FAIL_LABELS = {
   'pdf-no-text': 'PDF is a scan/photo with no text layer — it can\'t be read without OCR; re-save it from the source system as a normal PDF',
   'pdf-no-item-table': 'PDF opened and has text, but no item table ("SL … Quantity … Piece" rows) — probably a challan, LC copy or cover page rather than the Proforma Invoice',
   'pdf-unreadable': 'PDF failed to open (corrupt, password-protected, or a cloud placeholder not yet downloaded to this PC)',
+  'cloud-placeholders': 'Files in this folder have scrambled placeholder names (OneDrive cloud files, or files uploaded to Drive while they were still placeholders). The tool now also tries to read such files by their CONTENT — if this group still appears, the content really couldn\'t be read: re-upload these folders after fixing them locally (right-click \u2192 Always keep on this device)',
   'unreadable-folder': 'Folder couldn\'t be listed — permission or sync issue',
   'error': 'Unexpected error'
 };
@@ -2771,7 +2774,15 @@ async function scanPiFolder(dirHandle, maxDepth, depth = 0, prefix = '', acc = n
         acc.files.push(path);
         if (/\.pdf$/i.test(name)) acc.pdfs.push({ name, path, handle, depth });
         else if (/\.(xlsx|xlsm|xls)$/i.test(name)) acc.sheets.push({ name, path, handle, depth });
-        else if (isPlaceholderName(name)) acc.placeholders = (acc.placeholders || 0) + 1;
+        else {
+          if (isPlaceholderName(name)) acc.placeholders = (acc.placeholders || 0) + 1;
+          // Extension-less files (typically scrambled placeholder names) are kept as candidates for
+          // content sniffing: a 387 KB file named "8ln5%2Bhp..." may be a perfectly good PDF.
+          if (!/\.[A-Za-z0-9]{1,5}$/.test(name)) {
+            const sz = handle.meta && handle.meta.size ? parseInt(handle.meta.size, 10) : null;
+            (acc.others = acc.others || []).push({ name, path, handle, depth, size: sz });
+          }
+        }
       } else if (handle.kind === 'directory') {
         acc.dirs.push(prefix + name);
         subdirs.push({ name, handle });
@@ -2876,6 +2887,46 @@ async function parsePiFolderPdf(piRef, folderHandle) {
     } catch (e) { /* not a readable invoice sheet — keep looking */ }
   }
 
+  // Last resort before declaring failure: identify files by CONTENT, not name. Folders synced or
+  // uploaded through OneDrive placeholders end up with scrambled, extension-less names — but the
+  // bytes underneath are often the real invoice. Read the first bytes: "%PDF" means PDF, "PK.." a
+  // zip (xlsx). Reading like a human would — by looking at the thing, not its label.
+  if (acc.others && acc.others.length) {
+    const sniffables = acc.others
+      .filter(o => o.size === null || (o.size > 4000 && o.size < 30 * 1024 * 1024))
+      .sort((a, b) => (b.size || 0) - (a.size || 0))
+      .slice(0, 6);
+    for (const cand of sniffables) {
+      let file, buf;
+      try {
+        file = await getFileWithRetry(cand.handle);
+        buf = await file.arrayBuffer();
+      } catch (e) { continue; }
+      const head = new Uint8Array(buf.slice(0, 4));
+      const magic = String.fromCharCode(...head);
+      try {
+        if (magic.startsWith('%PDF')) {
+          const srcFp = `${cand.path}|${file.size}|${file.lastModified}`;
+          const cached = piIndex[ref];
+          if (cached && cached.srcFp === srcFp && cached.rowCount > 0) return { ok: true, ref, ...cached };
+          const lines = await extractPdfLines(new File([buf], cand.name + '.pdf'));
+          const parsed = parsePiLines(lines);
+          if (parsed.rowCount > 0) {
+            const fileName = cand.path + ' (content-detected PDF)';
+            piIndex[ref] = { ...parsed, fileName, srcFp, builtAt: Date.now() };
+            return { ok: true, ref, ...parsed, fileName };
+          }
+        } else if (magic.startsWith('PK')) {
+          const parsed = parsePiLines(sheetToPiLines(buf));
+          if (parsed.rowCount > 0) {
+            const fileName = cand.path + ' (content-detected sheet)';
+            piIndex[ref] = { ...parsed, fileName, builtAt: Date.now() };
+            return { ok: true, ref, ...parsed, fileName };
+          }
+        }
+      } catch (e) { /* not readable as that type — try the next candidate */ }
+    }
+  }
   // Nothing worked. Report which wall we hit AND what the folder actually contains.
   if (acc.errors.length && !acc.files.length) return { ok: false, reason: 'unreadable-folder', detail: seen };
   if (!acc.pdfs.length && acc.placeholders) return { ok: false, reason: 'cloud-placeholders', placeholders: acc.placeholders, detail: seen };
@@ -3145,7 +3196,7 @@ async function buildPiQtyIndex(piFolders, onProgress) {
   return { withData, entries };
 }
 function bucketPiEntries(entries) {
-  const buckets = { ok: [], 'no-pdf': [], 'only-challan-pdfs': [], 'pdf-no-text': [], 'pdf-no-item-table': [], 'pdf-unreadable': [], 'unreadable-folder': [], error: [] };
+  const buckets = { ok: [], 'no-pdf': [], 'only-challan-pdfs': [], 'cloud-placeholders': [], 'pdf-no-text': [], 'pdf-no-item-table': [], 'pdf-unreadable': [], 'unreadable-folder': [], error: [] };
   entries.forEach(e => {
     if (e.ok) buckets.ok.push(e.name);
     else (buckets[e.reason] || buckets.error).push(e.name + (e.detail ? ` [${e.detail}]` : ''));
@@ -4535,18 +4586,30 @@ function requestDriveToken(interactive) {
     driveTokenClient.requestAccessToken({ prompt: interactive ? 'consent' : '' });
   });
 }
-// Fetch with auth; on an expired token, silently refresh once and retry.
-async function driveFetch(url, asBlob, _retried) {
+// Fetch with auth. Handles the two ways Drive pushes back: an expired token (401 → silent refresh,
+// retry) and rate limiting (429, or 403 userRateLimitExceeded when many requests land at once →
+// exponential backoff: 0.8s, 1.6s, 3.2s, 6.4s). A 155-folder index build fires hundreds of calls;
+// without backoff a single burst of 429s used to surface as fake "sign in again" errors.
+async function driveFetch(url, asBlob) {
   if (!driveToken) await requestDriveToken(false);
-  const r = await fetch(url, { headers: { Authorization: 'Bearer ' + driveToken } });
-  if (r.status === 401 || r.status === 403) {
-    if (_retried) throw new Error(`Google Drive said ${r.status} — sign in again with the Connect Google Drive button.`);
-    driveToken = null;
-    await requestDriveToken(false);
-    return driveFetch(url, asBlob, true);
+  let refreshed = false;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const r = await fetch(url, { headers: { Authorization: 'Bearer ' + driveToken } });
+    if (r.ok) return asBlob ? r.blob() : r.json();
+    if (r.status === 401 && !refreshed) {
+      refreshed = true;
+      driveToken = null;
+      await requestDriveToken(false);
+      continue;
+    }
+    if (r.status === 429 || r.status === 403) {
+      // 403 can mean auth OR rate limit; one token refresh covers the auth case, backoff the rest.
+      if (r.status === 403 && !refreshed) { refreshed = true; try { driveToken = null; await requestDriveToken(false); } catch (e) { /* keep backing off */ } }
+      if (attempt < 5) { await sleep(800 * Math.pow(2, attempt)); continue; }
+    }
+    throw new Error(`Google Drive error ${r.status}${r.status === 401 || r.status === 403 ? ' — sign in again with the Connect Google Drive button' : ''} (${url.slice(0, 80)})`);
   }
-  if (!r.ok) throw new Error(`Google Drive error ${r.status} for ${url.slice(0, 80)}`);
-  return asBlob ? r.blob() : r.json();
+  throw new Error('Google Drive kept rate-limiting — wait a minute and try again.');
 }
 async function driveListChildren(folderId) {
   if (driveListCache.has(folderId)) return driveListCache.get(folderId);
