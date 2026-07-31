@@ -445,6 +445,15 @@
   .askA .previewbox { margin-top: 8px; }
   .askA .summary-line { font-weight: 700; color: var(--ink); margin-bottom: 4px; }
   .sub-note { font-weight: 400; color: var(--sub); font-size: 12px; }
+  /* Offline mode: the whole app turns amber/red-tinted so it is impossible to keep working and not
+     notice that Drive reads will fail. Reverts the instant the connection returns. */
+  body.is-offline { background: #2A1214 !important; }
+  body.is-offline::before { content:''; position:fixed; inset:0; background:rgba(225,77,77,.13); pointer-events:none; z-index:8000; }
+  body.is-offline .card, body.is-offline .tabsbar, body.is-offline .panel { border-color:#E14D4D !important; }
+  body.is-offline .offbanner { display:flex; }
+  .offbanner { display:none; position:fixed; left:0; right:0; top:0; z-index:9600; background:#E14D4D; color:#fff;
+    font-weight:800; font-size:13px; padding:9px 14px; align-items:center; justify-content:center; gap:8px; letter-spacing:.2px; }
+  body.is-offline { padding-top:38px; }
   .healthbar { display:flex; flex-wrap:wrap; gap:8px 14px; align-items:center; margin:8px 0 2px; font-size:12px; color:var(--sub); }
   .healthbar .hdot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:5px; vertical-align:middle; }
   .hgreen{background:#22c55e} .hyellow{background:#f59e0b} .hred{background:#E14D4D} .hgrey{background:#b6c2d4}
@@ -631,7 +640,6 @@
 <div class="wrap">
   <div class="hero">
     <h1>Olisa <span class="grad">Reporting</span> Tools</h1>
-    <p class="sub">Three tools, one file &mdash; PO work-order summaries, the Undelivered Qty &amp; Delivery Schedule report, and instant style search across your Olisa Group folder. Everything runs right here in your browser.</p>
     <svg class="hero-art" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
       <defs>
         <linearGradient id="boxg" x1="0" y1="0" x2="1" y2="1">
@@ -761,7 +769,6 @@
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span id="askFolderBtnText">Connect a folder (Chrome/Edge only)</span>
       </button>
-      <div class="sub-note" style="flex-basis:100%;">Reconnects to Drive automatically when you reopen the app, if your browser still has an active Google session. Occasionally (e.g. after a long time away, or if Google's session expired) you may need to tap once to sign in again — that's Google's session rule, not something the tool can skip.</div>
       <div class="healthbar" id="healthBar" style="flex-basis:100%;"></div></div>
       <button id="askDriveBtn" class="secondary" style="flex:1;">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3h8l6 10-4 7H6l-4-7L8 3z" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -771,18 +778,14 @@
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4v5h5M20 20v-5h-5M4 9a8 8 0 0114-4.5M20 15a8 8 0 01-14 4.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
         Change folder
       </button>
-      <button id="askTodayBtn" class="secondary" style="flex:0 0 auto;">☀️ Start Today's Work</button>
+      <button id="askSaveIndexBtn" class="secondary hidden" style="flex:0 0 auto;" title="Save this index as a file you can put in Drive so your phone uses it too">⬇ Save index file</button>
       <button id="askBuildIndexBtn" class="secondary hidden" style="flex:0 0 auto;">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h7" stroke-linecap="round"/></svg>
         Build style index
       </button>
     </div>
-    <div class="hint" id="askFolderHint">
-      Connect the top-level folder (e.g. "OLISA GROUP") — it automatically finds your Master File and your Work
-      Orders folder inside it, subfolders included. Click "Build style index" once so it can read the Proforma-Invoice
-      PDF in each PI folder and capture PI Qty per style — after that, every search shows PI Qty and Undelivered
-      automatically, and any newly-added PI is read on the fly when you search it. Chrome or Edge on desktop only.
-    </div>
+    <div class="hint hidden" id="askFolderHint"></div>
+    <div class="sub-note" id="askIndexStamp" style="margin-top:2px;"></div>
     <div class="status" id="askLoadStatus"></div>
     <div class="hidden" id="askProgressWrap" style="margin-top:8px;">
       <div style="height:8px;background:#E3ECF5;border-radius:6px;overflow:hidden;">
@@ -825,11 +828,6 @@
       <input type="text" id="askPiFrom" placeholder="PI from" title="Only show PI numbers &ge; this">
       <input type="text" id="askPiTo" placeholder="PI to" title="Only show PI numbers &le; this">
       <span class="filterhint" id="askFilterHint"></span>
-    </div>
-    <div class="hint">
-      Works by matching style codes against the Master File (reads <b>2026- Main</b> and <b>2025</b>) and, if not
-      found there, the PI style index. Try one style, or paste a whole list of styles at once — up to hundreds —
-      and it checks every one.
     </div>
     <div class="askChat" id="askChat"></div>
   </div>
@@ -1774,6 +1772,7 @@ const chatEl = document.getElementById('askChat');
 // manual rebuild, so an out-of-date or malformed cache is discarded rather than trusted.
 const PI_CACHE_VERSION = 3;
 let piIndexRestoredAt = null;
+let piIndexBuiltAt = null; // when the CURRENT in-memory PI index was produced (restored or freshly built)
 (async function initPiIndex() {
   try {
     const cached = await idbGet('piIndex');
@@ -1785,11 +1784,12 @@ let piIndexRestoredAt = null;
       if (nk && v && v.rowCount > 0) clean[nk] = v; // an empty parse is never restored as fact
     }
     piIndex = clean;
-    piIndexRestoredAt = cached.builtAt || null;
+    piIndexBuiltAt = cached.builtAt || null;
+    piIndexRestoredAt = piIndexBuiltAt;
     if (piIndexRestoredAt && Object.keys(clean).length) {
       const box = document.getElementById('askPiDiag');
       if (box) {
-        box.innerHTML = `<div class="sub-note">PI quantities restored from the index built on <b>${new Date(piIndexRestoredAt).toLocaleString('en-GB')}</b> (${Object.keys(clean).length} PI(s)). If any invoice changed since, click &ldquo;Build style index&rdquo; to refresh.</div>`;
+        box.innerHTML = `<div class="sub-note">Index loaded: <b>${Object.keys(clean).length} PI(s)</b> \u2014 built ${stampText(piIndexBuiltAt)} (${agoText(piIndexBuiltAt)}).</div>`;
         box.classList.remove('hidden');
       }
     }
@@ -2032,6 +2032,8 @@ async function connectFolder(existingHandle, forceNew) {
     // once got picked as "the Master File", which silently produced an empty dataset and a dead Ask box.
     const masterSearch = await findFileRecursive(dirHandle, name => /master/i.test(name) && !/^~\$/.test(name) && !/\.tmp$/i.test(name), 6);
     piRootHandle = await findFolderRecursive(dirHandle, name => /work\s*orders?/i.test(name), 4);
+    // A shared index file in the folder means another device already did the work.
+    await tryLoadIndexFromFolder(dirHandle);
 
     const bits = [];
     if (masterSearch.handle) {
@@ -2052,6 +2054,7 @@ async function connectFolder(existingHandle, forceNew) {
     }
     if (piRootHandle) {
       buildIndexBtn.classList.remove('hidden');
+      document.getElementById('askSaveIndexBtn').classList.remove('hidden');
       const cachedIndex = await idbGet('styleIndex');
       if (cachedIndex) styleIndex = cachedIndex.data;
       let idxNote = ' — click "Build style index" to enable undelivered-style lookups';
@@ -2159,6 +2162,7 @@ async function buildStyleIndex() {
   }
   progressText.textContent = `Found ${piFolders.length} PI folder(s). Starting scan...`;
 
+  const scanStart = Date.now();
   for (let i = 0; i < piFolders.length; i++) {
     const { name, handle } = piFolders[i];
     const piRef = parsePiNumber(name);
@@ -2186,7 +2190,7 @@ async function buildStyleIndex() {
     }
     const pct = Math.round(((i + 1) / piFolders.length) * 100);
     progressBar.style.width = pct + '%';
-    progressText.textContent = `Scanned ${i + 1} / ${piFolders.length} PI folders (${filesScanned} files)...`;
+    progressText.textContent = `Scanning work orders: ${i + 1} / ${piFolders.length} PI folders (${filesScanned} files)${etaText(scanStart, i + 1, piFolders.length)}`;
   }
 
   styleIndex = index;
@@ -2221,7 +2225,12 @@ async function buildStyleIndex() {
   const withPi = piResult.entries.filter(e => e.ok).length;
   const b = bucketPiEntries(piResult.entries);
 
-  progressText.textContent = `Done — indexed ${Object.keys(index).length} style(s) across ${foldersScanned} PI folder(s); PI Qty read for ${withPi} PI(s).`;
+  piIndexBuiltAt = Date.now();
+  piIndexRestoredAt = piIndexBuiltAt;
+  if (typeof renderIndexStamp === 'function') renderIndexStamp();
+  if (typeof renderHealth === 'function') renderHealth();
+  if (typeof notify === 'function') notify('build', `Index built: ${withPi} PI(s), ${Object.keys(index).length} style(s).`);
+  progressText.textContent = `Done \u2014 indexed ${Object.keys(index).length} style(s) across ${foldersScanned} PI folder(s); PI Qty read for ${withPi} PI(s).`;
   renderPiIndexDiagnostics(piFolders.length, withPi, b, sweep);
   buildIndexBtn.disabled = false;
 }
@@ -2317,6 +2326,16 @@ function notifyDownload(filename) {
   notify('download', `Downloaded: ${filename}. Check your phone's Downloads / browser downloads.`);
 }
 // ---------- Health strip ----------
+// The index age shown right beside the Build button, so its freshness is visible before clicking.
+function renderIndexStamp() {
+  const el = document.getElementById('askIndexStamp');
+  if (!el) return;
+  const n = Object.keys(piIndex).length;
+  if (!n) { el.textContent = 'Style index: not built yet.'; return; }
+  const days = piIndexBuiltAt ? Math.floor((Date.now() - piIndexBuiltAt) / 86400000) : null;
+  el.innerHTML = `Style index: <b>${n} PI(s)</b> \u2014 built ${stampText(piIndexBuiltAt)} (${agoText(piIndexBuiltAt)})${days !== null && days > 7 ? ' <span style="color:var(--bad);font-weight:700;">\u2014 rebuild recommended</span>' : ''}`;
+}
+setInterval(renderIndexStamp, 60000);
 function renderHealth() {
   const el = document.getElementById('healthBar');
   if (!el) return;
@@ -2325,10 +2344,11 @@ function renderHealth() {
   const localOn = !!(savedRootHandle && !savedRootHandle.isDrive);
   const rows = allRecords.length;
   const piCount = Object.keys(piIndex).length;
-  const ageMs = piIndexRestoredAt ? Date.now() - piIndexRestoredAt : null;
+  const ageMs = piIndexBuiltAt ? Date.now() - piIndexBuiltAt : null;
   const days = ageMs === null ? null : Math.floor(ageMs / 86400000);
-  const idxDot = piCount === 0 ? 'hgrey' : days === null || days < 1 ? 'hgreen' : days <= 3 ? 'hgreen' : days <= 7 ? 'hyellow' : 'hred';
-  const idxTxt = piCount === 0 ? 'Index: not built' : `Index: ${piCount} PI(s)` + (days === null ? ' (fresh this session)' : days < 1 ? ' (built today)' : ` (${days} day(s) old${days > 7 ? ' \u2014 rebuild recommended' : ''})`);
+  const idxDot = piCount === 0 ? 'hgrey' : days === null ? 'hgreen' : days <= 3 ? 'hgreen' : days <= 7 ? 'hyellow' : 'hred';
+  const idxTxt = piCount === 0 ? 'Index: not built'
+    : `Index: ${piCount} PI(s) \u2014 ${stampText(piIndexBuiltAt)} (${agoText(piIndexBuiltAt)})${days !== null && days > 7 ? ' \u2014 rebuild recommended' : ''}`;
   el.innerHTML = [
     `<span><span class="hdot ${online ? 'hgreen' : 'hred'}"></span>${online ? 'Online' : 'Offline \u2014 waiting for connection'}</span>`,
     `<span><span class="hdot ${driveOn ? 'hgreen' : localOn ? 'hgreen' : 'hgrey'}"></span>${driveOn ? 'Drive connected' : localOn ? 'Local folder connected' : 'No folder connected'}</span>`,
@@ -2337,35 +2357,103 @@ function renderHealth() {
   ].join('');
 }
 setInterval(renderHealth, 5000);
-window.addEventListener('online', () => { renderHealth(); toast('Back online.'); });
-window.addEventListener('offline', () => { renderHealth(); toast('Offline \u2014 Drive features paused until connection returns.'); });
-setTimeout(renderHealth, 800);
-// ---------- Start Today's Work ----------
-// One tap: reconnect the remembered Drive folder, refresh the index incrementally (metadata
-// fingerprints make unchanged PIs free), then say what's new. Local mode: just rebuilds.
-document.getElementById('askTodayBtn').addEventListener('click', async () => {
-  const btn = document.getElementById('askTodayBtn');
-  btn.disabled = true;
+// Whole-page offline treatment. navigator.onLine is the browser's own signal; it flips the moment
+// the OS loses/regains connectivity, so the colour change is immediate and self-reverting.
+function applyOfflineSkin() {
+  const off = navigator.onLine === false;
+  document.body.classList.toggle('is-offline', off);
+  let b = document.getElementById('offBanner');
+  if (!b) {
+    b = document.createElement('div');
+    b.id = 'offBanner'; b.className = 'offbanner';
+    b.innerHTML = '\u26a0 OFFLINE \u2014 no internet. Google Drive reads are paused; anything already loaded still works.';
+    document.body.appendChild(b);
+  }
+}
+window.addEventListener('online', () => { applyOfflineSkin(); renderHealth(); toast('Back online.'); });
+window.addEventListener('offline', () => { applyOfflineSkin(); renderHealth(); toast('Offline \u2014 Drive features paused until connection returns.'); });
+setTimeout(() => { renderHealth(); applyOfflineSkin(); renderBell(); renderIndexStamp(); }, 400);
+// Relative age in plain words: "12 minutes ago", "2 hours ago", "3 days ago".
+function agoText(ms) {
+  if (!ms) return '';
+  const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (s < 90) return 'just now';
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} minute${m === 1 ? '' : 's'} ago`;
+  const hr = Math.floor(m / 60);
+  if (hr < 24) return `${hr} hour${hr === 1 ? '' : 's'} ago`;
+  const d = Math.floor(hr / 24);
+  return `${d} day${d === 1 ? '' : 's'} ago`;
+}
+function stampText(ms) {
+  if (!ms) return '';
+  const d = new Date(ms);
+  return `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+}
+// ==================== PORTABLE INDEX FILE ====================
+// The browser's own storage is per-device: an index built on the office laptop is invisible to the
+// phone, and there is no way around that from a web page. So the index is made PORTABLE instead.
+// Build once on the laptop, click "Save index file", drop the file into the Drive folder — every
+// other device picks it up automatically on connect. Read-only Drive permission is enough.
+const INDEX_FILE_NAME = 'olisa-index.json';
+function currentIndexPayload() {
+  return {
+    kind: 'olisa-index',
+    version: PI_CACHE_VERSION,
+    builtAt: piIndexBuiltAt || Date.now(),
+    piCount: Object.keys(piIndex).length,
+    styleCount: styleIndex ? Object.keys(styleIndex).length : 0,
+    piIndex,
+    styleIndex: styleIndex || {}
+  };
+}
+function saveIndexFile() {
+  if (!Object.keys(piIndex).length && !styleIndex) { toast('Nothing to save yet — build the style index first.'); return; }
+  const blob = new Blob([JSON.stringify(currentIndexPayload())], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = INDEX_FILE_NAME; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+  notifyDownload(INDEX_FILE_NAME);
+  addBubble(`Saved <b>${INDEX_FILE_NAME}</b>. Put this file in your OLISA GROUP folder on Google Drive \u2014 your phone will load it automatically the next time it connects, so you never have to build the index there.`, 'askA');
+}
+// Adopt an index payload if it is genuinely newer than what this device already has.
+function adoptIndexPayload(data, sourceLabel) {
+  if (!data || data.kind !== 'olisa-index') return false;
+  if (data.version !== PI_CACHE_VERSION) { toast(`Index file is from an older version — rebuild on the device that made it.`); return false; }
+  const incoming = data.builtAt || 0;
+  if (piIndexBuiltAt && incoming <= piIndexBuiltAt) return false; // ours is same age or newer
+  const clean = {};
+  Object.entries(data.piIndex || {}).forEach(([k, v]) => {
+    const nk = normPiKey(k);
+    if (nk && v && v.rowCount > 0) clean[nk] = v;
+  });
+  piIndex = clean;
+  if (data.styleIndex && Object.keys(data.styleIndex).length) styleIndex = data.styleIndex;
+  piIndexBuiltAt = incoming;
+  piIndexRestoredAt = incoming;
+  piQtyMisses.clear();
+  idbSet('piIndex', { data: piIndex, builtAt: incoming, version: PI_CACHE_VERSION }).catch(() => {});
+  if (styleIndex) idbSet('styleIndex', { data: styleIndex, builtAt: incoming }).catch(() => {});
+  renderIndexStamp(); renderHealth();
+  notify('build', `Index loaded from ${sourceLabel}: ${Object.keys(clean).length} PI(s), built ${agoText(incoming)}.`);
+  return true;
+}
+// Look for the portable index in the connected folder's root (Drive or local) and adopt it.
+async function tryLoadIndexFromFolder(rootHandle) {
+  if (!rootHandle) return false;
   try {
-    const before = Object.keys(piIndex).length;
-    const remembered = await idbGet('driveRoot');
-    if (!savedRootHandle && remembered && remembered.id) {
-      await connectDrive();
-    }
-    if (!savedRootHandle) { toast('Connect a folder or Google Drive first \u2014 then Today can run.'); return; }
-    await new Promise(r => setTimeout(r, 400));
-    if (typeof buildIndexBtn !== 'undefined' && !buildIndexBtn.disabled) buildIndexBtn.click();
-    else notify('info', 'Today: folder connected; index build not available yet \u2014 load the Master File first.');
-    const watch = setInterval(() => {
-      if (typeof buildIndexBtn !== 'undefined' && !buildIndexBtn.disabled) {
-        clearInterval(watch);
-        const after = Object.keys(piIndex).length;
-        notify('build', `Today's check done \u2014 ${after} PI(s) indexed (${after - before >= 0 ? '+' + (after - before) : after - before} since last time).`);
-        renderHealth();
+    for await (const [name, handle] of rootHandle.entries()) {
+      if (handle.kind === 'file' && name.toLowerCase() === INDEX_FILE_NAME) {
+        const file = await getFileWithRetry(handle);
+        const text = await file.text();
+        return adoptIndexPayload(JSON.parse(text), 'the shared index file in your folder');
       }
-    }, 1500);
-  } finally { btn.disabled = false; }
-});
+    }
+  } catch (e) { /* no shared index, or unreadable — the device just builds its own */ }
+  return false;
+}
+document.getElementById('askSaveIndexBtn').addEventListener('click', saveIndexFile);
 // ==================== IN-APP FILE VIEWER (works on Android) ====================
 // window.open + iframe cannot show PDFs on Android Chrome. This modal renders PDFs page by page
 // with pdf.js, previews sheets and Word files inline, and offers Download + native Share
@@ -3688,47 +3776,98 @@ function editDistance(a, b) {
       dp[i][j] = Math.min(dp[i-1][j] + 1, dp[i][j-1] + 1, dp[i-1][j-1] + (a[i-1] === b[j-1] ? 0 : 1));
   return dp[a.length][b.length];
 }
+// Strip everything that voice, typing and file naming disagree about: spaces, dots, dashes.
+// "MH 2063 A6", "mh-2063-a6" and "MH2063A6" all reduce to the same comparable core.
+function styleCore(s) { return String(s).toUpperCase().replace(/[^A-Z0-9]/g, ''); }
 function digitsCore(s) { return String(s).replace(/[^0-9]/g, ''); }
-function fuzzyStyleCandidates(q, max) {
-  const known = [...knownStyleSet()];
-  const qd = digitsCore(q);
-  const scored = known.map(k => {
-    let d = editDistance(q, k);
-    if (qd && digitsCore(k) === qd) d = Math.min(d, 1); // same digits, different letters/dashes
-    return { k, d };
-  }).filter(x => x.d <= 2 && x.k !== String(q).toUpperCase());
-  scored.sort((a, b) => a.d - b.d || a.k.length - b.k.length);
-  return scored.slice(0, max || 4).map(x => x.k);
+// A real style has letters AND digits and is not a stray fragment. Junk values in the Master File
+// (a bare "33" or "12") must never be offered as a suggestion — they aren't styles.
+function looksLikeRealStyle(s) {
+  const c = styleCore(s);
+  return c.length >= 5 && /[A-Z]/.test(c) && /\d/.test(c);
+}
+// Rank real styles against a messy query. Voice loses digits and letters constantly, so several
+// independent signals are combined rather than trusting edit distance alone.
+function rankStyleCandidates(q, max) {
+  const qc = styleCore(q), qd = digitsCore(q);
+  if (!qc) return [];
+  const out = [];
+  for (const k of knownStyleSet()) {
+    if (!looksLikeRealStyle(k)) continue;
+    const kc = styleCore(k), kd = digitsCore(k);
+    let score = 0;
+    const dist = editDistance(qc, kc);
+    // Similarity as a RATIO, not raw distance: two wrong characters in an 8-character code is a
+    // near-miss, while two wrong in a 3-character code is a different code entirely. Raw distance
+    // treats them the same and made real matches (MH2063A6 -> M82063A5) fall just under threshold.
+    const sim = 1 - dist / Math.max(qc.length, kc.length);
+    score += sim * 45;
+    if (kc === qc) score += 100;                                // exact after normalising
+    if (kc.startsWith(qc) || qc.startsWith(kc)) score += 30;    // one is a prefix of the other
+    if (kc.includes(qc) || qc.includes(kc)) score += 22;        // contained either way
+    if (qd && kd === qd) score += 45;                           // same digits, letters misheard
+    if (qd && qd.length >= 4 && kd.includes(qd)) score += 30;   // the digit run is present
+    if (qd && kd.length >= 4 && qd.includes(kd)) score += 18;
+    const qLet = qc.replace(/\d/g, ''), kLet = kc.replace(/\d/g, '');
+    if (qLet && kLet && qLet === kLet) score += 18;             // same letters, digits misheard
+    if (score > 30) out.push({ k, score, dist });
+  }
+  out.sort((a, b) => b.score - a.score || a.dist - b.dist || a.k.length - b.k.length);
+  const seen = new Set(), picked = [];
+  for (const c of out) { if (seen.has(c.k)) continue; seen.add(c.k); picked.push(c.k); if (picked.length >= (max || 6)) break; }
+  return picked;
+}
+// Which PIs a style appears under — Master File first, then the PI folder index for ordered-but-
+// undelivered styles. This is what turns "here are similar styles" into "here are their PIs too".
+function pisForStyle(styleNorm) {
+  const set = new Set();
+  allRecords.forEach(r => { if (r.styleNorm === styleNorm) { const k = normPiKey(r.piRef); if (k) set.add(k); } });
+  if (styleIndex) {
+    const key = Object.keys(styleIndex).find(kk => kk.toUpperCase() === String(styleNorm).toUpperCase());
+    if (key) styleIndex[key].forEach(v => { const k = normPiKey(v); if (k) set.add(k); });
+  }
+  return [...set].sort((a, b) => Number(a) - Number(b));
 }
 function investigateStyle(code) {
   const findings = [];
   const norm = String(code).toUpperCase();
-  // In the PI folders (ordered) but not in the Master File (no delivery yet)?
+  const exactKey = [...knownStyleSet()].find(k => styleCore(k) === styleCore(norm));
+  // Same style, just written differently (spaces/dashes) — offer it as the real answer.
+  if (exactKey && exactKey !== norm) {
+    findings.push({ text: `\u2714 Same style written differently \u2014 the exact code is <b>${escHtml(exactKey)}</b>`, chips: [exactKey] });
+  }
+  // Ordered but never dispatched?
   if (styleIndex) {
-    const hit = Object.keys(styleIndex).find(k => k.toUpperCase() === norm);
-    if (hit) findings.push({ text: `\u2714 Style ${escHtml(code)} EXISTS in the PI folders (PI ${styleIndex[hit].map(escHtml).join(', ')}) but has no delivery in the Master File yet \u2014 it's ordered, not dispatched. The Undelivered Report will show it.`, chip: null });
+    const hit = Object.keys(styleIndex).find(k => styleCore(k) === styleCore(norm));
+    if (hit) findings.push({ text: `\u2714 <b>${escHtml(hit)}</b> exists in the PI folders (PI ${styleIndex[hit].map(escHtml).join(', ')}) but has no delivery in the Master File yet \u2014 ordered, not dispatched.`, chips: null });
   }
-  // Family exists?
-  const fam = styleFamily(norm);
-  const famMembers = [...knownStyleSet()].filter(k => styleFamily(k) === fam).slice(0, 5);
-  if (famMembers.length && !findings.length) {
-    findings.push({ text: `\u2714 The ${escHtml(fam)} family exists \u2014 known members: ${famMembers.map(escHtml).join(', ')}. The exact code ${escHtml(code)} just isn't among them.`, chips: famMembers.slice(0, 3) });
+  // Closest real styles, each shown with the PIs it belongs to.
+  const cands = rankStyleCandidates(norm, 6).filter(k => k !== exactKey);
+  if (cands.length) {
+    const lines = cands.map(k => {
+      const pis = pisForStyle(k);
+      return `<div style="margin-top:4px;"><button class="secondary det-chip" data-q="${escHtml(k)}" style="padding:5px 10px;font-size:12px;font-weight:700;">${escHtml(k)}</button>` +
+challan(pis) + `</div>`;
+    }).join('');
+    findings.push({ html: `\u2714 Closest real styles \u2014 tap a style to search it, or a PI to open that PI:${lines}` });
   }
-  // Typo candidates
-  const fuzz = fuzzyStyleCandidates(norm, 4);
-  if (fuzz.length) findings.push({ text: `\u2714 Closest real styles (possible typo):`, chips: fuzz });
-  // Is it secretly a PI number?
+  // A bare number that is really a PI.
   const pd = digitsCore(norm);
   if (pd && pd.length <= 5 && piExistsAnywhere(String(parseInt(pd, 10)))) {
-    findings.push({ text: `\u2714 ${escHtml(pd)} is a known PI number \u2014 did you mean the PI?`, chips: ['PI ' + parseInt(pd, 10)] });
+    findings.push({ text: `\u2714 <b>${escHtml(String(parseInt(pd, 10)))}</b> is also a known PI number.`, chips: ['PI ' + parseInt(pd, 10)] });
   }
-  if (!findings.length) findings.push({ text: `\u2716 No similar style, family, or PI matches ${escHtml(code)} anywhere \u2014 check the code with Olisa; it may be from an order that never reached us.`, chips: null });
+  if (!findings.length) findings.push({ text: `\u2716 No similar style, family or PI matches <b>${escHtml(code)}</b> \u2014 check the code with Olisa; it may be from an order that never reached us.`, chips: null });
   return findings;
+}
+// PI chips rendered beside a suggested style.
+function challan(pis) {
+  if (!pis.length) return ` <span class="sub-note">(no PI recorded)</span>`;
+  return ` <span class="sub-note">PI:</span> ` + pis.slice(0, 6).map(p => `<button class="secondary det-chip" data-q="PI ${escHtml(p)}" style="padding:3px 8px;font-size:11.5px;">${escHtml(p)}</button>`).join(' ');
 }
 function renderDetective(code) {
   let html = `<div style="font-weight:800;margin-bottom:4px;">\ud83d\udd0d Not found \u2014 here's what I checked for \u201c${escHtml(code)}\u201d:</div>`;
   investigateStyle(code).forEach(f => {
-    html += `<div style="margin-top:5px;font-size:12.5px;">${f.text}`;
+    html += `<div style="margin-top:6px;font-size:12.5px;">${f.html || f.text}`;
     if (f.chips && f.chips.length) html += `<div style="margin-top:5px;display:flex;flex-wrap:wrap;gap:6px;">` + f.chips.map(c => `<button class="secondary det-chip" data-q="${escHtml(c)}" style="padding:5px 10px;font-size:12px;">${escHtml(c)}</button>`).join('') + `</div>`;
     html += `</div>`;
   });
@@ -3739,19 +3878,6 @@ function renderDetective(code) {
 (function wireAskExtras() {
   const row = askInput && askInput.parentElement;
   if (!row) return;
-  const paste = document.createElement('button');
-  paste.className = 'secondary'; paste.id = 'askPasteBtn'; paste.title = 'Paste from clipboard and search';
-  paste.style.cssText = 'flex:0 0 auto;padding:9px 12px;';
-  paste.textContent = '\ud83d\udccb Paste';
-  paste.addEventListener('click', async () => {
-    try {
-      const t = await navigator.clipboard.readText();
-      if (!t || !t.trim()) { toast('Clipboard is empty.'); return; }
-      askInput.value = t.trim().slice(0, 300);
-      handleAsk();
-    } catch (e) { toast('Clipboard not available here \u2014 long-press the box and paste instead.'); }
-  });
-  row.insertBefore(paste, askInput.nextSibling);
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (SR) {
     const mic = document.createElement('button');
@@ -3772,29 +3898,64 @@ function renderDetective(code) {
       };
       rec.onend = () => {
         active = false; mic.textContent = '\ud83c\udfa4';
-        askInput.value = normalizeSpoken(finalTxt || askInput.value);
-        if (askInput.value.trim()) handleAsk();
+        const heard = (finalTxt || '').trim();
+        const code = normalizeSpoken(heard || askInput.value);
+        let use = code;
+        if (code && !/^PI\s/i.test(code)) {
+          const m = bestSpokenMatch(code);
+          if (m.pick && !m.exact) {
+            use = m.pick;
+            addBubble(`\ud83c\udfa4 Heard \u201c${escHtml(heard)}\u201d \u2192 searching <b>${escHtml(use)}</b> <span class="sub-note">(closest real style to \u201c${escHtml(code)}\u201d)</span>`, 'askA');
+          }
+        }
+        askInput.value = use;
+        if (use.trim()) handleAsk();
       };
       rec.onerror = () => { active = false; mic.textContent = '\ud83c\udfa4'; toast('Voice input didn\u2019t work \u2014 check the mic permission.'); };
       rec.start();
     });
-    row.insertBefore(mic, paste.nextSibling);
+    row.insertBefore(mic, askInput.nextSibling);
   }
 })();
-// Spoken text \u2192 code: "m eight two zero three six a seven hyphen one" \u2192 M82036A7-1
+// Spoken text -> code. Speech engines mangle these codes constantly: "M82035A1-3" comes back as
+// "m 8 2 0 3 5 a one dash three", "em eighty two thousand thirty five", or with the letters spelled
+// out. This normalises number words, letter names, separators and stray spacing, then hands the
+// result to the same matcher the Detective uses - so a near-miss still lands on the right style.
 function normalizeSpoken(t) {
-  const words = { zero:'0', one:'1', two:'2', three:'3', four:'4', five:'5', six:'6', seven:'7', eight:'8', nine:'9',
-    hyphen:'-', dash:'-', minus:'-', haiphen:'-', 'double':'' };
   let s = ' ' + String(t).toLowerCase() + ' ';
-  Object.entries(words).forEach(([w, d]) => { s = s.replace(new RegExp('\\b' + w + '\\b', 'g'), d); });
-  s = s.replace(/\bpi\b/g, 'PI ');
-  // collapse single spelled letters/digits: "m 8 2 0 3 6 a 7 - 1" -> "M82036A7-1"
-  const collapsed = s.replace(/\s+/g, ' ').trim();
-  if (/^(pi\s*)?[a-z0-9\- ]+$/i.test(collapsed) && collapsed.replace(/[^a-z0-9]/gi, '').length <= 20) {
-    const compact = collapsed.replace(/(?<=\b[a-z0-9])\s+(?=[a-z0-9]\b)/gi, '').replace(/\s*-\s*/g, '-');
-    if (/\d/.test(compact)) return compact.toUpperCase().replace(/^PI/, 'PI ');
-  }
-  return collapsed.toUpperCase();
+  const num = { zero:'0', oh:'0', o:'0', one:'1', won:'1', two:'2', to:'2', too:'2', three:'3', tree:'3',
+    four:'4', for:'4', fore:'4', five:'5', six:'6', sex:'6', seven:'7', eight:'8', ate:'8', nine:'9', niner:'9' };
+  const sep = { hyphen:'-', dash:'-', minus:'-', haiphen:'-', hyphon:'-', dashed:'-', slash:'-', point:'', dot:'' };
+  // Spoken letter names -> letters (only the ones people actually say for these codes).
+  const letters = { ay:'A', ae:'A', bee:'B', be:'B', see:'C', sea:'C', dee:'D', ee:'E', ef:'F', eff:'F',
+    gee:'G', aitch:'H', aych:'H', eye:'I', jay:'J', kay:'K', el:'L', ell:'L', em:'M', en:'N', enn:'N',
+    pee:'P', cue:'Q', queue:'Q', ar:'R', are:'R', ess:'S', es:'S', tee:'T', tea:'T', you:'U', yu:'U',
+    vee:'V', ex:'X', why:'Y', wye:'Y', zed:'Z', zee:'Z' };
+  Object.entries(num).forEach(([w, d]) => { s = s.replace(new RegExp('\\b' + w + '\\b', 'g'), ' ' + d + ' '); });
+  Object.entries(sep).forEach(([w, d]) => { s = s.replace(new RegExp('\\b' + w + '\\b', 'g'), d); });
+  Object.entries(letters).forEach(([w, d]) => { s = s.replace(new RegExp('\\b' + w + '\\b', 'g'), ' ' + d + ' '); });
+  // Drop filler words that people naturally prefix.
+  s = s.replace(/\b(style|number|no|code|search|find|show|me|the|for|please)\b/g, ' ');
+  // "PI" survives as an explicit marker.
+  const isPi = /\bp\s*i\b|\bpi\b/i.test(s);
+  s = s.replace(/\bp\s*i\b/gi, ' ').replace(/\bpi\b/gi, ' ');
+  // Collapse everything to a bare code: strip spaces between alphanumerics, keep hyphens.
+  let code = s.replace(/\s+/g, ' ').trim().replace(/\s*-\s*/g, '-').replace(/\s+/g, '');
+  code = code.toUpperCase().replace(/[^A-Z0-9-]/g, '');
+  if (!code) return String(t).trim().toUpperCase();
+  if (isPi && /^\d+$/.test(code)) return 'PI ' + parseInt(code, 10);
+  return code;
+}
+// Voice results are noisy by nature, so a spoken query that does not hit exactly is snapped to the
+// best real style when the match is strong and unambiguous; otherwise the Detective takes over and
+// offers choices. Never a silent guess: the bubble always says what it heard and what it used.
+function bestSpokenMatch(code) {
+  const known = knownStyleSet();
+  const exact = [...known].find(k => styleCore(k) === styleCore(code));
+  if (exact) return { pick: exact, exact: true };
+  const cands = rankStyleCandidates(code, 2);
+  if (cands.length === 1) return { pick: cands[0], exact: false };
+  return { pick: null, exact: false };
 }
 // ================= Direct PI lookup ("138", "PI-138", "pi 138", "pi138") =================
 // Typing a PI number in the Ask box shows that PI's full picture: the invoice lines with per-line
