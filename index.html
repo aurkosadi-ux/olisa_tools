@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0EA5E9">
+<meta name="theme-color" content="#1B3FA0">
 <link rel="manifest" href="manifest.json">
-<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <title>Olisa Reporting Tools</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -445,6 +445,23 @@
   .askA .previewbox { margin-top: 8px; }
   .askA .summary-line { font-weight: 700; color: var(--ink); margin-bottom: 4px; }
   .sub-note { font-weight: 400; color: var(--sub); font-size: 12px; }
+  .healthbar { display:flex; flex-wrap:wrap; gap:8px 14px; align-items:center; margin:8px 0 2px; font-size:12px; color:var(--sub); }
+  .healthbar .hdot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:5px; vertical-align:middle; }
+  .hgreen{background:#22c55e} .hyellow{background:#f59e0b} .hred{background:#E14D4D} .hgrey{background:#b6c2d4}
+  .bellwrap { position:fixed; right:14px; top:12px; z-index:9000; }
+  .bellbtn { position:relative; border:1px solid var(--line); background:#fff; border-radius:50%; width:40px; height:40px; cursor:pointer; box-shadow:var(--card-shadow); font-size:17px; }
+  .bellbadge { position:absolute; top:-4px; right:-4px; background:var(--bad); color:#fff; border-radius:9px; font-size:10px; font-weight:800; padding:1px 5px; }
+  .bellpanel { position:absolute; right:0; top:46px; width:290px; max-height:340px; overflow:auto; background:#fff; border:1px solid var(--line); border-radius:12px; box-shadow:var(--card-shadow); padding:8px; display:none; }
+  .bellpanel.open { display:block; }
+  .bellitem { padding:7px 8px; border-bottom:1px solid var(--line); font-size:12px; }
+  .bellitem:last-child { border-bottom:none; }
+  .bellitem .t { color:var(--sub); font-size:10.5px; }
+  .toast { position:fixed; left:50%; transform:translateX(-50%); bottom:70px; background:#0F2540; color:#fff; padding:10px 16px; border-radius:10px; font-size:13px; z-index:9500; box-shadow:0 8px 30px rgba(0,0,0,.25); max-width:88vw; }
+  .pdfmodal { position:fixed; inset:0; background:rgba(15,37,64,.55); z-index:9400; display:flex; flex-direction:column; }
+  .pdfmodal .bar { background:#fff; padding:10px 12px; display:flex; gap:8px; align-items:center; }
+  .pdfmodal .bar b { flex:1; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .pdfmodal .pages { flex:1; overflow:auto; text-align:center; padding:10px; }
+  .pdfmodal canvas { max-width:100%; background:#fff; margin-bottom:10px; box-shadow:0 2px 10px rgba(0,0,0,.2); border-radius:4px; }
   .pistats { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 6px; }
   .pistat { border: 1px solid var(--line); border-radius: 9px; padding: 6px 11px; background: #FBFDFF; min-width: 96px; }
   .pistat span { display: block; font-size: 10.5px; color: var(--sub); text-transform: uppercase; letter-spacing: .3px; }
@@ -744,6 +761,8 @@
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span id="askFolderBtnText">Connect a folder (Chrome/Edge only)</span>
       </button>
+      <div class="sub-note" style="flex-basis:100%;">Reconnects to Drive automatically when you reopen the app, if your browser still has an active Google session. Occasionally (e.g. after a long time away, or if Google's session expired) you may need to tap once to sign in again — that's Google's session rule, not something the tool can skip.</div>
+      <div class="healthbar" id="healthBar" style="flex-basis:100%;"></div></div>
       <button id="askDriveBtn" class="secondary" style="flex:1;">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3h8l6 10-4 7H6l-4-7L8 3z" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span id="askDriveBtnText">Connect Google Drive</span>
@@ -752,6 +771,7 @@
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4v5h5M20 20v-5h-5M4 9a8 8 0 0114-4.5M20 15a8 8 0 01-14 4.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
         Change folder
       </button>
+      <button id="askTodayBtn" class="secondary" style="flex:0 0 auto;">☀️ Start Today's Work</button>
       <button id="askBuildIndexBtn" class="secondary hidden" style="flex:0 0 auto;">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h7" stroke-linecap="round"/></svg>
         Build style index
@@ -1387,6 +1407,7 @@ async function downloadXlsx() {
   const _objUrl = URL.createObjectURL(blob);
   a.href = _objUrl;
   a.download = `Olisa_PO_Summary_${(deliveryDateInput.value || 'draft').replace(/[^\w]+/g,'_')}.xlsx`;
+  if (typeof notifyDownload === 'function') notifyDownload(a.download);
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -1723,6 +1744,7 @@ async function downloadXlsx() {
   const _objUrl = URL.createObjectURL(blob);
   a.href = _objUrl;
   a.download = `Undelivered_Report_${dateSlug}.xlsx`;
+  if (typeof notifyDownload === 'function') notifyDownload(a.download);
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -1736,6 +1758,11 @@ downloadBtn.addEventListener('click', downloadXlsx);
 
 (function() { // Ask — style lookup, PI folder linking over a connected Olisa Group folder
 const loadStatus = document.getElementById('askLoadStatus');
+// Drive-mode state, declared up top so early UI (health strip) can read it before the drive
+// module's code further down runs — a TDZ crash here took the whole page down once.
+let driveToken = null;
+let driveTokenClient = null;
+const driveListCache = new Map(); // folderId -> [{id,name,mimeType,size,modifiedTime}]
 const askInput = document.getElementById('askInput');
 const askBtn = document.getElementById('askBtn');
 const askClearBtn = document.getElementById('askClearBtn');
@@ -1762,7 +1789,7 @@ let piIndexRestoredAt = null;
     if (piIndexRestoredAt && Object.keys(clean).length) {
       const box = document.getElementById('askPiDiag');
       if (box) {
-        box.innerHTML = `<div class="sub-note">PI quantities restored from the index built on <b>${new Date(piIndexRestoredAt).toLocaleString()}</b> (${Object.keys(clean).length} PI(s)). If any invoice changed since, click &ldquo;Build style index&rdquo; to refresh.</div>`;
+        box.innerHTML = `<div class="sub-note">PI quantities restored from the index built on <b>${new Date(piIndexRestoredAt).toLocaleString('en-GB')}</b> (${Object.keys(clean).length} PI(s)). If any invoice changed since, click &ldquo;Build style index&rdquo; to refresh.</div>`;
         box.classList.remove('hidden');
       }
     }
@@ -2168,10 +2195,10 @@ async function buildStyleIndex() {
   // Also read each PI's Proforma-Invoice PDF to capture PI Qty per style.
   progressText.textContent = `Style index ready. Now reading PI quantities from invoice PDFs...`;
   progressBar.style.width = '0%';
-  const piResult = await buildPiQtyIndex(piFolders, (d, total, wd) => {
+  const piResult = await buildPiQtyIndex(piFolders, (d, total, wd, eta) => {
     const pct = Math.round((d / total) * 100);
     progressBar.style.width = pct + '%';
-    progressText.textContent = `Reading PI quantities: ${d} / ${total} folder(s) (${wd} with invoice data)...`;
+    progressText.textContent = `Reading PI quantities: ${d} / ${total} folder(s) (${wd} with invoice data)${eta || '...'}`;
   });
 
   // Second chance: the invoice may not be filed inside the PI's work-order folder at all. Search
@@ -2246,42 +2273,166 @@ function renderPiIndexDiagnostics(totalFolders, withPi, buckets, sweep) {
 buildIndexBtn.addEventListener('click', buildStyleIndex);
 
 // --- generic file preview (pdf / xlsx / docx) ---
-async function openFilePreview(fileHandle) {
-  const file = await fileHandle.getFile();
-  const ext = file.name.toLowerCase().split('.').pop();
-  const w = window.open('', '_blank');
-  if (!w) { alert('Popup blocked — please allow popups for this page and try again.'); return; }
-  const buf = await file.arrayBuffer();
-  const blobUrl = URL.createObjectURL(new Blob([buf]));
-  w.addEventListener('pagehide', () => URL.revokeObjectURL(blobUrl)); // free memory when the preview closes
-  const bar = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;font-family:Arial,sans-serif;">
-    <b>${file.name}</b>
-    <a href="${blobUrl}" download="${file.name}" style="background:#2f6feb;color:#fff;border:none;border-radius:8px;padding:9px 16px;font-weight:700;text-decoration:none;">Download</a>
-  </div>`;
-  let body = bar;
-  if (ext === 'pdf') {
-    body += `<iframe src="${blobUrl}" style="width:100%;height:88vh;border:none;border-radius:8px;"></iframe>`;
-  } else if (ext === 'xlsx' || ext === 'xls') {
-    const wb = XLSX.read(buf, { type: 'array' });
-    wb.SheetNames.forEach(sn => {
-      body += `<h3 style="font-family:Arial,sans-serif;">${sn}</h3>` + XLSX.utils.sheet_to_html(wb.Sheets[sn]);
-    });
-  } else if (ext === 'docx' && window.mammoth) {
-    try {
-      const result = await mammoth.convertToHtml({ arrayBuffer: buf });
-      body += `<div style="background:#fff;padding:20px;border-radius:8px;max-width:800px;font-family:Arial,sans-serif;">${result.value}</div>`;
-    } catch (e) {
-      body += `<p style="font-family:Arial,sans-serif;">Couldn't render a preview of this Word file. Use the download button above.</p>`;
-    }
-  } else {
-    body += `<p style="font-family:Arial,sans-serif;">No preview available for this file type — use the download button above.</p>`;
-  }
-  w.document.write(`<!DOCTYPE html><html><head><title>${file.name}</title></head><body style="margin:16px;background:#f4f6fb;">${body}</body></html>`);
-  w.document.close();
+// ==================== NOTIFICATIONS, HEALTH, TODAY ====================
+// A small in-app event log with a bell. OS-level push isn't available to web apps for downloads,
+// so the honest version is: an instant toast + a bell history you can reopen any time.
+const bellLog = [];
+let bellUnread = 0;
+function toast(msg, ms) {
+  const t = document.createElement('div');
+  t.className = 'toast'; t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), ms || 3800);
 }
-
-const KNOWN_DOC_EXT = /\.(pdf|docx?|xlsx?|jpe?g|png)$/i;
-
+function notify(kind, msg) {
+  bellLog.unshift({ kind, msg, at: new Date() });
+  if (bellLog.length > 30) bellLog.pop();
+  bellUnread++;
+  renderBell();
+  toast(msg);
+}
+function renderBell() {
+  let wrap = document.getElementById('bellWrap');
+  if (!wrap) {
+    wrap = document.createElement('div');
+    wrap.id = 'bellWrap'; wrap.className = 'bellwrap';
+    wrap.innerHTML = `<button class="bellbtn" id="bellBtn" title="Notifications">\ud83d\udd14<span class="bellbadge hidden" id="bellBadge"></span></button><div class="bellpanel" id="bellPanel"></div>`;
+    document.body.appendChild(wrap);
+    document.getElementById('bellBtn').addEventListener('click', () => {
+      const p = document.getElementById('bellPanel');
+      p.classList.toggle('open');
+      if (p.classList.contains('open')) { bellUnread = 0; renderBell(); }
+    });
+  }
+  const badge = document.getElementById('bellBadge');
+  if (bellUnread > 0) { badge.textContent = bellUnread; badge.classList.remove('hidden'); }
+  else badge.classList.add('hidden');
+  const icons = { download: '\u2b07', build: '\ud83d\udcda', drive: '\u2601', error: '\u26a0', info: '\u2139' };
+  document.getElementById('bellPanel').innerHTML = bellLog.length
+    ? bellLog.map(e => `<div class="bellitem">${icons[e.kind] || ''} ${escHtml(e.msg)}<div class="t">${e.at.toLocaleString('en-GB')}</div></div>`).join('')
+    : '<div class="bellitem">Nothing yet.</div>';
+}
+// Announce every generated-file download (called from each download site).
+function notifyDownload(filename) {
+  notify('download', `Downloaded: ${filename}. Check your phone's Downloads / browser downloads.`);
+}
+// ---------- Health strip ----------
+function renderHealth() {
+  const el = document.getElementById('healthBar');
+  if (!el) return;
+  const online = navigator.onLine !== false;
+  const driveOn = !!(savedRootHandle && savedRootHandle.isDrive) || !!driveToken;
+  const localOn = !!(savedRootHandle && !savedRootHandle.isDrive);
+  const rows = allRecords.length;
+  const piCount = Object.keys(piIndex).length;
+  const ageMs = piIndexRestoredAt ? Date.now() - piIndexRestoredAt : null;
+  const days = ageMs === null ? null : Math.floor(ageMs / 86400000);
+  const idxDot = piCount === 0 ? 'hgrey' : days === null || days < 1 ? 'hgreen' : days <= 3 ? 'hgreen' : days <= 7 ? 'hyellow' : 'hred';
+  const idxTxt = piCount === 0 ? 'Index: not built' : `Index: ${piCount} PI(s)` + (days === null ? ' (fresh this session)' : days < 1 ? ' (built today)' : ` (${days} day(s) old${days > 7 ? ' \u2014 rebuild recommended' : ''})`);
+  el.innerHTML = [
+    `<span><span class="hdot ${online ? 'hgreen' : 'hred'}"></span>${online ? 'Online' : 'Offline \u2014 waiting for connection'}</span>`,
+    `<span><span class="hdot ${driveOn ? 'hgreen' : localOn ? 'hgreen' : 'hgrey'}"></span>${driveOn ? 'Drive connected' : localOn ? 'Local folder connected' : 'No folder connected'}</span>`,
+    `<span><span class="hdot ${rows ? 'hgreen' : 'hgrey'}"></span>${rows ? `Master: ${rows} rows` : 'Master File: not loaded'}</span>`,
+    `<span><span class="hdot ${idxDot}"></span>${idxTxt}</span>`
+  ].join('');
+}
+setInterval(renderHealth, 5000);
+window.addEventListener('online', () => { renderHealth(); toast('Back online.'); });
+window.addEventListener('offline', () => { renderHealth(); toast('Offline \u2014 Drive features paused until connection returns.'); });
+setTimeout(renderHealth, 800);
+// ---------- Start Today's Work ----------
+// One tap: reconnect the remembered Drive folder, refresh the index incrementally (metadata
+// fingerprints make unchanged PIs free), then say what's new. Local mode: just rebuilds.
+document.getElementById('askTodayBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('askTodayBtn');
+  btn.disabled = true;
+  try {
+    const before = Object.keys(piIndex).length;
+    const remembered = await idbGet('driveRoot');
+    if (!savedRootHandle && remembered && remembered.id) {
+      await connectDrive();
+    }
+    if (!savedRootHandle) { toast('Connect a folder or Google Drive first \u2014 then Today can run.'); return; }
+    await new Promise(r => setTimeout(r, 400));
+    if (typeof buildIndexBtn !== 'undefined' && !buildIndexBtn.disabled) buildIndexBtn.click();
+    else notify('info', 'Today: folder connected; index build not available yet \u2014 load the Master File first.');
+    const watch = setInterval(() => {
+      if (typeof buildIndexBtn !== 'undefined' && !buildIndexBtn.disabled) {
+        clearInterval(watch);
+        const after = Object.keys(piIndex).length;
+        notify('build', `Today's check done \u2014 ${after} PI(s) indexed (${after - before >= 0 ? '+' + (after - before) : after - before} since last time).`);
+        renderHealth();
+      }
+    }, 1500);
+  } finally { btn.disabled = false; }
+});
+// ==================== IN-APP FILE VIEWER (works on Android) ====================
+// window.open + iframe cannot show PDFs on Android Chrome. This modal renders PDFs page by page
+// with pdf.js, previews sheets and Word files inline, and offers Download + native Share
+// (WhatsApp / Messenger / email via the phone's own share sheet, where supported).
+async function openFilePreview(fileHandle) {
+  let file;
+  try {
+    file = await getFileWithRetry(fileHandle, 4);
+  } catch (e) {
+    addBubble(`Couldn't open <b>${escHtml(fileHandle.name || 'this file')}</b> \u2014 ${escHtml(e.name || 'Error')}: ${escHtml(e.message)}.<br><span class="sub-note">If this file lives in OneDrive, open its folder once in Explorer (or set \u201cAlways keep on this device\u201d) and try again.</span>`, 'askA');
+    return;
+  }
+  const buf = await file.arrayBuffer();
+  const ext = (file.name.toLowerCase().split('.').pop() || '');
+  const head4 = String.fromCharCode(...new Uint8Array(buf.slice(0, 4)));
+  const isPdf = ext === 'pdf' || head4.startsWith('%PDF');
+  const modal = document.createElement('div');
+  modal.className = 'pdfmodal';
+  modal.innerHTML = `<div class="bar"><b>${escHtml(file.name)}</b>
+      <button class="secondary" id="pvShare" style="padding:7px 12px;font-size:12.5px;">Share</button>
+      <button class="secondary" id="pvDl" style="padding:7px 12px;font-size:12.5px;">Download</button>
+      <button class="secondary" id="pvX" style="padding:7px 12px;font-size:12.5px;">\u2715 Close</button>
+    </div><div class="pages" id="pvPages">Loading\u2026</div>`;
+  document.body.appendChild(modal);
+  modal.querySelector('#pvX').onclick = () => modal.remove();
+  modal.querySelector('#pvDl').onclick = () => {
+    const url = URL.createObjectURL(new Blob([buf]));
+    const a = document.createElement('a');
+    a.href = url; a.download = file.name; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    notifyDownload(file.name);
+  };
+  const shareBtn = modal.querySelector('#pvShare');
+  const shareFile = new File([buf], file.name, { type: isPdf ? 'application/pdf' : 'application/octet-stream' });
+  if (navigator.canShare && navigator.canShare({ files: [shareFile] })) {
+    shareBtn.onclick = () => navigator.share({ files: [shareFile], title: file.name }).catch(() => {});
+  } else shareBtn.style.display = 'none';
+  const pages = modal.querySelector('#pvPages');
+  try {
+    if (isPdf) {
+      const pdf = await pdfjsLib.getDocument({ data: buf.slice(0) }).promise;
+      pages.innerHTML = '';
+      for (let n = 1; n <= pdf.numPages; n++) {
+        const page = await pdf.getPage(n);
+        const scale = Math.min(1.6, (Math.min(window.innerWidth, 900) - 40) / page.getViewport({ scale: 1 }).width);
+        const vp = page.getViewport({ scale });
+        const canvas = document.createElement('canvas');
+        canvas.width = vp.width; canvas.height = vp.height;
+        pages.appendChild(canvas);
+        await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+        page.cleanup();
+      }
+      pdf.destroy();
+    } else if (ext === 'xlsx' || ext === 'xls' || head4.startsWith('PK')) {
+      const wb = XLSX.read(buf, { type: 'array' });
+      pages.innerHTML = wb.SheetNames.map(sn => `<h3 style="text-align:left;">${escHtml(sn)}</h3>` + XLSX.utils.sheet_to_html(wb.Sheets[sn])).join('');
+      pages.style.background = '#fff'; pages.style.textAlign = 'left';
+    } else if (ext === 'docx' && window.mammoth) {
+      const result = await mammoth.convertToHtml({ arrayBuffer: buf });
+      pages.innerHTML = `<div style="background:#fff;padding:18px;border-radius:8px;max-width:820px;margin:0 auto;text-align:left;">${result.value}</div>`;
+    } else {
+      pages.innerHTML = `<div style="color:#fff;padding:20px;">No preview for this file type \u2014 use Download.</div>`;
+    }
+  } catch (e) {
+    pages.innerHTML = `<div style="color:#fff;padding:20px;">Preview failed (${escHtml(e.message)}) \u2014 use Download.</div>`;
+  }
+}
 async function openPiFolderFiles(piRef) {
   if (!piRootHandle) {
     addBubble(`Connect the Olisa Group folder first (it needs to find your Work Orders folder).`, 'askA');
@@ -2293,9 +2444,6 @@ async function openPiFolderFiles(piRef) {
     return;
   }
   const folder = found.handle;
-  // Every file, including one level of subfolders. No extension filter: hiding files behind a
-  // "recognized document type" whitelist meant a folder full of real files could be reported as
-  // having none. Anything unopenable is still listed so what is actually there is visible.
   async function listOnce(fh) {
     const files = [], subdirs = [];
     for await (const [name, handle] of fh.entries()) {
@@ -2314,9 +2462,6 @@ async function openPiFolderFiles(piRef) {
   let files = [], subdirs = [];
   try {
     ({ files, subdirs } = await listOnce(folder));
-    // OneDrive placeholder listings resolve to real names once the sync engine wakes up — reading
-    // is the nudge. If most of what came back is placeholder garbage, poke the first few files,
-    // wait a moment, and list again with a FRESH folder handle before showing anything.
     const junk = files.filter(f => isPlaceholderName(f.name)).length;
     if (files.length && junk >= Math.max(1, files.length - 1)) {
       for (const f of files.slice(0, 4)) { try { await f.handle.getFile(); } catch (e) { /* hydration nudge */ } }
@@ -2325,7 +2470,7 @@ async function openPiFolderFiles(piRef) {
       if (fresh) { const again = await listOnce(fresh.handle); if (again.files.filter(f => isPlaceholderName(f.name)).length < junk) ({ files, subdirs } = again); }
     }
   } catch (e) {
-    addBubble(`PI ${escHtml(String(piRef))}'s folder (<code>${escHtml(found.path)}</code>) could not be listed: ${escHtml(e.name || 'Error')} — ${escHtml(e.message)}`, 'askA');
+    addBubble(`PI ${escHtml(String(piRef))}'s folder (<code>${escHtml(found.path)}</code>) could not be listed: ${escHtml(e.name || 'Error')} \u2014 ${escHtml(e.message)}`, 'askA');
     return;
   }
   if (!files.length) {
@@ -2334,15 +2479,15 @@ async function openPiFolderFiles(piRef) {
   }
   const rank = f => (/PO.?SHEET|SUMMARY/i.test(f.name) ? 0 : /PROFORMA|INVOICE/i.test(f.name) ? 1 : /WORK.?ORDER/i.test(f.name) ? 2 : KNOWN_DOC_EXT.test(f.name) ? 3 : 4);
   files.sort((a, b) => rank(a) - rank(b) || a.path.localeCompare(b.path));
-  let html = `<div class="summary-line">PI ${escHtml(String(piRef))} — ${files.length} file(s) in <code>${escHtml(found.path)}</code></div>`;
+  let html = `<div class="summary-line">PI ${escHtml(String(piRef))} \u2014 ${files.length} file(s) in <code>${escHtml(found.path)}</code></div>`;
   const placeholderCount = files.filter(f => isPlaceholderName(f.name)).length;
   if (placeholderCount) {
-    html += `<div class="sub-note" style="color:var(--bad);font-weight:600;margin-bottom:4px;">${placeholderCount} file(s) below are OneDrive cloud placeholders — they exist in the cloud but are not downloaded to this PC, so their real names and contents can't be read yet. Open this folder once in Explorer, or right-click it and choose “Always keep on this device”, then click the PI number again.</div>`;
+    html += `<div class="sub-note" style="color:var(--bad);font-weight:600;margin-bottom:4px;">${placeholderCount} file(s) below have scrambled placeholder names. On this device their real contents may still open \u2014 tap one to preview; the tool identifies PDFs by content, not name.</div>`;
   }
   html += files.map((f, i) => {
     const known = KNOWN_DOC_EXT.test(f.name);
     const ph = isPlaceholderName(f.name);
-    const note = ph ? ' <span class="sub-note" style="color:var(--bad);">(cloud placeholder — not downloaded yet)</span>' : (known ? '' : ' <span class="sub-note">(preview may not work for this type)</span>');
+    const note = ph ? ' <span class="sub-note" style="color:var(--bad);">(scrambled name \u2014 preview reads by content)</span>' : (known ? '' : ' <span class="sub-note">(preview may not work for this type)</span>');
     return `<div style="margin-top:6px;"><a href="#" class="pi-file-link" data-i="${i}" style="color:${ph ? 'var(--bad)' : known ? 'var(--accent-dark)' : 'var(--sub)'};font-weight:600;text-decoration:none;">&#128196; ${escHtml(f.path)}</a>${note}</div>`;
   }).join('');
   const bubble = addBubble(html, 'askA');
@@ -2850,9 +2995,16 @@ async function parsePiFolderPdf(piRef, folderHandle) {
   for (const cand of candidates) {
     if (piPdfScore(cand.name, ref) <= -100 && candidates.length > 1) { skippedChallans++; continue; }
     tried++;
-    let lines, srcFp = null;
+    // Metadata-first incremental check: Drive listings already carry size+mtime, so an unchanged
+    // file is recognised WITHOUT downloading a byte. This is the 45-minute-rebuild fix, part one.
+    const cached0 = piIndex[ref];
+      if (cached0 && cached0.rowCount > 0 && cand.handle.meta) {
+        const metaFp0 = `${cand.path}|${cand.handle.meta.size}|${cand.handle.meta.modifiedTime ? Date.parse(cand.handle.meta.modifiedTime) : 0}`;
+        if (cached0.srcFp === metaFp0) return { ok: true, ref, ...cached0, fileName: cached0.fileName };
+      }
+      let lines, srcFp = null;
     try {
-      const file = await cand.handle.getFile();
+      const file = await getFileWithRetry(cand.handle);
       srcFp = `${cand.path}|${file.size}|${file.lastModified}`;
       // Incremental fast path: this exact file (same path, size, mtime) already produced the cached
       // entry, so re-parsing it can only give the same answer. At 10,000 folders this turns a full
@@ -2878,7 +3030,7 @@ async function parsePiFolderPdf(piRef, folderHandle) {
   for (const sh of acc.sheets) {
     if (!/proforma|invoice|700768|\bPI\b/i.test(sh.name)) continue;
     try {
-      const file = await sh.handle.getFile();
+      const file = await getFileWithRetry(sh.handle);
       const parsed = parsePiLines(sheetToPiLines(await file.arrayBuffer()));
       if (parsed.rowCount > 0) {
         piIndex[ref] = { ...parsed, fileName: sh.path, builtAt: Date.now() };
@@ -2897,6 +3049,11 @@ async function parsePiFolderPdf(piRef, folderHandle) {
       .sort((a, b) => (b.size || 0) - (a.size || 0))
       .slice(0, 6);
     for (const cand of sniffables) {
+      const cachedS = piIndex[ref];
+      if (cachedS && cachedS.rowCount > 0 && cand.handle.meta) {
+        const metaFpS = `${cand.path}|${cand.handle.meta.size}|${cand.handle.meta.modifiedTime ? Date.parse(cand.handle.meta.modifiedTime) : 0}`;
+        if (cachedS.srcFp === metaFpS) return { ok: true, ref, ...cachedS };
+      }
       let file, buf;
       try {
         file = await getFileWithRetry(cand.handle);
@@ -2980,6 +3137,28 @@ function looksLikeInvoiceFile(name) {
 // paints. Full Web-Worker offloading was considered and rejected: it means restructuring the whole
 // single-file tool around message passing for a dataset (155 PIs, ~2.6k rows) that doesn't need it.
 const uiTick = () => new Promise(r => setTimeout(r, 0));
+// Run jobs with limited parallelism. Cloud reads are latency-bound: five invoices in flight finish
+// ~5x sooner than one-by-one, without tripping Drive's rate limits (backoff still guards bursts).
+async function runPool(items, limit, worker) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function lane() {
+    while (next < items.length) {
+      const i = next++;
+      try { results[i] = await worker(items[i], i); }
+      catch (e) { results[i] = { __err: e }; }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
+  return results;
+}
+function etaText(startMs, done, total) {
+  if (!done) return '';
+  const rate = (Date.now() - startMs) / done;
+  const remainMs = Math.max(0, (total - done) * rate);
+  const m = Math.floor(remainMs / 60000), s = Math.round((remainMs % 60000) / 1000);
+  return ` \u2014 about ${m ? m + 'm ' : ''}${s}s remaining`;
+}
 // Every PDF under the connected root, with its relative path.
 async function sweepRootForPdfs(rootHandle, maxDepth, onProgress) {
   const out = [];
@@ -3005,7 +3184,12 @@ async function sweepRootForPdfs(rootHandle, maxDepth, onProgress) {
 }
 async function tryInvoiceCandidate(ref, cand) {
   try {
-    const file = await cand.handle.getFile();
+    const cachedT = piIndex[ref];
+      if (cachedT && cachedT.rowCount > 0 && cand.handle.meta) {
+        const metaFpT = `${cand.path}|${cand.handle.meta.size}|${cand.handle.meta.modifiedTime ? Date.parse(cand.handle.meta.modifiedTime) : 0}`;
+        if (cachedT.srcFp === metaFpT) return true;
+      }
+      const file = await getFileWithRetry(cand.handle);
     const srcFp = `${cand.path}|${file.size}|${file.lastModified}`;
     const cached = piIndex[ref];
     if (cached && cached.srcFp === srcFp && cached.rowCount > 0) return true; // unchanged file
@@ -3039,18 +3223,19 @@ async function fillPiQtyFromRoot(rootHandle, missingRefs, onProgress) {
   });
 
   const need = new Set(missingRefs);
-  // Pass A - match on the file name. Targeted, so only invoices we actually need get opened.
-  let done = 0;
-  for (const ref of missingRefs) {
+  // Pass A - match on the file name. Targeted, so only invoices we actually need get opened,
+  // four at a time with a live countdown.
+  let doneA = 0; const startA = Date.now();
+  await runPool(missingRefs, 4, async (ref) => {
     for (const cand of (byRef.get(ref) || [])) {
       if (await tryInvoiceCandidate(ref, cand)) {
         res.filled.push(ref); res.foundAt[ref] = cand.path; need.delete(ref);
         break;
       }
     }
-    done++;
-    if (onProgress && done % 5 === 0) onProgress(`Reading invoices found elsewhere: ${res.filled.length} of ${missingRefs.length} recovered\u2026`);
-  }
+    doneA++;
+    if (onProgress && doneA % 3 === 0) onProgress(`Reading invoices found elsewhere: ${res.filled.length} of ${missingRefs.length} recovered${etaText(startA, doneA, missingRefs.length)}`);
+  });
   // Pass B - open PDFs and read the PI NO off the page. This is the authoritative match: it works
   // no matter how the file is named. Invoice-looking files with no number in the name go first,
   // then any other non-challan PDF, under a shared budget so a huge tree can't stall the build.
@@ -3067,7 +3252,7 @@ async function fillPiQtyFromRoot(rootHandle, missingRefs, onProgress) {
       if (budget-- <= 0) { res.budgetExhausted = queue.length; break; }
       if (res.opened % 4 === 3) await uiTick();
       try {
-        const file = await cand.handle.getFile();
+        const file = await getFileWithRetry(cand.handle);
         const lines = await extractPdfLines(file);
         const ref = piRefFromInvoiceText(lines);
         if (ref && need.has(ref)) {
@@ -3146,7 +3331,7 @@ async function ensurePiQty(piRefRaw, onProgress, opts) {
       for (const cand of rest) {
         if (budget-- <= 0) break;
         try {
-          const file = await cand.handle.getFile();
+          const file = await getFileWithRetry(cand.handle);
           const lines = await extractPdfLines(file);
           if (piRefFromInvoiceText(lines) !== key) continue;
           const parsed = parsePiLines(lines);
@@ -3179,21 +3364,22 @@ async function ensurePiQty(piRefRaw, onProgress, opts) {
 // its chance, so a PI whose invoice lives outside its work-order folder isn't reported as missing.
 async function buildPiQtyIndex(piFolders, onProgress) {
   let done = 0, withData = 0;
-  const entries = [];
-  for (const { name, handle } of piFolders) {
+  const startMs = Date.now();
+  const entries = await runPool(piFolders, 5, async ({ name, handle }) => {
     const piRef = normPiKey(parsePiNumber(name)) || parsePiNumber(name);
+    let entry;
     try {
       const res = await parsePiFolderPdf(piRef, handle);
-      if (res.ok) { withData++; entries.push({ name, ref: piRef, ok: true }); }
-      else entries.push({ name, ref: piRef, ok: false, reason: res.reason, detail: res.detail || '' });
+      if (res.ok) { withData++; entry = { name, ref: piRef, ok: true }; }
+      else entry = { name, ref: piRef, ok: false, reason: res.reason, detail: res.detail || '' };
     } catch (e) {
-      entries.push({ name, ref: piRef, ok: false, reason: 'error', detail: e.message });
+      entry = { name, ref: piRef, ok: false, reason: 'error', detail: e.message };
     }
     done++;
-    if (onProgress) onProgress(done, piFolders.length, withData);
-    if (done % 3 === 0) await uiTick();
-  }
-  return { withData, entries };
+    if (onProgress) onProgress(done, piFolders.length, withData, etaText(startMs, done, piFolders.length));
+    return entry;
+  });
+  return { withData, entries: entries.map(e => e && e.__err ? { name: '?', ok: false, reason: 'error', detail: String(e.__err.message || e.__err) } : e) };
 }
 function bucketPiEntries(entries) {
   const buckets = { ok: [], 'no-pdf': [], 'only-challan-pdfs': [], 'cloud-placeholders': [], 'pdf-no-text': [], 'pdf-no-item-table': [], 'pdf-unreadable': [], 'unreadable-folder': [], error: [] };
@@ -3461,6 +3647,7 @@ async function downloadMatches(matches, code, opts) {
   const _objUrl = URL.createObjectURL(blob);
   a.href = _objUrl;
   a.download = `Olisa_Query_${code.replace(/[^\w-]+/g,'_')}.xlsx`;
+  if (typeof notifyDownload === 'function') notifyDownload(a.download);
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -3488,6 +3675,127 @@ function addDownloadButton(container, matches, code) {
   container.appendChild(btn);
 }
 
+// ==================== ASK DETECTIVE ====================
+// When a search finds nothing, don't just say "not found" — investigate like a person would:
+// is it a typo of a real style? does it exist in the PI folders but has no delivery yet? is it
+// actually a PI number? Each finding comes with a one-tap chip to run the corrected search.
+function editDistance(a, b) {
+  a = String(a).toUpperCase(); b = String(b).toUpperCase();
+  const dp = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++)
+    for (let j = 1; j <= b.length; j++)
+      dp[i][j] = Math.min(dp[i-1][j] + 1, dp[i][j-1] + 1, dp[i-1][j-1] + (a[i-1] === b[j-1] ? 0 : 1));
+  return dp[a.length][b.length];
+}
+function digitsCore(s) { return String(s).replace(/[^0-9]/g, ''); }
+function fuzzyStyleCandidates(q, max) {
+  const known = [...knownStyleSet()];
+  const qd = digitsCore(q);
+  const scored = known.map(k => {
+    let d = editDistance(q, k);
+    if (qd && digitsCore(k) === qd) d = Math.min(d, 1); // same digits, different letters/dashes
+    return { k, d };
+  }).filter(x => x.d <= 2 && x.k !== String(q).toUpperCase());
+  scored.sort((a, b) => a.d - b.d || a.k.length - b.k.length);
+  return scored.slice(0, max || 4).map(x => x.k);
+}
+function investigateStyle(code) {
+  const findings = [];
+  const norm = String(code).toUpperCase();
+  // In the PI folders (ordered) but not in the Master File (no delivery yet)?
+  if (styleIndex) {
+    const hit = Object.keys(styleIndex).find(k => k.toUpperCase() === norm);
+    if (hit) findings.push({ text: `\u2714 Style ${escHtml(code)} EXISTS in the PI folders (PI ${styleIndex[hit].map(escHtml).join(', ')}) but has no delivery in the Master File yet \u2014 it's ordered, not dispatched. The Undelivered Report will show it.`, chip: null });
+  }
+  // Family exists?
+  const fam = styleFamily(norm);
+  const famMembers = [...knownStyleSet()].filter(k => styleFamily(k) === fam).slice(0, 5);
+  if (famMembers.length && !findings.length) {
+    findings.push({ text: `\u2714 The ${escHtml(fam)} family exists \u2014 known members: ${famMembers.map(escHtml).join(', ')}. The exact code ${escHtml(code)} just isn't among them.`, chips: famMembers.slice(0, 3) });
+  }
+  // Typo candidates
+  const fuzz = fuzzyStyleCandidates(norm, 4);
+  if (fuzz.length) findings.push({ text: `\u2714 Closest real styles (possible typo):`, chips: fuzz });
+  // Is it secretly a PI number?
+  const pd = digitsCore(norm);
+  if (pd && pd.length <= 5 && piExistsAnywhere(String(parseInt(pd, 10)))) {
+    findings.push({ text: `\u2714 ${escHtml(pd)} is a known PI number \u2014 did you mean the PI?`, chips: ['PI ' + parseInt(pd, 10)] });
+  }
+  if (!findings.length) findings.push({ text: `\u2716 No similar style, family, or PI matches ${escHtml(code)} anywhere \u2014 check the code with Olisa; it may be from an order that never reached us.`, chips: null });
+  return findings;
+}
+function renderDetective(code) {
+  let html = `<div style="font-weight:800;margin-bottom:4px;">\ud83d\udd0d Not found \u2014 here's what I checked for \u201c${escHtml(code)}\u201d:</div>`;
+  investigateStyle(code).forEach(f => {
+    html += `<div style="margin-top:5px;font-size:12.5px;">${f.text}`;
+    if (f.chips && f.chips.length) html += `<div style="margin-top:5px;display:flex;flex-wrap:wrap;gap:6px;">` + f.chips.map(c => `<button class="secondary det-chip" data-q="${escHtml(c)}" style="padding:5px 10px;font-size:12px;">${escHtml(c)}</button>`).join('') + `</div>`;
+    html += `</div>`;
+  });
+  const bubble = addBubble(html, 'askA');
+  bubble.querySelectorAll('.det-chip').forEach(b => b.addEventListener('click', () => { askInput.value = b.dataset.q; handleAsk(); }));
+}
+// ---------- Paste & voice input ----------
+(function wireAskExtras() {
+  const row = askInput && askInput.parentElement;
+  if (!row) return;
+  const paste = document.createElement('button');
+  paste.className = 'secondary'; paste.id = 'askPasteBtn'; paste.title = 'Paste from clipboard and search';
+  paste.style.cssText = 'flex:0 0 auto;padding:9px 12px;';
+  paste.textContent = '\ud83d\udccb Paste';
+  paste.addEventListener('click', async () => {
+    try {
+      const t = await navigator.clipboard.readText();
+      if (!t || !t.trim()) { toast('Clipboard is empty.'); return; }
+      askInput.value = t.trim().slice(0, 300);
+      handleAsk();
+    } catch (e) { toast('Clipboard not available here \u2014 long-press the box and paste instead.'); }
+  });
+  row.insertBefore(paste, askInput.nextSibling);
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (SR) {
+    const mic = document.createElement('button');
+    mic.className = 'secondary'; mic.id = 'askMicBtn'; mic.title = 'Speak a style or PI number';
+    mic.style.cssText = 'flex:0 0 auto;padding:9px 12px;';
+    mic.textContent = '\ud83c\udfa4';
+    let rec = null, active = false;
+    mic.addEventListener('click', () => {
+      if (active) { rec && rec.stop(); return; }
+      rec = new SR();
+      rec.lang = 'en-US'; rec.interimResults = true; rec.continuous = false;
+      active = true; mic.textContent = '\u23fa Listening\u2026';
+      let finalTxt = '';
+      rec.onresult = ev => {
+        let interim = '';
+        for (const r of ev.results) (r.isFinal ? (finalTxt += r[0].transcript) : (interim += r[0].transcript));
+        askInput.value = normalizeSpoken(finalTxt + interim);
+      };
+      rec.onend = () => {
+        active = false; mic.textContent = '\ud83c\udfa4';
+        askInput.value = normalizeSpoken(finalTxt || askInput.value);
+        if (askInput.value.trim()) handleAsk();
+      };
+      rec.onerror = () => { active = false; mic.textContent = '\ud83c\udfa4'; toast('Voice input didn\u2019t work \u2014 check the mic permission.'); };
+      rec.start();
+    });
+    row.insertBefore(mic, paste.nextSibling);
+  }
+})();
+// Spoken text \u2192 code: "m eight two zero three six a seven hyphen one" \u2192 M82036A7-1
+function normalizeSpoken(t) {
+  const words = { zero:'0', one:'1', two:'2', three:'3', four:'4', five:'5', six:'6', seven:'7', eight:'8', nine:'9',
+    hyphen:'-', dash:'-', minus:'-', haiphen:'-', 'double':'' };
+  let s = ' ' + String(t).toLowerCase() + ' ';
+  Object.entries(words).forEach(([w, d]) => { s = s.replace(new RegExp('\\b' + w + '\\b', 'g'), d); });
+  s = s.replace(/\bpi\b/g, 'PI ');
+  // collapse single spelled letters/digits: "m 8 2 0 3 6 a 7 - 1" -> "M82036A7-1"
+  const collapsed = s.replace(/\s+/g, ' ').trim();
+  if (/^(pi\s*)?[a-z0-9\- ]+$/i.test(collapsed) && collapsed.replace(/[^a-z0-9]/gi, '').length <= 20) {
+    const compact = collapsed.replace(/(?<=\b[a-z0-9])\s+(?=[a-z0-9]\b)/gi, '').replace(/\s*-\s*/g, '-');
+    if (/\d/.test(compact)) return compact.toUpperCase().replace(/^PI/, 'PI ');
+  }
+  return collapsed.toUpperCase();
+}
 // ================= Direct PI lookup ("138", "PI-138", "pi 138", "pi138") =================
 // Typing a PI number in the Ask box shows that PI's full picture: the invoice lines with per-line
 // delivered/undelivered, every delivery made under it from the Master File, and its folder files.
@@ -3664,9 +3972,10 @@ async function renderSingleResult(result) {
       const bubble = addBubble(html, 'askA');
       bubble.querySelectorAll('.pi-link').forEach(a => a.addEventListener('click', e => { e.preventDefault(); openPiFolderFiles(a.dataset.pi); }));
     } else if (styleIndex) {
-      addBubble(`No records found for <b>${code}</b> — not in the Master File, and not found in the connected PI folder either. Double-check the style code.`, 'askA');
+      renderDetective(code);
     } else {
-      addBubble(`No records found for <b>${code}</b> in the Master File. Connect the Olisa Group folder and build the style index to also search undelivered styles.`, 'askA');
+      renderDetective(code);
+      addBubble(`Tip: connect the Olisa Group folder and build the style index so ordered-but-undelivered styles can be found too.`, 'askA');
     }
     return;
   }
@@ -4554,9 +4863,6 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
 // downloads the real bytes from Google's servers or fails loudly.
 const DRIVE_CLIENT_ID = '687644161888-e2mls9gphdvkbmc19hkk7qr3svs986l1.apps.googleusercontent.com';
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
-let driveToken = null;
-let driveTokenClient = null;
-const driveListCache = new Map(); // folderId -> [{id,name,mimeType,size,modifiedTime}]
 
 function loadGis() {
   return new Promise((resolve, reject) => {
@@ -4567,6 +4873,12 @@ function loadGis() {
     s.onerror = () => reject(new Error('Could not load Google sign-in. Check the internet connection.'));
     document.head.appendChild(s);
   });
+}
+function withTimeout(promise, ms, msg) {
+  return Promise.race([
+    promise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error(msg || 'Timed out')), ms))
+  ]);
 }
 function requestDriveToken(interactive) {
   return new Promise(async (resolve, reject) => {
@@ -4622,6 +4934,7 @@ async function driveListChildren(folderId) {
     (j.files || []).forEach(f => out.push(f));
     pageToken = j.nextPageToken || '';
   } while (pageToken);
+  if (driveListCache.size > 800) driveListCache.clear(); // simple pressure valve for very long sessions
   driveListCache.set(folderId, out);
   return out;
 }
@@ -4686,7 +4999,11 @@ async function connectDrive() {
   const btnText = document.getElementById('askDriveBtnText');
   try {
     btnText.textContent = 'Signing in\u2026';
-    await requestDriveToken(true);
+    // Try quietly first. If this browser still has a valid Google session and you already
+    // granted access once, this succeeds with NO popup and NO click-through — that's what makes
+    // every open after the first feel instant instead of asking to log in again.
+    try { await withTimeout(requestDriveToken(false), 6000, 'Silent sign-in timed out'); }
+    catch (e) { await requestDriveToken(true); } // only forces the full screen when silent genuinely fails
     const remembered = await idbGet('driveRoot');
     let chosen = null;
     if (remembered && remembered.id) {
@@ -4708,11 +5025,27 @@ async function connectDrive() {
   }
 }
 document.getElementById('askDriveBtn').addEventListener('click', connectDrive);
+// Auto-resume on launch: if a folder was connected before, try to silently re-establish it —
+// same silent-token trick, but fired automatically instead of waiting for a tap. This is what
+// closes the "asks me to reconnect and rebuild every time I reopen the app" gap: the cached PI
+// index (restored separately, above) is useless without piRootHandle pointing at a live folder
+// again, so this reconnects that folder quietly whenever the browser allows it.
 (async () => {
   try {
     const remembered = await idbGet('driveRoot');
-    if (remembered && remembered.name) document.getElementById('askDriveBtnText').textContent = `Reconnect Drive: "${remembered.name}"`;
-  } catch (e) { /* none yet */ }
+    if (!remembered || !remembered.name) return;
+    document.getElementById('askDriveBtnText').textContent = `Reconnect Drive: "${remembered.name}"`;
+    try {
+      await withTimeout(requestDriveToken(false), 6000, 'Silent sign-in timed out'); // never pop a consent screen unprompted on load
+    } catch (e) {
+      return; // no valid session yet; the button stays as a one-tap fallback, nothing forced
+    }
+    const rootHandle = new DriveDirHandle(remembered.id, remembered.name);
+    document.getElementById('askDriveBtnText').textContent = `Drive: "${remembered.name}"`;
+    await connectFolder(rootHandle, false);
+    if (typeof notify === 'function') notify('drive', `Reconnected to Drive folder "${remembered.name}" automatically.`);
+    if (typeof renderHealth === 'function') renderHealth();
+  } catch (e) { /* stays in the tap-to-reconnect state — no error is worth surfacing here */ }
 })();
 // ==================== END GOOGLE DRIVE MODE ====================
 
