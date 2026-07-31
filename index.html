@@ -4492,10 +4492,6 @@ function uqClearAll() {
 }
 document.getElementById('uqClearBtn').addEventListener('click', uqClearAll);
 
-})();
-
-</script>
-<script>
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('sw.js').catch(() => { /* offline shell is optional */ });
 }
@@ -4656,6 +4652,9 @@ document.getElementById('askDriveBtn').addEventListener('click', connectDrive);
   } catch (e) { /* none yet */ }
 })();
 // ==================== END GOOGLE DRIVE MODE ====================
+
+})();
+
 </script>
 <script>
 // A last-resort net for errors nothing else caught. Silent breakage is the worst failure mode this
