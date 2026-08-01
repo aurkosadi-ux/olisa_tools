@@ -36,7 +36,7 @@
             100% { background-color: #f5f5f5; color: #1f2937; transform: scale(1); }
         }
     
-  .appswitch { position:sticky; top:0; z-index:9700; display:flex; gap:6px; align-items:center;
+  .appswitch { position:sticky; top:0; z-index:9500; display:flex; gap:6px; align-items:center;
     padding:7px 10px; background:rgba(255,255,255,.94); backdrop-filter:blur(6px);
     border-bottom:1px solid #E5ECF5; font-family:'Outfit','Segoe UI',Arial,sans-serif; }
   .appswitch a { text-decoration:none; font-size:12.5px; font-weight:700; color:#5B6D89;
@@ -221,14 +221,6 @@
 
             <!-- --- MULTIPLE PRICES CALCULATOR VIEW --- -->
             <div id="multipleView" class="p-4 hidden">
-                <div class="bg-indigo-50 p-3 rounded-xl shadow-inner my-4">
-                    <h3 class="text-sm font-bold text-gray-800 mb-2">Multi-Price Input Setup</h3>
-                    <div class="flex flex-col mb-2">
-                        <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Rate per SQM ($)</label>
-                        <input type="number" id="multiRatePerSqm" value="0.80" oninput="App.applyRateToAll()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
-                    </div>
-                </div>
-
                 <!-- Dynamic Row Container -->
                 <div id="multipleRowsContainer">
                     <!-- Rows will be injected here -->
@@ -406,11 +398,11 @@
         /**
          * Adds a new row of input fields to the multiple view.
          */
-        /** Pushes the default rate into every existing item row, then recalculates. */
-        applyRateToAll: function() {
-            const v = document.getElementById('multiRatePerSqm').value;
-            document.querySelectorAll('[id^="multiRate-"]').forEach(el => { el.value = v; });
-            this.calculateAllMultiPrices();
+        /** Last rate the user typed, so a new item row starts from it instead of a hard default. */
+        lastRate: 0.80,
+        rememberRate: function(index) {
+            const el = document.getElementById(`multiRate-${index}`);
+            if (el && el.value !== '') App.lastRate = parseFloat(el.value) || App.lastRate;
         },
 
         addRow: function() {
@@ -444,11 +436,11 @@
                     </div>
                 </div>
 
-                <!-- Per-item rate: starts from the default above, but each item can use its own
-                     (e.g. 0.80 for master cartons, 0.75 for top/bottom). -->
+                <!-- Each item carries its own rate, so master cartons and top/bottom can be
+                     priced at different rates in the same quote. Defaults to the last rate used. -->
                 <div class="flex flex-col mb-2">
-                    <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Rate per SQM ($) — this item</label>
-                    <input type="number" id="multiRate-${index}" value="${document.getElementById('multiRatePerSqm') ? (document.getElementById('multiRatePerSqm').value || '0.80') : '0.80'}" oninput="App.calculateAllMultiPrices()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                    <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Rate per SQM ($)</label>
+                    <input type="number" id="multiRate-${index}" value="${App.lastRate}" oninput="App.rememberRate(${index}); App.calculateAllMultiPrices();" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
                 </div>
 
                 <!-- NEW: Separate L, W, H inputs -->
@@ -518,7 +510,6 @@
             let lastPrice = 0;
             let lastItemName = 'Carton';
 
-            const ratePerSqm = parseFloat(document.getElementById('multiRatePerSqm').value) || 0;
             
             // Get all actual row elements currently in the container
             const container = document.getElementById('multipleRowsContainer');
@@ -551,8 +542,8 @@
                 }
                 
                 const calculatedSqm = calculateArea(itemName, L, W, H, wastageWidth, wastageHeight);
-                const rowRateEl = document.getElementById(`multiRate-${index}`);
-                const rowRate = rowRateEl && rowRateEl.value !== '' ? (parseFloat(rowRateEl.value) || 0) : ratePerSqm;
+                const rateEl = document.getElementById(`multiRate-${i}`);
+                const rowRate = rateEl ? (parseFloat(rateEl.value) || 0) : App.lastRate;
                 const pricePerCarton = calculatedSqm * rowRate;
                 
                 priceOutput.value = formatCurrency(pricePerCarton);
