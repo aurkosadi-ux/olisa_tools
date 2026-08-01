@@ -458,7 +458,7 @@
   .healthbar .hdot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:5px; vertical-align:middle; }
   .hgreen{background:#22c55e} .hyellow{background:#f59e0b} .hred{background:#E14D4D} .hgrey{background:#b6c2d4}
   .bellwrap { position:fixed; right:14px; top:12px; z-index:9000; }
-  .bellbtn { position:relative; border:1px solid var(--line); background:#fff; border-radius:50%; width:40px; height:40px; cursor:pointer; box-shadow:var(--card-shadow); font-size:17px; }
+  .bellbtn { position:relative; display:flex; align-items:center; justify-content:center; border:1px solid var(--line); background:#fff; border-radius:50%; width:40px; height:40px; padding:0; line-height:1; cursor:pointer; box-shadow:var(--card-shadow); font-size:17px; }
   .bellbadge { position:absolute; top:-4px; right:-4px; background:var(--bad); color:#fff; border-radius:9px; font-size:10px; font-weight:800; padding:1px 5px; }
   .bellpanel { position:absolute; right:0; top:46px; width:290px; max-height:340px; overflow:auto; background:#fff; border:1px solid var(--line); border-radius:12px; box-shadow:var(--card-shadow); padding:8px; display:none; }
   .bellpanel.open { display:block; }
@@ -2034,7 +2034,9 @@ async function connectFolder(existingHandle, forceNew) {
     const masterSearch = await findFileRecursive(dirHandle, name => /master/i.test(name) && !/^~\$/.test(name) && !/\.tmp$/i.test(name), 6);
     piRootHandle = await findFolderRecursive(dirHandle, name => /work\s*orders?/i.test(name), 4);
     // A shared index file in the folder means another device already did the work.
-    await tryLoadIndexFromFolder(dirHandle);
+    const adoptedShared = await tryLoadIndexFromFolder(dirHandle);
+    // No shared file, but this device may hold a cached index — say whether it is still current.
+    if (!adoptedShared && Object.keys(piIndex).length) await reportIndexFreshness(false);
 
     const bits = [];
     if (masterSearch.handle) {
@@ -2498,32 +2500,94 @@ function adoptIndexPayload(data, sourceLabel) {
   return true;
 }
 // Look for the portable index in the connected folder's root (Drive or local) and adopt it.
+// Find the shared index file ANYWHERE under the connected folder, not just at its top level.
+// Drive uploads often nest one level deeper than expected ("OLISA GROUP/OLISA GROUP/..."), and the
+// old root-only search silently found nothing there — which is why the phone kept rebuilding.
+async function findIndexFileHandle(rootHandle, maxDepth = 3) {
+  let best = null; // prefer .gz, and prefer the shallowest match
+  async function walk(dir, depth) {
+    const subs = [];
+    try {
+      for await (const [name, handle] of dir.entries()) {
+        if (handle.kind === 'directory') { subs.push(handle); continue; }
+        const n = name.toLowerCase();
+        if (n === INDEX_FILE_GZ || n === INDEX_FILE_NAME) {
+          const rank = (n === INDEX_FILE_GZ ? 0 : 1) + depth * 2;
+          if (!best || rank < best.rank) best = { handle, name: n, rank, gz: n === INDEX_FILE_GZ };
+        }
+      }
+    } catch (e) { return; }
+    if (depth < maxDepth) for (const s of subs) await walk(s, depth + 1);
+  }
+  await walk(rootHandle, 0);
+  return best;
+}
+async function readIndexFile(found) {
+  const file = await getFileWithRetry(found.handle);
+  if (!found.gz) return JSON.parse(await file.text());
+  const buf = await file.arrayBuffer();
+  let text;
+  // A .gz that is actually plain JSON (saved by a browser without CompressionStream, or renamed
+  // by hand) must still load rather than failing the whole thing.
+  try { text = await gunzipToText(new Blob([buf])); }
+  catch (e) { text = new TextDecoder().decode(buf); }
+  return JSON.parse(text);
+}
+// Compare the loaded index against what is actually in the Work Orders folder right now, and say
+// plainly whether a rebuild is needed. This is the "7 files need indexing" answer.
+async function reportIndexFreshness(loadedFromFile) {
+  try {
+    if (!piRootHandle) return;
+    const folders = [];
+    for await (const [name, handle] of piRootHandle.entries()) {
+      if (handle.kind === 'directory') folders.push({ name, handle });
+    }
+    const stale = [];
+    for (const { name, handle } of folders) {
+      const ref = normPiKey(parsePiNumber(name));
+      if (!ref) continue;
+      const entry = piIndex[ref];
+      if (!entry || !entry.rowCount) { stale.push(ref); continue; }
+      // Drive gives size+mtime free in the listing, so this check costs no downloads.
+      if (entry.srcFp) {
+        let changed = true;
+        try {
+          for await (const [fname, fh] of handle.entries()) {
+            if (fh.kind !== 'file' || !fh.meta) continue;
+            const fp = `${fname}|${fh.meta.size}|${fh.meta.modifiedTime ? Date.parse(fh.meta.modifiedTime) : 0}`;
+            if (entry.srcFp.endsWith(`|${fh.meta.size}|${fh.meta.modifiedTime ? Date.parse(fh.meta.modifiedTime) : 0}`)) { changed = false; break; }
+          }
+        } catch (e) { changed = false; } // local mode has no metadata here — don't cry wolf
+        if (changed) stale.push(ref);
+      }
+    }
+    const n = Object.keys(piIndex).length;
+    if (!stale.length) {
+      notify('build', loadedFromFile
+        ? `Found the index file in your folder and loaded it \u2014 ${n} PI(s) ready. No new or changed files detected, so no rebuild is needed.`
+        : `Index checked against your folder \u2014 ${n} PI(s) ready, nothing has changed.`);
+    } else {
+      const list = stale.slice(0, 8).join(', ') + (stale.length > 8 ? `\u2026` : '');
+      notify('build', `${loadedFromFile ? 'Index file loaded, but ' : ''}${stale.length} PI folder(s) are new or changed since it was built (PI ${list}). Click \u201cBuild style index\u201d to bring them in.`);
+    }
+  } catch (e) { /* freshness is advisory — never block the connect flow */ }
+}
 async function tryLoadIndexFromFolder(rootHandle) {
   if (!rootHandle) return false;
   try {
-    let plain = null, gz = null;
-    for await (const [name, handle] of rootHandle.entries()) {
-      if (handle.kind !== 'file') continue;
-      const n = name.toLowerCase();
-      if (n === INDEX_FILE_GZ) gz = handle;
-      else if (n === INDEX_FILE_NAME) plain = handle;
+    const found = await findIndexFileHandle(rootHandle);
+    if (!found) return false;
+    const data = await readIndexFile(found);
+    const adopted = adoptIndexPayload(data, 'the shared index file in your folder');
+    if (!adopted && data && data.kind === 'olisa-index') {
+      // Not adopted because this device already holds an index at least as new — still worth saying.
+      notify('build', `Found the index file in your folder, but this device already has an index that is just as recent (${Object.keys(piIndex).length} PI(s)).`);
     }
-    const pick = gz || plain; // prefer the compressed one when both are present
-    if (pick) {
-      const file = await getFileWithRetry(pick);
-      let text;
-      if (pick === gz) {
-        const buf = await file.arrayBuffer();
-        // If a .gz turns out to be plain JSON (saved by a browser without CompressionStream, or
-        // renamed by hand), decode it as text rather than failing the whole load.
-        try { text = await gunzipToText(new Blob([buf])); }
-        catch (e) { text = new TextDecoder().decode(buf); }
-      } else {
-        text = await file.text();
-      }
-      return adoptIndexPayload(JSON.parse(text), 'the shared index file in your folder');
-    }
-  } catch (e) { /* no shared index, or unreadable — the device just builds its own */ }
+    await reportIndexFreshness(true);
+    return adopted;
+  } catch (e) {
+    notify('error', `An index file was found but could not be read (${e.message}). Re-save it from the device that built it.`);
+  }
   return false;
 }
 document.getElementById('askSaveIndexBtn').addEventListener('click', saveIndexFile);
@@ -2594,6 +2658,10 @@ async function openFilePreview(fileHandle) {
     pages.innerHTML = `<div style="color:#fff;padding:20px;">Preview failed (${escHtml(e.message)}) \u2014 use Download.</div>`;
   }
 }
+// File types the preview can actually render. Used only for ordering and labelling the file list —
+// nothing is ever hidden because of it. (This constant was lost in an earlier edit, which crashed
+// every PI-number click with "KNOWN_DOC_EXT is not defined".)
+const KNOWN_DOC_EXT = /\.(pdf|docx?|xlsx?|xlsm|jpe?g|png|gif|webp|bmp|txt|csv)$/i;
 async function openPiFolderFiles(piRef) {
   if (!piRootHandle) {
     addBubble(`Connect the Olisa Group folder first (it needs to find your Work Orders folder).`, 'askA');
