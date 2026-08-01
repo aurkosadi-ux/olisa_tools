@@ -467,7 +467,9 @@
   .hgreen{background:#22c55e} .hyellow{background:#f59e0b} .hred{background:#E14D4D} .hgrey{background:#b6c2d4}
   /* Sits below the sticky app-switcher bar and above everything else, so the "All tools"
      link can never cover it. */
-  .bellwrap { position:fixed; right:14px; top:52px; z-index:9800; }
+  /* Sits in the page flow at the top-right, so it scrolls out of view rather than following you
+     down the page. New notifications still appear wherever you are, as drop-down cards. */
+  .bellwrap { position:absolute; right:14px; top:52px; z-index:9800; }
   .bellbtn { position:relative; display:flex; align-items:center; justify-content:center; border:1px solid var(--line); background:#fff; border-radius:50%; width:40px; height:40px; padding:0; line-height:1; cursor:pointer; box-shadow:var(--card-shadow); font-size:17px; }
   .bellbadge { position:absolute; top:-5px; right:-5px; min-width:19px; height:19px; padding:0 5px; background:var(--bad); color:#fff; border:2px solid #fff; border-radius:10px; font-size:11px; font-weight:800; line-height:15px; text-align:center; box-shadow:0 1px 4px rgba(0,0,0,.25); }
   .bellpanel { position:absolute; right:0; top:46px; width:290px; max-height:340px; overflow:auto; background:#fff; border:1px solid var(--line); border-radius:12px; box-shadow:var(--card-shadow); padding:8px; display:none; }
@@ -475,6 +477,22 @@
   .bellitem { padding:7px 8px; border-bottom:1px solid var(--line); font-size:12px; }
   .bellitem:last-child { border-bottom:none; }
   .bellitem .t { color:var(--sub); font-size:10.5px; }
+  /* Android-style drop-down notification: appears at the top of the viewport wherever you are
+     scrolled to, and can be swiped away left, right or up. */
+  .anote { position:fixed; left:50%; top:14px; transform:translateX(-50%); z-index:9900;
+    width:min(420px, calc(100vw - 24px)); background:#fff; color:var(--ink);
+    border:1px solid var(--line); border-radius:14px; padding:11px 13px 14px;
+    box-shadow:0 10px 34px rgba(15,37,64,.20); display:flex; gap:10px; align-items:flex-start;
+    font-size:12.8px; touch-action:none; cursor:grab; animation:noteIn .28s cubic-bezier(.2,.8,.3,1); }
+  .anote.grabbing { cursor:grabbing; }
+  .anote .ico { font-size:15px; line-height:1.2; }
+  .anote .body { flex:1; }
+  .anote .body b { display:block; font-size:10.5px; color:var(--sub); font-weight:800;
+    text-transform:uppercase; letter-spacing:.3px; margin-bottom:2px; }
+  .anote .grip { width:32px; height:3px; border-radius:2px; background:var(--line);
+    position:absolute; left:50%; bottom:5px; transform:translateX(-50%); }
+  @keyframes noteIn { from { opacity:0; transform:translateX(-50%) translateY(-18px); } to { opacity:1; transform:translateX(-50%) translateY(0); } }
+  @media (prefers-reduced-motion: reduce) { .anote { animation:none; } }
   .toast { position:fixed; left:50%; transform:translateX(-50%); bottom:70px; background:#0F2540; color:#fff; padding:10px 16px; border-radius:10px; font-size:13px; z-index:9500; box-shadow:0 8px 30px rgba(0,0,0,.25); max-width:88vw; }
   .pdfmodal { position:fixed; inset:0; background:rgba(15,37,64,.55); z-index:9400; display:flex; flex-direction:column; }
   .pdfmodal .bar { background:#fff; padding:10px 12px; display:flex; gap:8px; align-items:center; }
@@ -647,7 +665,7 @@
   <a href="index.html" class="home">All tools</a>
 </div>
 
-<div class="bg-scene" aria-hidden="true">
+<div class="bg-scene" aria-hidden="true" id="bgScene">
   <div class="wash w1"></div><div class="wash w2"></div><div class="wash w3"></div>
   <div class="shape s1"></div><div class="shape ring s2"></div><div class="shape s3"></div><div class="shape ring s4"></div>
   <div class="shape tri s5"></div><div class="shape ring s6"></div>
@@ -795,6 +813,7 @@
         Change folder
       </button>
       <button id="askSaveIndexBtn" class="secondary hidden" style="flex:0 0 auto;" title="Save this index as a file you can put in Drive so your phone uses it too">⬇ Save index file</button>
+      <button id="askBackupBtn" class="secondary hidden" style="flex:0 0 auto;" title="Save a timestamped copy of the Master File, with your remarks written in, to Drive">☁ Back up Master File</button>
       <button id="askBuildIndexBtn" class="secondary hidden" style="flex:0 0 auto;">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h7" stroke-linecap="round"/></svg>
         Build style index
@@ -2096,6 +2115,7 @@ async function connectFolder(existingHandle, forceNew) {
     if (masterSearch.handle) {
       const file = await masterSearch.handle.getFile();
       if (/\.(xlsx|xls)$/i.test(file.name)) {
+        try { masterFileBytes = await file.arrayBuffer(); masterFileName = file.name; } catch (e) { masterFileBytes = null; }
         await loadFile(file);
         bits.push(`Master File loaded ("${file.name}")`);
       } else {
@@ -2112,6 +2132,7 @@ async function connectFolder(existingHandle, forceNew) {
     if (piRootHandle) {
       buildIndexBtn.classList.remove('hidden');
       document.getElementById('askSaveIndexBtn').classList.remove('hidden');
+      document.getElementById('askBackupBtn').classList.remove('hidden');
       const cachedIndex = await idbGet('styleIndex');
       if (cachedIndex) styleIndex = cachedIndex.data;
       let idxNote = ' — click "Build style index" to enable undelivered-style lookups';
@@ -2343,6 +2364,205 @@ function renderPiIndexDiagnostics(totalFolders, withPi, buckets, sweep) {
 buildIndexBtn.addEventListener('click', buildStyleIndex);
 
 // --- generic file preview (pdf / xlsx / docx) ---
+// ==================== VERSIONED MASTER-FILE BACKUPS TO DRIVE ====================
+// Your edits live in this browser. If the laptop is wiped, that copy goes with it — so every set
+// of changes is also written to Drive as a NEW, timestamped workbook inside a dedicated folder.
+// The original Master File is never touched: the app holds drive.file permission, which only
+// grants power over files it created itself.
+let masterFileBytes = null;   // raw bytes of the Master File as loaded, for faithful re-saving
+let masterFileName = 'Olisa Inventory Master File.xlsx';
+let backupTimer = null;
+
+async function driveApi(url, opts) {
+  if (!driveToken) await requestDriveToken(false);
+  const r = await fetch(url, { ...opts, headers: { Authorization: 'Bearer ' + driveToken, ...(opts && opts.headers || {}) } });
+  if (r.status === 401) { driveToken = null; await requestDriveToken(false); return driveApi(url, opts); }
+  if (!r.ok) throw new Error(`Drive ${r.status}: ${(await r.text()).slice(0, 160)}`);
+  return r.json();
+}
+// Find, or create once, the backup folder inside the connected Drive folder.
+async function ensureBackupFolder() {
+  const parent = (savedRootHandle && savedRootHandle.isDrive) ? savedRootHandle.id : 'root';
+  const q = encodeURIComponent(`name='${BACKUP_FOLDER_NAME}' and '${parent}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+  const found = await driveApi(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&supportsAllDrives=true`);
+  if (found.files && found.files.length) return found.files[0].id;
+  const made = await driveApi('https://www.googleapis.com/drive/v3/files?fields=id&supportsAllDrives=true', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: BACKUP_FOLDER_NAME, mimeType: 'application/vnd.google-apps.folder', parents: [parent] })
+  });
+  return made.id;
+}
+// Rebuild the workbook from the ORIGINAL file bytes and write the current remarks into the
+// Remarks column. Starting from the original preserves sheets, columns and formatting that a
+// from-scratch rebuild would throw away.
+async function buildUpdatedMasterBlob() {
+  if (!masterFileBytes) throw new Error('The Master File bytes were not captured — reload it first.');
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(masterFileBytes.slice(0));
+  let patched = 0;
+  wb.eachSheet(ws => {
+    // Locate the header row and the Remarks / Challan No / Style columns by NAME, so a re-ordered
+    // export still lands the values in the right place.
+    let hdrRow = null, col = {};
+    for (let r = 1; r <= Math.min(ws.rowCount, 12); r++) {
+      const vals = ws.getRow(r).values || [];
+      const idx = {};
+      vals.forEach((v, i) => {
+        const s = String(v == null ? '' : v).trim().toLowerCase();
+        if (/^remarks?$/.test(s)) idx.remarks = i;
+        if (/challan\s*no/.test(s)) idx.challan = i;
+        if (/^style/.test(s)) idx.style = i;
+        if (/short/.test(s)) idx.short = i;
+        if (/description|item\s*desc/.test(s)) idx.desc = i;
+      });
+      if (idx.remarks && idx.challan && idx.style) { hdrRow = r; col = idx; break; }
+    }
+    if (!hdrRow) return;
+    for (let r = hdrRow + 1; r <= ws.rowCount; r++) {
+      const row = ws.getRow(r);
+      const key = [
+        String(row.getCell(col.challan).value ?? '').trim(),
+        String(row.getCell(col.style).value ?? '').trim().toUpperCase(),
+        measNorm(String(row.getCell(col.desc || col.style).value ?? '')),
+        String(row.getCell(col.short || col.style).value ?? '')
+      ].join('|');
+      const ov = remarkOverrides[key];
+      if (ov) { row.getCell(col.remarks).value = ov.text; patched++; }
+    }
+  });
+  const out = await wb.xlsx.writeBuffer();
+  return { blob: new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), patched };
+}
+function backupFileName(version) {
+  const d = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  return `Olisa Master Inventory \u2014 ${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d.getFullYear()} ${pad(d.getHours())}${pad(d.getMinutes())} \u2014 v${version}.xlsx`;
+}
+async function backupMasterToDrive(silent) {
+  if (!allRecords.length) { if (!silent) toast('Load the Master File first.'); return; }
+  const editCount = Object.keys(remarkOverrides).length;
+  try {
+    const { blob, patched } = await buildUpdatedMasterBlob();
+    if (!(savedRootHandle && savedRootHandle.isDrive)) {
+      // Local mode (office PC): Drive isn't connected, so hand over the file instead of failing.
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = backupFileName(nextBackupVersion());
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      notify('download', `Saved an updated Master File copy (${patched} remark(s) written in). Drive isn't connected here, so it went to your downloads.`);
+      return;
+    }
+    const folderId = await ensureBackupFolder();
+    const version = nextBackupVersion();
+    const name = backupFileName(version);
+    const meta = { name, parents: [folderId] };
+    const form = new FormData();
+    form.append('metadata', new Blob([JSON.stringify(meta)], { type: 'application/json' }));
+    form.append('file', blob);
+    if (!driveToken) await requestDriveToken(false);
+    const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name&supportsAllDrives=true', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + driveToken }, body: form
+    });
+    if (!res.ok) {
+      const txt = (await res.text()).slice(0, 200);
+      if (res.status === 403 || /insufficient/i.test(txt)) {
+        notify('error', 'Drive backup needs the newer permission. Tap "Connect Google Drive" once and approve — then backups will work.');
+        return;
+      }
+      throw new Error(`${res.status}: ${txt}`);
+    }
+    bumpBackupVersion();
+    notify('drive', `Backed up to Drive \u2014 "${BACKUP_FOLDER_NAME}/${name}" (${patched} remark(s) written in, ${editCount} edit(s) on record).`);
+  } catch (e) {
+    notify('error', `Master File backup failed: ${e.message}`);
+  }
+}
+// Version counter, kept locally so file names read v1, v2, v3 in order.
+let backupVersion = 0;
+function nextBackupVersion() { return backupVersion + 1; }
+function bumpBackupVersion() { backupVersion++; idbSet('backupVersion', { n: backupVersion }).catch(() => {}); }
+(async () => { try { const v = await idbGet('backupVersion'); if (v && v.n) backupVersion = v.n; } catch (e) {} })();
+// A change should reach Drive without you remembering to press anything — but not once per
+// keystroke either, so uploads are debounced until edits stop.
+function scheduleMasterBackup() {
+  if (backupTimer) clearTimeout(backupTimer);
+  backupTimer = setTimeout(() => backupMasterToDrive(true), 45000);
+}
+// ==================== PLAYFUL DECOR: grab, fling, settle back ====================
+// The floating shapes and the hero carton can be picked up and thrown anywhere. Each remembers
+// where it belongs and drifts home afterwards, resuming its idle animation — so the page can be
+// played with without ever ending up looking broken.
+(function makeDecorDraggable() {
+  const targets = [];
+  const scene = document.getElementById('bgScene');
+  if (scene) scene.querySelectorAll('.shape').forEach(el => targets.push(el));
+  const art = document.querySelector('.hero-art');
+  if (art) targets.push(art);
+  if (!targets.length) return;
+
+  targets.forEach(el => {
+    el.style.pointerEvents = 'auto';
+    el.style.cursor = 'grab';
+    el.style.touchAction = 'none';
+    const idleAnim = getComputedStyle(el).animationName;
+    let dragging = false, sx = 0, sy = 0, ox = 0, oy = 0, lastX = 0, lastY = 0, vx = 0, vy = 0, raf = 0;
+
+    const home = () => {
+      // Ease back to the original spot, then hand control back to the CSS idle animation.
+      el.style.transition = 'transform .85s cubic-bezier(.25,.9,.3,1)';
+      el.style.transform = '';
+      setTimeout(() => {
+        if (dragging) return;
+        el.style.transition = '';
+        el.style.animation = '';           // resume floaty/drift as before
+      }, 900);
+    };
+
+    el.addEventListener('pointerdown', e => {
+      dragging = true;
+      el.style.animation = 'none';         // pause idle motion while held
+      el.style.transition = 'none';
+      el.style.cursor = 'grabbing';
+      el.style.zIndex = '5';
+      sx = e.clientX; sy = e.clientY;
+      lastX = e.clientX; lastY = e.clientY;
+      vx = vy = 0;
+      try { el.setPointerCapture(e.pointerId); } catch (err) { /* fine */ }
+      e.preventDefault();
+    });
+
+    el.addEventListener('pointermove', e => {
+      if (!dragging) return;
+      ox = e.clientX - sx; oy = e.clientY - sy;
+      vx = e.clientX - lastX; vy = e.clientY - lastY;
+      lastX = e.clientX; lastY = e.clientY;
+      el.style.transform = `translate(${ox}px, ${oy}px)`;
+    });
+
+    const release = () => {
+      if (!dragging) return;
+      dragging = false;
+      el.style.cursor = 'grab';
+      el.style.zIndex = '';
+      // Carry the throw for a moment with friction, then drift home.
+      let px = ox, py = oy, sxv = vx * 1.6, syv = vy * 1.6;
+      if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(raf);
+      const glide = () => {
+        sxv *= 0.92; syv *= 0.92;
+        px += sxv; py += syv;
+        el.style.transform = `translate(${px}px, ${py}px)`;
+        if ((Math.abs(sxv) > 0.4 || Math.abs(syv) > 0.4) && typeof requestAnimationFrame === 'function') raf = requestAnimationFrame(glide);
+        else home();
+      };
+      if ((Math.abs(sxv) > 1 || Math.abs(syv) > 1) && typeof requestAnimationFrame === 'function') raf = requestAnimationFrame(glide);
+      else home();
+    };
+    el.addEventListener('pointerup', release);
+    el.addEventListener('pointercancel', release);
+  });
+})();
 // ==================== NOTIFICATIONS, HEALTH, TODAY ====================
 // A small in-app event log with a bell. OS-level push isn't available to web apps for downloads,
 // so the honest version is: an instant toast + a bell history you can reopen any time.
@@ -2363,11 +2583,66 @@ const BELL_MAX = 300;
 function persistBell() {
   idbSet('bellLog', { items: bellLog.slice(0, BELL_MAX).map(e => ({ ...e, at: e.at.toISOString() })) }).catch(() => {});
 }
+// Drop-down notification card: appears at the top of the screen regardless of scroll position,
+// auto-dismisses, and can be flicked away left/right/up like a phone notification.
+const noteStack = [];
+function restackNotes() {
+  noteStack.forEach((n, i) => { n.style.top = (14 + i * 9) + 'px'; n.style.zIndex = String(9900 - i); });
+}
 function toast(msg, ms) {
-  const t = document.createElement('div');
-  t.className = 'toast'; t.textContent = msg;
-  document.body.appendChild(t);
-  setTimeout(() => t.remove(), ms || 3800);
+  const el = document.createElement('div');
+  el.className = 'anote';
+  el.innerHTML = `<span class="ico">\ud83d\udd14</span><div class="body"><b>Olisa Tools</b><span class="msg"></span></div><span class="grip"></span>`;
+  el.querySelector('.msg').textContent = msg;
+  document.body.appendChild(el);
+  noteStack.push(el);
+  restackNotes();
+
+  let timer = setTimeout(() => dismiss(), ms || 4200);
+  function dismiss(dir) {
+    if (!el.isConnected) return;
+    clearTimeout(timer);
+    el.style.transition = 'transform .22s ease, opacity .22s ease';
+    const x = dir === 'left' ? '-130%' : dir === 'right' ? '30%' : '-50%';
+    const y = dir === 'up' ? '-150%' : '0px';
+    el.style.transform = `translateX(${x}) translateY(${y})`;
+    el.style.opacity = '0';
+    setTimeout(() => {
+      el.remove();
+      const k = noteStack.indexOf(el); if (k > -1) noteStack.splice(k, 1);
+      restackNotes();
+    }, 220);
+  }
+  // Pointer events cover mouse and touch in one path.
+  let sx = 0, sy = 0, dx = 0, dy = 0, dragging = false;
+  el.addEventListener('pointerdown', e => {
+    dragging = true; sx = e.clientX; sy = e.clientY; dx = 0; dy = 0;
+    clearTimeout(timer);
+    try { el.setPointerCapture(e.pointerId); } catch (err) { /* not fatal */ }
+    el.classList.add('grabbing');
+    el.style.transition = 'none';
+  });
+  el.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    dx = e.clientX - sx; dy = e.clientY - sy;
+    const up = Math.min(0, dy);
+    el.style.transform = `translateX(calc(-50% + ${dx}px)) translateY(${up}px)`;
+    el.style.opacity = String(Math.max(0.25, 1 - Math.max(Math.abs(dx), Math.abs(up)) / 190));
+  });
+  function endDrag() {
+    if (!dragging) return;
+    dragging = false; el.classList.remove('grabbing');
+    if (dx > 90) return dismiss('right');
+    if (dx < -90) return dismiss('left');
+    if (dy < -70) return dismiss('up');
+    el.style.transition = 'transform .2s ease, opacity .2s ease';
+    el.style.transform = 'translateX(-50%)';
+    el.style.opacity = '1';
+    timer = setTimeout(() => dismiss(), 2600);
+  }
+  el.addEventListener('pointerup', endDrag);
+  el.addEventListener('pointercancel', endDrag);
+  return el;
 }
 function notify(kind, msg) {
   bellLog.unshift({ kind, msg, at: new Date() });
@@ -2385,10 +2660,24 @@ function renderBell() {
     wrap.id = 'bellWrap'; wrap.className = 'bellwrap';
     wrap.innerHTML = `<button class="bellbtn" id="bellBtn" title="Notifications">\ud83d\udd14<span class="bellbadge hidden" id="bellBadge"></span></button><div class="bellpanel" id="bellPanel"></div>`;
     document.body.appendChild(wrap);
-    document.getElementById('bellBtn').addEventListener('click', () => {
+    document.getElementById('bellBtn').addEventListener('click', e => {
+      e.stopPropagation();
       const p = document.getElementById('bellPanel');
       p.classList.toggle('open');
-      if (p.classList.contains('open')) { bellUnread = 0; renderBell(); }
+      if (p.classList.contains('open')) { bellUnread = 0; renderBell(); persistBell(); }
+    });
+    // Clicking anywhere else, or pressing Escape, closes it — the panel should never need a
+    // second trip back to the bell just to get rid of it.
+    document.addEventListener('click', ev => {
+      const p = document.getElementById('bellPanel');
+      if (!p || !p.classList.contains('open')) return;
+      if (wrap.contains(ev.target)) return; // clicks inside the panel (search, clear) stay open
+      p.classList.remove('open');
+    });
+    document.addEventListener('keydown', ev => {
+      if (ev.key !== 'Escape') return;
+      const p = document.getElementById('bellPanel');
+      if (p) p.classList.remove('open');
     });
   }
   const badge = document.getElementById('bellBadge');
@@ -2425,7 +2714,7 @@ function renderIndexStamp() {
     el.innerHTML = `<span style="color:var(--accent-dark);font-weight:700;">\u27f3 Indexing in the background \u2014 you can keep searching; results may be incomplete until it finishes.</span>`;
     return;
   }
-  if (!n) { el.textContent = 'Style index: not built yet.'; return; }
+  if (!n) { el.textContent = ''; return; }
   const days = piIndexBuiltAt ? Math.floor((Date.now() - piIndexBuiltAt) / 86400000) : null;
   el.innerHTML = `Style index: <b>${n} PI(s)</b> \u2014 built ${stampText(piIndexBuiltAt)} (${agoText(piIndexBuiltAt)})${days !== null && days > 7 ? ' <span style="color:var(--bad);font-weight:700;">\u2014 rebuild recommended</span>' : ''}`;
 }
@@ -2661,6 +2950,7 @@ async function tryLoadIndexFromFolder(rootHandle) {
   return false;
 }
 document.getElementById('askSaveIndexBtn').addEventListener('click', saveIndexFile);
+document.getElementById('askBackupBtn').addEventListener('click', () => backupMasterToDrive(false));
 // ==================== IN-APP FILE VIEWER (works on Android) ====================
 // window.open + iframe cannot show PDFs on Android Chrome. This modal renders PDFs page by page
 // with pdf.js, previews sheets and Word files inline, and offers Download + native Share
@@ -2960,6 +3250,7 @@ function setRemark(r, text) {
   else remarkOverrides[k] = { text: clean, at: Date.now(), original: String(r.remarks ?? '') };
   persistRemarkOverrides();
   reconcileManualChallans();
+  scheduleMasterBackup();
 }
 // Colour intelligence: the remark decides the row colour when it says so. Deliberately narrow —
 // only an explicit colour word counts, so ordinary notes ("70 pcs hole mark") never change a
@@ -5375,7 +5666,11 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
 // with the SAME code paths as a local folder. No cloud placeholders exist here: every read
 // downloads the real bytes from Google's servers or fails loudly.
 const DRIVE_CLIENT_ID = '687644161888-e2mls9gphdvkbmc19hkk7qr3svs986l1.apps.googleusercontent.com';
-const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
+// readonly = read your existing folders. drive.file = create and manage ONLY files this app
+// itself creates. Together they allow versioned backups into a new folder while making it
+// technically impossible for the tool to modify or delete Olisa's original Master File.
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file';
+const BACKUP_FOLDER_NAME = 'Latest Master Inventory Files';
 
 function loadGis() {
   return new Promise((resolve, reject) => {
