@@ -1,7 +1,7 @@
 /* Olisa Tools service worker — keeps the app shell and libraries cached so the installed app
    opens instantly. Google Drive/API traffic is NEVER cached: live data must stay live. */
-const CACHE = 'olisa-tools-v22';
-const SHELL = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
+const CACHE = 'olisa-tools-v24';
+const SHELL = ['./', './index.html', './olisa.html', './calculator.html', './manifest.json', './icon-192.png', './icon-512.png', './calc-icon-512.png', './apple-touch-icon.png'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
 });

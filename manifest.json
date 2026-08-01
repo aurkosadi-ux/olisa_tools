@@ -1,12 +1,12 @@
 {
-  "name": "Olisa Reporting Tools",
-  "short_name": "Olisa Tools",
-  "description": "Delivery reconciliation, PI lookup and reports for Olisa carton operations",
+  "name": "Sadi Tools",
+  "short_name": "Sadi Tools",
+  "description": "Olisa reporting tools and carton price calculator",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#F4F9FF",
-  "theme_color": "#1B3FA0",
+  "background_color": "#F6F9FE",
+  "theme_color": "#102A6E",
   "icons": [
     {
       "src": "icon-192.png",

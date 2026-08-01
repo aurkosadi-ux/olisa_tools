@@ -1,0 +1,775 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Carton Price Calculator</title>
+    
+    <!-- Load Tailwind CSS via CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <style>
+        /* Custom styles for mobile optimization and clean typography */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6;
+            margin: 0;
+            padding: 0;
+            overscroll-behavior: contain;
+        }
+        .container-wrapper {
+            /* Ensures the content is centered and takes full screen height */
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            min-height: 100vh;
+            padding: 1rem 0; /* Added overall padding now that header is not fixed */
+        }
+        
+        /* Animation for copy button feedback */
+        .copy-button-flash {
+            animation: flash 0.3s ease-in-out;
+        }
+        @keyframes flash {
+            0% { background-color: #f5f5f5; transform: scale(1); }
+            50% { background-color: #10b981; color: white; transform: scale(1.03); }
+            100% { background-color: #f5f5f5; color: #1f2937; transform: scale(1); }
+        }
+    
+  .appswitch { position:sticky; top:0; z-index:9700; display:flex; gap:6px; align-items:center;
+    padding:7px 10px; background:rgba(255,255,255,.94); backdrop-filter:blur(6px);
+    border-bottom:1px solid #E5ECF5; font-family:'Outfit','Segoe UI',Arial,sans-serif; }
+  .appswitch a { text-decoration:none; font-size:12.5px; font-weight:700; color:#5B6D89;
+    padding:5px 11px; border-radius:999px; border:1px solid transparent; white-space:nowrap; }
+  .appswitch a.on { color:#102A6E; background:#EAF2FF; border-color:#C9DDF7; }
+  .appswitch .home { margin-left:auto; font-size:12px; color:#5B6D89; }
+</style>
+</head>
+<body>
+<div class="appswitch">
+  <a href="olisa.html">Olisa Tools</a>
+  <a href="calculator.html" class="on">Price Calculator</a>
+  <a href="index.html" class="home">All tools</a>
+</div>
+
+
+<div class="container-wrapper">
+    <div id="calculator-app" class="w-full max-w-md bg-white shadow-2xl rounded-xl overflow-y-auto">
+        
+        <!-- --- STATIC TOP SECTION (Header + Price) - Scrolls with content --- -->
+        <div id="staticHeaderContainer">
+            <!-- Header -->
+            <header class="bg-indigo-600 p-3 flex items-center justify-between border-b border-gray-200 rounded-t-xl">
+                <div class="flex items-center">
+                    <!-- Calculator Icon SVG -->
+                    <svg class="w-5 h-5 mr-1 text-yellow-300" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="4" y="2" width="16" height="20" rx="2"></rect>
+                        <line x1="12" y1="6" x2="12" y2="6"></line>
+                        <line x1="16" y1="6" x2="16" y2="6"></line>
+                        <line x1="8" y1="10" x2="16" y2="10"></line>
+                        <line x1="8" y1="14" x2="16" y2="14"></line>
+                        <line x1="8" y1="18" x2="16" y2="18"></line>
+                    </svg>
+                    <h1 class="text-lg font-extrabold text-white">Carton Pricing Calculator</h1>
+                </div>
+                
+                <!-- Multiple Prices Button -->
+                <button onclick="App.switchView()" 
+                    class="px-3 py-1 text-sm font-semibold rounded-lg text-white transition-colors duration-200 shadow-lg"
+                    id="viewSwitchButton">
+                    <!-- Text updated by JS -->
+                </button>
+            </header>
+
+            <!-- Price Output Section (Hidden in Multiple View) -->
+            <div id="fixedPriceResult" class="p-4">
+                <!-- Price per Carton Output (Eye Catchy) - Used in both views -->
+                <div class="flex flex-col">
+                    <div class="flex justify-between items-center mb-1">
+                        <label class="text-sm font-bold text-gray-700" id="price_label">Price per Master Carton</label>
+                        <button id="copyButton" onclick="copyQuoteToClipboard()" 
+                            class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 hover:bg-emerald-500 hover:text-white transition-colors duration-200 flex items-center shadow-md">
+                            <svg id="copyIcon" class="w-4 h-4 mr-1 transition-colors duration-200" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                            </svg>
+                            Copy Quote
+                        </button>
+                    </div>
+                    <div class="bg-yellow-300 border-2 border-yellow-400 p-3 rounded-xl shadow-md text-xl font-extrabold text-gray-900 text-center" id="price_output" data-price="0.0000">$0.0000</div>
+                    <div id="copyMessage" class="mt-2 text-xs text-center text-emerald-600 opacity-0 transition-opacity duration-300"></div>
+                </div>
+            </div>
+        </div>
+        <!-- --- END STATIC TOP SECTION --- -->
+
+        <main class="relative">
+            <!-- No spacer div needed as header is not fixed -->
+
+            <!-- --- SINGLE PRICE CALCULATOR VIEW --- -->
+            <div id="singleView" class="p-4 pt-0">
+                
+                <!-- Square Meter Output (NOT FIXED - UN-FROZEN) -->
+                <div id="sqmDisplay" class="flex flex-col mb-4 pt-4">
+                    <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Square Meter (SQM)</label>
+                    <div class="relative">
+                        <input type="text" id="sqm_output" value="0.0000" readonly class="w-full p-2.5 rounded-lg border text-sm bg-gray-100 text-gray-800 border-gray-200 font-semibold">
+                        <span class="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-400 text-xs">SQM</span>
+                    </div>
+                </div>
+
+                <!-- Item Details & Setup -->
+                <h2 class="text-sm font-bold text-gray-800 border-t pt-4 border-b pb-1 mb-2">Item Specifications</h2>
+                
+                <div class="grid grid-cols-2 gap-3 mb-3">
+                    <!-- Item Name Selector -->
+                    <div class="flex flex-col mb-2">
+                        <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Item Name</label>
+                        <select id="itemName" onchange="App.calculatePrice()" class="w-full p-2.5 rounded-lg border border-gray-300 bg-white text-sm focus:border-indigo-600 focus:ring-indigo-600 appearance-none">
+                            <option value="Master Carton">Master Carton</option>
+                            <option value="Top/Bottom">Top/Bottom</option>
+                            <option value="U-Divider">U-Divider</option>
+                        </select>
+                    </div>
+                    
+                    <!-- Ply Selector -->
+                    <div class="flex flex-col mb-2">
+                        <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Ply</label>
+                        <select id="ply" class="w-full p-2.5 rounded-lg border border-gray-300 bg-white text-sm focus:border-indigo-600 focus:ring-indigo-600 appearance-none">
+                            <option value="5">5</option>
+                            <option value="3">3</option>
+                            <option value="7">7</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <!-- Unit Selector & Rate -->
+                <div class="grid grid-cols-3 gap-3">
+                    <!-- Unit Selector -->
+                    <div class="col-span-1">
+                        <div class="flex flex-col mb-2">
+                            <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">CM / INCH</label>
+                            <select id="unit" onchange="App.updateUnits(); App.calculatePrice();" class="w-full p-2.5 rounded-lg border border-gray-300 bg-white text-sm focus:border-indigo-600 focus:ring-indigo-600 appearance-none">
+                                <option value="CM">CM</option>
+                                <option value="INCH">INCH</option>
+                            </select>
+                        </div>
+                    </div>
+                    <!-- Rate per SQM -->
+                    <div class="col-span-2">
+                        <div class="flex flex-col mb-2">
+                            <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Rate per SQM ($)</label>
+                            <div class="relative">
+                                <input type="number" id="ratePerSqm" value="0.80" oninput="App.calculatePrice()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Box Dimensions Input -->
+                <h3 class="text-sm font-semibold text-gray-700 mt-4 mb-2" id="dimensions_label">Carton Measurements (CM)</h3>
+                <div id="dimensionInputs" class="grid grid-cols-3 gap-3">
+                    <div class="flex flex-col mb-2">
+                        <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Length (L)</label>
+                        <input type="number" id="lengthInput" value="" placeholder="0.00" oninput="App.calculatePrice()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                    </div>
+                    <div class="flex flex-col mb-2">
+                        <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Width (W)</label>
+                        <input type="number" id="widthInput" value="" placeholder="0.00" oninput="App.calculatePrice()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                    </div>
+                    <div class="flex flex-col mb-2" id="heightContainer">
+                        <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Height (H)</label>
+                        <input type="number" id="heightInput" value="" placeholder="0.00" oninput="App.calculatePrice()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                    </div>
+                </div>
+
+                <!-- CM Calculated Dimensions (Hidden by default, shown when INCH is selected) -->
+                <div id="cm_calculated_section" class="hidden">
+                    <h3 class="text-sm font-semibold text-gray-700 mt-4 mb-2">Carton Measurements (CM) - Calculated</h3>
+                    <div id="dimensionOutputs" class="grid grid-cols-3 gap-3 bg-indigo-50 p-2 rounded-lg">
+                        <div class="flex flex-col mb-2">
+                            <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Length (CM)</label>
+                            <input type="text" id="lengthCmOutput" readonly class="w-full p-2.5 rounded-lg border text-sm bg-gray-100 text-gray-800 border-gray-200 font-semibold">
+                        </div>
+                        <div class="flex flex-col mb-2">
+                            <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Width (CM)</label>
+                            <input type="text" id="widthCmOutput" readonly class="w-full p-2.5 rounded-lg border text-sm bg-gray-100 text-gray-800 border-gray-200 font-semibold">
+                        </div>
+                        <div class="flex flex-col mb-2" id="heightCmContainer">
+                            <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Height (CM)</label>
+                            <input type="text" id="heightCmOutput" readonly class="w-full p-2.5 rounded-lg border text-sm bg-gray-100 text-gray-800 border-gray-200 font-semibold">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Wastage Input (Hidden by default, shown for Master Carton) -->
+                <div id="wastage_section" class="mt-4">
+                    <h3 class="text-sm font-semibold text-gray-700 mt-4 mb-2">Wastage (cm)</h3>
+                    <div class="grid grid-cols-2 gap-3">
+                        <div class="flex flex-col mb-2">
+                            <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Wastage Width (WW)</label>
+                            <input type="number" id="wastageWidth" value="6" oninput="App.calculatePrice()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                        </div>
+                        <div class="flex flex-col mb-2">
+                            <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Wastage Height (WH)</label>
+                            <input type="number" id="wastageHeight" value="4" oninput="App.calculatePrice()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <!-- --- END SINGLE PRICE CALCULATOR VIEW --- -->
+
+            <!-- --- MULTIPLE PRICES CALCULATOR VIEW --- -->
+            <div id="multipleView" class="p-4 hidden">
+                <div class="bg-indigo-50 p-3 rounded-xl shadow-inner my-4">
+                    <h3 class="text-sm font-bold text-gray-800 mb-2">Multi-Price Input Setup</h3>
+                    <div class="flex flex-col mb-2">
+                        <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Rate per SQM ($)</label>
+                        <input type="number" id="multiRatePerSqm" value="0.80" oninput="App.applyRateToAll()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                    </div>
+                </div>
+
+                <!-- Dynamic Row Container -->
+                <div id="multipleRowsContainer">
+                    <!-- Rows will be injected here -->
+                </div>
+
+                <!-- Add Row Button -->
+                <button onclick="App.addRow()" class="w-full bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-2 px-4 rounded-lg transition-colors duration-200 shadow-lg mt-4 mb-8">
+                    Add Another Row
+                </button>
+
+                <!-- Copy Button -->
+                <button onclick="App.copyMultipleQuotes()" id="copyMultipleButton" class="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-2 px-4 rounded-lg transition-colors duration-200 shadow-lg mb-4">
+                    Copy
+                </button>
+            </div>
+            <!-- --- END MULTIPLE PRICES CALCULATOR VIEW --- -->
+
+            
+            <!-- Footer Note -->
+            <div class="p-4 text-xs text-gray-500 text-center border-t mt-4">
+                <span id="formula_note">*Formula is calculated based on <strong>Master Carton</strong> specifications.</span>
+                <p class="mt-2 text-gray-400">Courtesy of Sadi Mohammad</p>
+            </div>
+
+        </main>
+    </div>
+</div>
+
+<script>
+    const CM_PER_INCH = 2.54;
+
+    // --- Helper Functions ---
+    const getVal = (id) => parseFloat(document.getElementById(id).value) || 0;
+    const formatSqm = (value) => value.toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 4 });
+    const formatCurrency = (value) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 4, maximumFractionDigits: 4 }).format(value);
+    const formatRawPrice = (value) => parseFloat(value).toFixed(4);
+
+    // --- Core Calculation Function ---
+    function calculateArea(itemName, L_cm, W_cm, H_cm, wastageWidth = 0, wastageHeight = 0) {
+        let areaCm2 = 0;
+
+        if (itemName === 'Master Carton') {
+            // Formula: 2 * (l+w+width wastage) * (w+h+height wastage)
+            areaCm2 = 2 * (L_cm + W_cm + wastageWidth) * (W_cm + H_cm + wastageHeight);
+        } else if (itemName === 'Top/Bottom') {
+            // Formula: (length X width). H_cm is ignored.
+            areaCm2 = L_cm * W_cm;
+        } else if (itemName === 'U-Divider') {
+            // Formula: (Length+2) * (Width + (2*Height)+2)
+            areaCm2 = (L_cm + 2) * (W_cm + (2 * H_cm) + 2);
+        }
+
+        return areaCm2 / 10000; // Convert cm² to m²
+    }
+
+
+    // --- Global App State and Logic ---
+    const App = {
+        viewMode: 'single', // 'single' or 'multiple'
+        rowCount: 0,
+        
+        /**
+         * Switches the view between Single Price and Multiple Prices.
+         */
+        switchView: function() {
+            this.viewMode = (this.viewMode === 'single' ? 'multiple' : 'single');
+            document.getElementById('singleView').classList.toggle('hidden', this.viewMode !== 'single');
+            document.getElementById('multipleView').classList.toggle('hidden', this.viewMode !== 'multiple');
+            document.getElementById('sqmDisplay').classList.toggle('hidden', this.viewMode !== 'single');
+            
+            // --- NEW: Hide/Show the main price output container based on view ---
+            const fixedPriceResult = document.getElementById('fixedPriceResult');
+            fixedPriceResult.classList.toggle('hidden', this.viewMode === 'multiple');
+            
+            // Update button text and class
+            const switchBtn = document.getElementById('viewSwitchButton');
+            if (this.viewMode === 'single') {
+                switchBtn.textContent = 'Multiple Prices';
+                switchBtn.classList.add('bg-emerald-500');
+                switchBtn.classList.remove('bg-gray-500');
+                this.calculatePrice(); // Recalculate single price on return
+            } else {
+                switchBtn.textContent = 'Single Price';
+                switchBtn.classList.remove('bg-emerald-500');
+                switchBtn.classList.add('bg-gray-500');
+                this.calculateAllMultiPrices(); // Recalculate all multi prices on entry
+            }
+        },
+
+        // --- SINGLE VIEW LOGIC ---
+
+        /**
+         * Core calculation and UI update for the Single Price View.
+         */
+        calculatePrice: function() {
+            const itemName = document.getElementById('itemName').value;
+            const unit = document.getElementById('unit').value;
+            const ratePerSqm = getVal('ratePerSqm');
+            
+            let L = getVal('lengthInput');
+            let W = getVal('widthInput');
+            let H = getVal('heightInput');
+            
+            const wastageWidth = getVal('wastageWidth');
+            const wastageHeight = getVal('wastageHeight');
+            
+            let lengthCm, widthCm, heightCm;
+
+            // --- UI Toggles for Top/Bottom ---
+            const heightContainer = document.getElementById('heightContainer');
+            const heightCmContainer = document.getElementById('heightCmContainer');
+            const dimensionInputs = document.getElementById('dimensionInputs');
+            const dimensionOutputs = document.getElementById('dimensionOutputs');
+            
+            const isTopBottom = itemName === 'Top/Bottom';
+            
+            // Hide/Show Height and adjust grid
+            heightContainer.classList.toggle('hidden', isTopBottom);
+            heightCmContainer.classList.toggle('hidden', isTopBottom);
+            
+            if (isTopBottom) {
+                 // Adjust to 2 columns if only L and W are used
+                dimensionInputs.classList.replace('grid-cols-3', 'grid-cols-2');
+                dimensionOutputs.classList.replace('grid-cols-3', 'grid-cols-2');
+            } else {
+                // Reset to 3 columns
+                dimensionInputs.classList.replace('grid-cols-2', 'grid-cols-3');
+                dimensionOutputs.classList.replace('grid-cols-2', 'grid-cols-3');
+            }
+            
+            // --- Unit Conversion ---
+            if (unit === 'INCH') {
+                lengthCm = L * CM_PER_INCH;
+                widthCm = W * CM_PER_INCH;
+                heightCm = H * CM_PER_INCH;
+                
+                document.getElementById('lengthCmOutput').value = lengthCm.toFixed(2);
+                document.getElementById('widthCmOutput').value = widthCm.toFixed(2);
+                document.getElementById('heightCmOutput').value = heightCm.toFixed(2);
+            } else {
+                lengthCm = L;
+                widthCm = W;
+                heightCm = H;
+            }
+
+            // --- Calculation ---
+            const calculatedSqm = calculateArea(itemName, lengthCm, widthCm, heightCm, wastageWidth, wastageHeight);
+            const pricePerCarton = calculatedSqm * ratePerSqm;
+
+            // --- Update Fixed Header Results (Now Static) ---
+            this.updateFixedPriceDisplay(pricePerCarton, itemName);
+            
+            // --- Update Single View UI Results ---
+            document.getElementById('sqm_output').value = formatSqm(calculatedSqm);
+            
+            // Update labels and visibility
+            document.getElementById('formula_note').innerHTML = `*Formula is calculated based on <strong>${itemName}</strong> specifications.`;
+            document.getElementById('wastage_section').style.display = (itemName === 'Master Carton' ? 'block' : 'none');
+        },
+
+        /**
+         * Toggles the unit labels and visibility of calculated CM outputs.
+         */
+        updateUnits: function() {
+            const unit = document.getElementById('unit').value;
+            const showInch = unit === 'INCH';
+            const unitText = showInch ? 'INCH' : 'CM';
+
+            document.getElementById('dimensions_label').textContent = `Carton Measurements (${unitText})`;
+            document.getElementById('cm_calculated_section').classList.toggle('hidden', !showInch);
+        },
+
+        // --- MULTIPLE VIEW LOGIC ---
+
+        /**
+         * Adds a new row of input fields to the multiple view.
+         */
+        /** Pushes the default rate into every existing item row, then recalculates. */
+        applyRateToAll: function() {
+            const v = document.getElementById('multiRatePerSqm').value;
+            document.querySelectorAll('[id^="multiRate-"]').forEach(el => { el.value = v; });
+            this.calculateAllMultiPrices();
+        },
+
+        addRow: function() {
+            const index = App.rowCount++;
+            const container = document.getElementById('multipleRowsContainer');
+            
+            const newRow = document.createElement('div');
+            newRow.id = `row-${index}`;
+            newRow.className = 'p-3 border border-gray-200 rounded-lg mb-3 shadow-sm bg-white';
+            
+            newRow.innerHTML = `
+                <div class="flex justify-between items-center mb-2 pb-1 border-b border-gray-100">
+                    <h4 class="text-sm font-bold text-indigo-600">Item #${index + 1}</h4>
+                    <button onclick="App.removeRow(${index})" class="text-red-500 hover:text-red-700 text-xs font-semibold">
+                        Remove
+                    </button>
+                </div>
+                
+                <div class="grid grid-cols-2 gap-3">
+                    <div class="flex flex-col mb-2">
+                        <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Item Name</label>
+                        <select id="multiItemName-${index}" onchange="App.handleMultiItemChange(${index}); App.calculateAllMultiPrices();" class="w-full p-2.5 rounded-lg border border-gray-300 bg-white text-sm focus:border-indigo-600 focus:ring-indigo-600 appearance-none">
+                            <option value="Master Carton">Master Carton</option>
+                            <option value="Top/Bottom">Top/Bottom</option>
+                        </select>
+                    </div>
+
+                    <div class="flex flex-col mb-2">
+                        <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Price / Pcs</label>
+                        <input type="text" id="multiPrice-${index}" value="$0.0000" readonly class="w-full p-2.5 rounded-lg border text-sm bg-gray-100 text-gray-800 border-gray-200 font-semibold text-right">
+                    </div>
+                </div>
+
+                <!-- Per-item rate: starts from the default above, but each item can use its own
+                     (e.g. 0.80 for master cartons, 0.75 for top/bottom). -->
+                <div class="flex flex-col mb-2">
+                    <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Rate per SQM ($) — this item</label>
+                    <input type="number" id="multiRate-${index}" value="${document.getElementById('multiRatePerSqm') ? (document.getElementById('multiRatePerSqm').value || '0.80') : '0.80'}" oninput="App.calculateAllMultiPrices()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                </div>
+
+                <!-- NEW: Separate L, W, H inputs -->
+                <h5 class="text-xs font-medium text-gray-700 mt-2 mb-1 leading-tight">Measurements (CM)</h5>
+                <div id="multiDimensionInputs-${index}" class="grid grid-cols-3 gap-3">
+                    <div class="flex flex-col">
+                        <input type="number" id="multiL-${index}" placeholder="L" oninput="App.calculateAllMultiPrices()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                    </div>
+                    <div class="flex flex-col">
+                        <input type="number" id="multiW-${index}" placeholder="W" oninput="App.calculateAllMultiPrices()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                    </div>
+                    <div class="flex flex-col" id="multiHContainer-${index}">
+                        <input type="number" id="multiH-${index}" placeholder="H" oninput="App.calculateAllMultiPrices()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                    </div>
+                </div>
+                
+                <div id="multiWastageContainer-${index}" class="grid grid-cols-2 gap-3 mt-4">
+                    <div class="flex flex-col mb-2">
+                        <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Wastage W (CM)</label>
+                        <input type="number" id="multiWW-${index}" value="6" oninput="App.calculateAllMultiPrices()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                    </div>
+                    <div class="flex flex-col mb-2">
+                        <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Wastage H (CM)</label>
+                        <input type="number" id="multiWH-${index}" value="4" oninput="App.calculateAllMultiPrices()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                    </div>
+                </div>
+            `;
+            
+            container.appendChild(newRow);
+            this.handleMultiItemChange(index); // Initialize visibility
+            this.calculateAllMultiPrices(); // Calculate price for the new row
+        },
+
+        /**
+         * Removes a row from the multiple view.
+         * @param {number} index - The index of the row to remove.
+         */
+        removeRow: function(index) {
+            const row = document.getElementById(`row-${index}`);
+            if (row) {
+                row.remove();
+                this.calculateAllMultiPrices(); // Recalculate prices
+            }
+        },
+
+        /**
+         * Toggles the visibility of wastage and height inputs based on item name.
+         * @param {number} index - The index of the row.
+         */
+        handleMultiItemChange: function(index) {
+            const itemName = document.getElementById(`multiItemName-${index}`).value;
+            const wastageContainer = document.getElementById(`multiWastageContainer-${index}`);
+            const heightContainer = document.getElementById(`multiHContainer-${index}`);
+
+            // Toggle wastage for Master Carton
+            wastageContainer.classList.toggle('hidden', itemName !== 'Master Carton');
+            
+            // Toggle Height for Top/Bottom (Top/Bottom doesn't use H in formula)
+            heightContainer.classList.toggle('hidden', itemName === 'Top/Bottom');
+        },
+
+        /**
+         * Recalculates all prices in the multiple view and updates the main price display 
+         * with the price of the *last calculated* item. NO GRAND TOTAL IS CALCULATED.
+         */
+        calculateAllMultiPrices: function() {
+            let lastPrice = 0;
+            let lastItemName = 'Carton';
+
+            const ratePerSqm = parseFloat(document.getElementById('multiRatePerSqm').value) || 0;
+            
+            // Get all actual row elements currently in the container
+            const container = document.getElementById('multipleRowsContainer');
+            const rows = Array.from(container.children);
+            
+            rows.forEach(rowElement => {
+                // Extract the index from the ID, e.g., 'row-5' -> 5, this is the internal ID
+                const i = parseInt(rowElement.id.split('-')[1]);
+                
+                // Get elements using the row index 'i'
+                const itemName = document.getElementById(`multiItemName-${i}`).value;
+                const priceOutput = document.getElementById(`multiPrice-${i}`);
+                
+                // Read from separate L, W, H inputs
+                let L = parseFloat(document.getElementById(`multiL-${i}`).value) || 0;
+                let W = parseFloat(document.getElementById(`multiW-${i}`).value) || 0;
+                let H = parseFloat(document.getElementById(`multiH-${i}`).value) || 0;
+                
+                // Get wastage inputs for Master Carton
+                let wastageWidth = 0;
+                let wastageHeight = 0;
+                if (itemName === 'Master Carton') {
+                    wastageWidth = parseFloat(document.getElementById(`multiWW-${i}`).value) || 0;
+                    wastageHeight = parseFloat(document.getElementById(`multiWH-${i}`).value) || 0;
+                }
+
+                // If Top/Bottom is selected, H should effectively be 0 for the formula
+                if (itemName === 'Top/Bottom') {
+                    H = 0;
+                }
+                
+                const calculatedSqm = calculateArea(itemName, L, W, H, wastageWidth, wastageHeight);
+                const rowRateEl = document.getElementById(`multiRate-${index}`);
+                const rowRate = rowRateEl && rowRateEl.value !== '' ? (parseFloat(rowRateEl.value) || 0) : ratePerSqm;
+                const pricePerCarton = calculatedSqm * rowRate;
+                
+                priceOutput.value = formatCurrency(pricePerCarton);
+                priceOutput.setAttribute('data-price', pricePerCarton.toFixed(4));
+                
+                // Store the last calculated price and name
+                lastPrice = pricePerCarton;
+                lastItemName = itemName;
+            });
+
+            // Update the main price box with the last calculated price (Only visible in single view)
+            this.updateFixedPriceDisplay(lastPrice, lastItemName);
+        },
+
+        /**
+         * Updates the main fixed price box.
+         * @param {number} price - The price to display.
+         * @param {string} name - The item name for the label.
+         */
+        updateFixedPriceDisplay: function(price = 0, name = 'Carton') {
+            document.getElementById('price_output').setAttribute('data-price', formatRawPrice(price));
+            document.getElementById('price_output').textContent = formatCurrency(price);
+            document.getElementById('price_label').textContent = `Price per ${name}`;
+        },
+
+
+        // --- SHARED LOGIC ---
+
+        /**
+         * Copies the single quote to the clipboard.
+         */
+        copySingleQuote: function() {
+            const itemName = document.getElementById('itemName').value;
+            const unit = document.getElementById('unit').value;
+            const price = document.getElementById('price_output').getAttribute('data-price') || '0.0000';
+            
+            let displayL, displayW, displayH;
+            
+            if (unit === 'INCH') {
+                displayL = getVal('lengthCmOutput').toFixed(2);
+                displayW = getVal('widthCmOutput').toFixed(2);
+                displayH = (itemName === 'Top/Bottom') ? '' : getVal('heightCmOutput').toFixed(2);
+            } else {
+                displayL = getVal('lengthInput').toFixed(2);
+                displayW = getVal('widthInput').toFixed(2);
+                displayH = (itemName === 'Top/Bottom') ? '' : getVal('heightInput').toFixed(2);
+            }
+
+            let dimensionString;
+            if (itemName === 'Top/Bottom') {
+                dimensionString = `L${displayL} X W${displayW} CM`;
+            } else {
+                dimensionString = `L${displayL} X W${displayW} X H${displayH} CM`;
+            }
+
+            const quoteString = `${itemName}; ${dimensionString} - $${price} / pcs.`;
+            App.copyToClipboard(quoteString, 'Quote Copied!');
+        },
+
+        /**
+         * Generates and copies a multi-line quote of all rows to the clipboard, with numbering.
+         */
+        copyMultipleQuotes: function() {
+            // Re-run calculation to ensure prices are up-to-date
+            this.calculateAllMultiPrices();
+
+            // Use the specified opening phrase
+            let quoteString = "Please see the prices below-\n\n";
+            let itemQuotes = [];
+            
+            // Get all actual row elements currently in the container
+            const container = document.getElementById('multipleRowsContainer');
+            const rows = Array.from(container.children);
+
+            // Gather data and create item quotes
+            rows.forEach((rowElement, index) => {
+                // Extract the internal index
+                const i = parseInt(rowElement.id.split('-')[1]);
+                
+                // Get elements using the row index 'i'
+                const itemName = document.getElementById(`multiItemName-${i}`).value;
+                const priceRaw = document.getElementById(`multiPrice-${i}`).getAttribute('data-price');
+                const price = formatRawPrice(priceRaw);
+                
+                // Read dimensions (always in CM for this view)
+                const L_raw = parseFloat(document.getElementById(`multiL-${i}`).value) || 0;
+                const W_raw = parseFloat(document.getElementById(`multiW-${i}`).value) || 0;
+                const H_raw = parseFloat(document.getElementById(`multiH-${i}`).value) || 0;
+                
+                const L = L_raw.toFixed(2);
+                const W = W_raw.toFixed(2);
+                
+                let dimensionString;
+                if (itemName === 'Top/Bottom') {
+                    dimensionString = `L${L} X W${W} CM`;
+                } else {
+                    const H = H_raw.toFixed(2);
+                    dimensionString = `L${L} X W${W} X H${H} CM`;
+                }
+                
+                // Use index + 1 for sequential numbering
+                const itemQuote = `${index + 1}. ${itemName}; ${dimensionString} - $${price} / pcs.`;
+                itemQuotes.push(itemQuote);
+            });
+
+            // Assemble the final string without a grand total
+            quoteString += itemQuotes.join('\n');
+            
+            // Pass a specific message for the multiple copy action
+            App.copyToClipboard(quoteString, 'Multiple Quotes Copied!');
+        },
+
+        /**
+         * Universal copy function with visual feedback.
+         * @param {string} textToCopy - The string content to copy to the clipboard.
+         * @param {string} confirmationMessage - The message to show on success.
+         */
+        copyToClipboard: function(textToCopy, confirmationMessage = 'Copied!') {
+            const tempInput = document.createElement('textarea');
+            tempInput.value = textToCopy;
+            tempInput.style.position = 'absolute';
+            tempInput.style.left = '-9999px';
+            document.body.appendChild(tempInput);
+
+            let success = false;
+            try {
+                tempInput.select();
+                document.execCommand('copy');
+                success = true;
+            } catch (err) {
+                console.error('Copy failed with execCommand fallback:', err);
+                success = false;
+            }
+
+            document.body.removeChild(tempInput);
+
+            // Determine which confirmation elements to target based on view mode
+            let targetButton, targetMessage;
+            if (this.viewMode === 'multiple') {
+                targetButton = document.getElementById('copyMultipleButton');
+                // For the multiple view, we use the button itself to show feedback
+                targetMessage = document.createElement('div');
+                targetMessage.className = 'absolute inset-0 flex items-center justify-center text-sm font-bold bg-indigo-700 text-white rounded-lg opacity-0 transition-opacity duration-300 pointer-events-none';
+                targetMessage.textContent = success ? confirmationMessage : 'Copy failed.';
+                
+                if (targetButton) {
+                    targetButton.style.position = 'relative';
+                    targetButton.appendChild(targetMessage);
+                }
+                
+            } else {
+                targetButton = document.getElementById('copyButton'); // The smaller button next to the price
+                targetMessage = document.getElementById('copyMessage'); // The dedicated message div below the price
+            }
+
+
+            if (success) {
+                if (this.viewMode === 'multiple' && targetMessage) {
+                    targetMessage.classList.add('opacity-100');
+                    setTimeout(() => {
+                        targetMessage.classList.remove('opacity-100');
+                        if (targetButton) targetButton.removeChild(targetMessage);
+                    }, 2000);
+                } else if (targetMessage && targetButton) {
+                    targetMessage.textContent = confirmationMessage;
+                    targetMessage.classList.add('opacity-100');
+                    targetButton.classList.add('copy-button-flash');
+                    
+                    setTimeout(() => {
+                        targetMessage.classList.remove('opacity-100');
+                        targetButton.classList.remove('copy-button-flash');
+                    }, 2000);
+                }
+            } else {
+                 console.error('Copy failed.');
+            }
+        },
+    };
+
+    // Global function for onclick in HTML (Only used for the small 'Copy Quote' button in Single View)
+    function copyQuoteToClipboard() {
+        if (App.viewMode === 'single') {
+            App.copySingleQuote();
+        } 
+        // Note: The main "Copy" button in the multiple view calls App.copyMultipleQuotes() directly.
+    }
+
+    // --- Initialization ---
+    window.onload = function() {
+        // Initialize Single View UI elements
+        App.updateUnits();
+        
+        // Ensure default values are visually empty but maintain placeholder
+        document.getElementById('lengthInput').value = '';
+        document.getElementById('widthInput').value = '';
+        document.getElementById('heightInput').value = '';
+        document.getElementById('ratePerSqm').value = '0.80';
+        document.getElementById('wastageWidth').value = '6';
+        document.getElementById('wastageHeight').value = '4';
+        
+        // Set initial view button text
+        document.getElementById('viewSwitchButton').textContent = 'Multiple Prices';
+        document.getElementById('viewSwitchButton').classList.add('bg-emerald-500');
+
+        App.calculatePrice(); // Perform initial calculation (will result in 0.0000)
+        
+        // Add one default row to the Multiple View to start
+        App.addRow();
+        
+        // Set view to 'single' and update UI state.
+        document.getElementById('singleView').classList.remove('hidden');
+        document.getElementById('multipleView').classList.add('hidden');
+        document.getElementById('sqmDisplay').classList.remove('hidden'); // Ensure SQM is visible in single mode
+        document.getElementById('fixedPriceResult').classList.remove('hidden'); // Ensure price is visible in single mode
+        App.viewMode = 'single'; 
+    };
+
+</script>
+</body>
+</html>
