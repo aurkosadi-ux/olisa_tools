@@ -912,6 +912,7 @@
   </div>
   </div>
 
+  <a href="#" id="driveLogoutLink" style="position:fixed;right:12px;bottom:10px;z-index:9600;font-size:11px;color:var(--sub);text-decoration:none;opacity:.75;">Log out of Drive</a>
   <footer>Courtesy of <strong>Sadi Mohammad</strong> &middot; built for Olisa carton operations &#128153;</footer>
 </div>
 <script>
@@ -1794,7 +1795,34 @@ const loadStatus = document.getElementById('askLoadStatus');
 // Drive-mode state, declared up top so early UI (health strip) can read it before the drive
 // module's code further down runs — a TDZ crash here took the whole page down once.
 let driveToken = null;
+let driveTokenExp = 0;      // ms timestamp when the current token dies
+let driveHint = '';         // the Google account used last time, so no account chooser reappears
 let driveTokenClient = null;
+// Google access tokens live for about an hour. Keeping the token (with its expiry) in local
+// storage means reloading the page, hopping to the calculator and back, or reopening the app
+// within that hour resumes INSTANTLY — no Google roundtrip, no account chooser, no waiting.
+async function saveDriveSession() {
+  try { await idbSet('driveSession', { token: driveToken, exp: driveTokenExp, hint: driveHint }); } catch (e) {}
+}
+async function restoreDriveSession() {
+  try {
+    const s = await idbGet('driveSession');
+    if (s && s.hint) driveHint = s.hint;
+    if (s && s.token && s.exp && s.exp - Date.now() > 5 * 60 * 1000) {
+      driveToken = s.token; driveTokenExp = s.exp;
+      return true; // still valid with margin — use it as-is
+    }
+  } catch (e) {}
+  return false;
+}
+async function driveLogout() {
+  try { if (driveToken && window.google && google.accounts) google.accounts.oauth2.revoke(driveToken, () => {}); } catch (e) {}
+  driveToken = null; driveTokenExp = 0; driveHint = '';
+  try { await idbSet('driveSession', null); } catch (e) {}
+  notify('drive', 'Logged out of Google Drive. The next connect will ask you to sign in again.');
+  const bt = document.getElementById('askDriveBtnText');
+  if (bt) bt.textContent = 'Connect Google Drive';
+}
 const driveListCache = new Map(); // folderId -> [{id,name,mimeType,size,modifiedTime}]
 const askInput = document.getElementById('askInput');
 const askBtn = document.getElementById('askBtn');
@@ -2104,8 +2132,34 @@ async function connectFolder(existingHandle, forceNew) {
 
     // ~$xxx.xlsx is Excel's lock file (an artifact, not data) — it rode along in folder uploads and
     // once got picked as "the Master File", which silently produced an empty dataset and a dead Ask box.
-    const masterSearch = await findFileRecursive(dirHandle, name => /master/i.test(name) && !/^~\$/.test(name) && !/\.tmp$/i.test(name), 6);
-    piRootHandle = await findFolderRecursive(dirHandle, name => /work\s*orders?/i.test(name), 4);
+    // The recursive search below walks EVERY folder (all 155 PI folders included) and was the
+    // 4-5 minute reconnect. So the first successful find remembers the Drive file IDs, and every
+    // later connect jumps straight to them — the full walk only happens again if they vanish.
+    let masterSearch = null;
+    if (dirHandle.isDrive) {
+      try {
+        const sc = await idbGet('driveShortcuts');
+        if (sc && sc.rootId === dirHandle.id && sc.masterId) {
+          const meta = await driveFetch(`https://www.googleapis.com/drive/v3/files/${sc.masterId}?fields=id,name,size,modifiedTime,trashed&supportsAllDrives=true`);
+          if (meta && !meta.trashed) {
+            masterSearch = { handle: new DriveFileHandle(meta), diag: { xlsxSeen: [], folders: [], errors: [] } };
+            if (sc.piRootId) piRootHandle = new DriveDirHandle(sc.piRootId, sc.piRootName || 'Work Orders');
+          }
+        }
+      } catch (e) { masterSearch = null; /* stale shortcut — fall through to the full search */ }
+    }
+    if (!masterSearch || !masterSearch.handle) {
+      masterSearch = await findFileRecursive(dirHandle, name => /master/i.test(name) && !/^~\$/.test(name) && !/\.tmp$/i.test(name), 6);
+      piRootHandle = await findFolderRecursive(dirHandle, name => /work\s*orders?/i.test(name), 4);
+      if (dirHandle.isDrive && masterSearch.handle && masterSearch.handle.meta) {
+        idbSet('driveShortcuts', {
+          rootId: dirHandle.id,
+          masterId: masterSearch.handle.meta.id,
+          piRootId: piRootHandle && piRootHandle.id || null,
+          piRootName: piRootHandle && piRootHandle.name || null
+        }).catch(() => {});
+      }
+    }
     // A shared index file in the folder means another device already did the work.
     const adoptedShared = await tryLoadIndexFromFolder(dirHandle);
     // No shared file, but this device may hold a cached index — say whether it is still current.
@@ -2310,6 +2364,7 @@ async function buildStyleIndex() {
   if (typeof renderIndexStamp === 'function') renderIndexStamp();
   if (typeof renderHealth === 'function') renderHealth();
   if (typeof notify === 'function') notify('build', `Index built: ${withPi} PI(s), ${Object.keys(index).length} style(s).`);
+  if (typeof uploadIndexToDrive === 'function') uploadIndexToDrive(); // fire-and-forget; notifies on its own
   progressText.textContent = `Done \u2014 indexed ${Object.keys(index).length} style(s) across ${foldersScanned} PI folder(s); PI Qty read for ${withPi} PI(s).`;
   renderPiIndexDiagnostics(piFolders.length, withPi, b, sweep);
   indexBuilding = false;
@@ -2364,6 +2419,54 @@ function renderPiIndexDiagnostics(totalFolders, withPi, buckets, sweep) {
 buildIndexBtn.addEventListener('click', buildStyleIndex);
 
 // --- generic file preview (pdf / xlsx / docx) ---
+// ==================== AUTO INDEX UPLOAD ====================
+// The moment a build finishes, the index file goes to Drive by itself — no download, no manual
+// upload, no button. The same file is UPDATED in place each time (not piled up as copies), so the
+// phone always finds exactly one, current index. Falls back silently in local mode.
+const INDEX_UPLOAD_FOLDER = 'Olisa Index File for Smartphones';
+async function ensureNamedFolder(name) {
+  const parent = (savedRootHandle && savedRootHandle.isDrive) ? savedRootHandle.id : 'root';
+  const q = encodeURIComponent(`name='${name}' and '${parent}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+  const found = await driveApi(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)&supportsAllDrives=true`);
+  if (found.files && found.files.length) return found.files[0].id;
+  const made = await driveApi('https://www.googleapis.com/drive/v3/files?fields=id&supportsAllDrives=true', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, mimeType: 'application/vnd.google-apps.folder', parents: [parent] })
+  });
+  return made.id;
+}
+async function uploadIndexToDrive() {
+  if (!(savedRootHandle && savedRootHandle.isDrive)) return; // office/local mode: nothing to do
+  if (!Object.keys(piIndex).length) return;
+  try {
+    const folderId = await ensureNamedFolder(INDEX_UPLOAD_FOLDER);
+    const json = JSON.stringify(currentIndexPayload());
+    const gz = await gzipBytes(json);
+    const blob = gz || new Blob([json], { type: 'application/json' });
+    const name = gz ? INDEX_FILE_GZ : INDEX_FILE_NAME;
+    // Update-in-place when our file already exists (drive.file scope sees files this app created).
+    const q = encodeURIComponent(`name='${name}' and '${folderId}' in parents and trashed=false`);
+    const existing = await driveApi(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)&supportsAllDrives=true`);
+    if (!driveToken) await requestDriveToken(false);
+    let res;
+    if (existing.files && existing.files.length) {
+      res = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${existing.files[0].id}?uploadType=media&supportsAllDrives=true`, {
+        method: 'PATCH', headers: { Authorization: 'Bearer ' + driveToken }, body: blob
+      });
+    } else {
+      const form = new FormData();
+      form.append('metadata', new Blob([JSON.stringify({ name, parents: [folderId] })], { type: 'application/json' }));
+      form.append('file', blob);
+      res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id&supportsAllDrives=true', {
+        method: 'POST', headers: { Authorization: 'Bearer ' + driveToken }, body: form
+      });
+    }
+    if (!res.ok) throw new Error('upload ' + res.status);
+    notify('drive', `Index uploaded to Drive ("${INDEX_UPLOAD_FOLDER}") \u2014 your phone will load it automatically for a faster start.`);
+  } catch (e) {
+    notify('error', `Automatic index upload failed (${e.message}). You can still use \u201cSave index file\u201d manually.`);
+  }
+}
 // ==================== VERSIONED MASTER-FILE BACKUPS TO DRIVE ====================
 // Your edits live in this browser. If the laptop is wiped, that copy goes with it — so every set
 // of changes is also written to Drive as a NEW, timestamped workbook inside a dedicated folder.
@@ -2437,7 +2540,9 @@ async function buildUpdatedMasterBlob() {
 function backupFileName(version) {
   const d = new Date();
   const pad = n => String(n).padStart(2, '0');
-  return `Olisa Master Inventory \u2014 ${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d.getFullYear()} ${pad(d.getHours())}${pad(d.getMinutes())} \u2014 v${version}.xlsx`;
+  const h12 = d.getHours() % 12 || 12;
+  const ap = d.getHours() < 12 ? 'am' : 'pm';
+  return `Olisa Master Inventory \u2014 ${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d.getFullYear()}, ${pad(h12)}-${pad(d.getMinutes())} ${ap} \u2014 v${version}.xlsx`;
 }
 async function backupMasterToDrive(silent) {
   if (!allRecords.length) { if (!silent) toast('Load the Master File first.'); return; }
@@ -2488,7 +2593,7 @@ function bumpBackupVersion() { backupVersion++; idbSet('backupVersion', { n: bac
 // keystroke either, so uploads are debounced until edits stop.
 function scheduleMasterBackup() {
   if (backupTimer) clearTimeout(backupTimer);
-  backupTimer = setTimeout(() => backupMasterToDrive(true), 45000);
+  backupTimer = setTimeout(() => backupMasterToDrive(true), 10000); // ~10s after the last edit
 }
 // ==================== PLAYFUL DECOR: grab, fling, settle back ====================
 // The floating shapes and the hero carton can be picked up and thrown anywhere. Each remembers
@@ -2902,11 +3007,11 @@ async function reportIndexFreshness(loadedFromFile) {
       if (handle.kind === 'directory') folders.push({ name, handle });
     }
     const stale = [];
-    for (const { name, handle } of folders) {
+    await runPool(folders, 6, async ({ name, handle }) => {
       const ref = normPiKey(parsePiNumber(name));
-      if (!ref) continue;
+      if (!ref) return;
       const entry = piIndex[ref];
-      if (!entry || !entry.rowCount) { stale.push(ref); continue; }
+      if (!entry || !entry.rowCount) { stale.push(ref); return; }
       // Drive gives size+mtime free in the listing, so this check costs no downloads.
       if (entry.srcFp) {
         let changed = true;
@@ -2919,7 +3024,7 @@ async function reportIndexFreshness(loadedFromFile) {
         } catch (e) { changed = false; } // local mode has no metadata here — don't cry wolf
         if (changed) stale.push(ref);
       }
-    }
+    });
     const n = Object.keys(piIndex).length;
     if (!stale.length) {
       notify('build', loadedFromFile
@@ -2951,6 +3056,7 @@ async function tryLoadIndexFromFolder(rootHandle) {
 }
 document.getElementById('askSaveIndexBtn').addEventListener('click', saveIndexFile);
 document.getElementById('askBackupBtn').addEventListener('click', () => backupMasterToDrive(false));
+document.getElementById('driveLogoutLink').addEventListener('click', e => { e.preventDefault(); driveLogout(); });
 // ==================== IN-APP FILE VIEWER (works on Android) ====================
 // window.open + iframe cannot show PDFs on Android Chrome. This modal renders PDFs page by page
 // with pdf.js, previews sheets and Word files inline, and offers Download + native Share
@@ -3291,11 +3397,13 @@ function setAccepted(r, reason) {
   acceptedShorts[acceptKey(r)] = { reason: String(reason || '').slice(0, 200), at: Date.now() };
   persistAcceptedShorts();
   reconcileManualChallans();
+  if (typeof scheduleMasterBackup === 'function') scheduleMasterBackup();
 }
 function clearAccepted(r) {
   delete acceptedShorts[acceptKey(r)];
   persistAcceptedShorts();
   reconcileManualChallans();
+  if (typeof scheduleMasterBackup === 'function') scheduleMasterBackup();
 }
 function acceptedFor(r) { return acceptedShorts[acceptKey(r)] || null; }
 function effectiveShort(r) {
@@ -5690,6 +5798,10 @@ function withTimeout(promise, ms, msg) {
 }
 function requestDriveToken(interactive) {
   return new Promise(async (resolve, reject) => {
+    // A stored, still-valid token means we are already logged in — resolve instantly.
+    if (!interactive && driveToken && driveTokenExp - Date.now() > 60 * 1000) return resolve(driveToken);
+    if (!interactive && await restoreDriveSession()) return resolve(driveToken);
+    await restoreDriveSession(); // even when expired, this recovers the account hint
     try { await loadGis(); } catch (e) { return reject(e); }
     if (!driveTokenClient) {
       driveTokenClient = google.accounts.oauth2.initTokenClient({
@@ -5699,11 +5811,25 @@ function requestDriveToken(interactive) {
       });
     }
     driveTokenClient.callback = resp => {
-      if (resp && resp.access_token) { driveToken = resp.access_token; resolve(driveToken); }
+      if (resp && resp.access_token) {
+        driveToken = resp.access_token;
+        driveTokenExp = Date.now() + Math.max(60, (parseInt(resp.expires_in, 10) || 3600) - 60) * 1000;
+        saveDriveSession();
+        // Learn which account this is (drive/v3/about works with the scopes we hold), so future
+        // silent requests carry a login hint and Google stops showing the account chooser.
+        fetch('https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)', {
+          headers: { Authorization: 'Bearer ' + driveToken }
+        }).then(r => r.ok ? r.json() : null).then(j => {
+          if (j && j.user && j.user.emailAddress) { driveHint = j.user.emailAddress; saveDriveSession(); }
+        }).catch(() => {});
+        resolve(driveToken);
+      }
       else reject(new Error(resp && resp.error ? resp.error : 'Sign-in was cancelled.'));
     };
     driveTokenClient.error_callback = err => reject(new Error(err && err.message || 'Sign-in failed.'));
-    driveTokenClient.requestAccessToken({ prompt: interactive ? 'consent' : '' });
+    const req = { prompt: interactive ? 'consent' : '' };
+    if (driveHint) req.hint = driveHint;
+    driveTokenClient.requestAccessToken(req);
   });
 }
 // Fetch with auth. Handles the two ways Drive pushes back: an expired token (401 → silent refresh,
@@ -5718,7 +5844,7 @@ async function driveFetch(url, asBlob) {
     if (r.ok) return asBlob ? r.blob() : r.json();
     if (r.status === 401 && !refreshed) {
       refreshed = true;
-      driveToken = null;
+      driveToken = null; driveTokenExp = 0; saveDriveSession();
       await requestDriveToken(false);
       continue;
     }
