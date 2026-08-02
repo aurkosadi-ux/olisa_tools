@@ -469,9 +469,86 @@
      link can never cover it. */
   /* Sits in the page flow at the top-right, so it scrolls out of view rather than following you
      down the page. New notifications still appear wherever you are, as drop-down cards. */
+  /* The bell sits ON the page, not in a white pill on top of it: no circle, no border, no card
+     shadow — just the glyph, at 55% so it stays out of the way until it has something to say. */
   .bellwrap { position:absolute; right:14px; top:52px; z-index:9800; }
-  .bellbtn { position:relative; display:flex; align-items:center; justify-content:center; border:1px solid var(--line); background:#fff; border-radius:50%; width:40px; height:40px; padding:0; line-height:1; cursor:pointer; box-shadow:var(--card-shadow); font-size:17px; }
-  .bellbadge { position:absolute; top:-5px; right:-5px; min-width:19px; height:19px; padding:0 5px; background:var(--bad); color:#fff; border:2px solid #fff; border-radius:10px; font-size:11px; font-weight:800; line-height:15px; text-align:center; box-shadow:0 1px 4px rgba(0,0,0,.25); }
+  .bellbtn {
+    position:relative; display:flex; align-items:center; justify-content:center;
+    border:0; background:none; border-radius:50%; width:42px; height:42px; padding:0;
+    line-height:1; cursor:pointer; box-shadow:none; color:var(--ink);
+    opacity:.55; transition:opacity .25s ease, transform .25s ease;
+    -webkit-tap-highlight-color:transparent;
+  }
+  .bellbtn svg { display:block; filter:drop-shadow(0 1px 1px rgba(15,40,70,.18)); }
+  .bellbtn:hover { opacity:.85; }
+  .bellbtn:active { transform:scale(.92); }
+  /* Unread: full opacity, and the bell physically rings — a slow swing every few seconds rather
+     than a constant jiggle, so it reads as "something arrived" without becoming wallpaper. */
+  .bellwrap.unread .bellbtn { opacity:1; color:var(--accent-dark); }
+  .bellwrap.unread .bellbtn svg { animation: bellSwing 3.2s ease-in-out infinite; transform-origin:50% 15%; }
+  @keyframes bellSwing {
+    0%, 62%, 100% { transform: rotate(0deg); }
+    66%  { transform: rotate(15deg); }
+    70%  { transform: rotate(-13deg); }
+    74%  { transform: rotate(10deg); }
+    78%  { transform: rotate(-7deg); }
+    82%  { transform: rotate(4deg); }
+    86%  { transform: rotate(-2deg); }
+  }
+  /* A halo that pushes outward from the bell whenever it is unread — the "ring" made visible. */
+  .bellwrap.unread .bellbtn::after {
+    content:''; position:absolute; inset:2px; border-radius:50%;
+    border:2px solid var(--accent); opacity:0; pointer-events:none;
+    animation: bellRipple 3.2s ease-out infinite;
+  }
+  @keyframes bellRipple {
+    0%, 60% { transform:scale(.7); opacity:0; }
+    66%     { transform:scale(.8); opacity:.55; }
+    100%    { transform:scale(1.75); opacity:0; }
+  }
+  .bellbadge {
+    position:absolute; top:-3px; right:-3px; min-width:20px; height:20px; padding:0 6px;
+    display:inline-flex; align-items:center; justify-content:center;
+    background:linear-gradient(140deg,#F97316,#E11D48); color:#fff;
+    border:2px solid var(--bg, #fff); border-radius:11px;
+    font-size:11px; font-weight:800; line-height:1; letter-spacing:.01em;
+    box-shadow:0 2px 8px rgba(225,29,72,.45);
+    animation: badgePop .42s cubic-bezier(.2,1.5,.4,1);
+  }
+  .bellbadge.hidden { display:none; }
+  @keyframes badgePop {
+    0%   { transform:scale(0) rotate(-25deg); }
+    60%  { transform:scale(1.25) rotate(6deg); }
+    100% { transform:scale(1) rotate(0deg); }
+  }
+  /* Live microphone: a soft red breath while speech recognition is listening. */
+  #askMicBtn.mic-live { color:#E11D48; border-color:#E11D48; }
+  #askMicBtn.mic-live svg { animation: micPulse 1.1s ease-in-out infinite; }
+  @keyframes micPulse {
+    0%, 100% { transform:scale(1);   opacity:1; }
+    50%      { transform:scale(1.14); opacity:.65; }
+  }
+  /* Clear = smoke. Each answer becomes a puff that lifts, spreads and thins out to nothing. */
+  .smoke-puff {
+    position:fixed; border-radius:50%; pointer-events:none; z-index:9500;
+    background:radial-gradient(circle at 35% 35%, rgba(255,255,255,.95) 0%, rgba(203,218,232,.75) 45%, rgba(168,190,210,0) 72%);
+    will-change: transform, opacity, filter;
+    animation: smokeRise var(--dur, 1500ms) cubic-bezier(.25,.6,.3,1) forwards;
+  }
+  @keyframes smokeRise {
+    0%   { transform: translate(0,0) scale(.35) rotate(0deg);                    opacity:0;   filter:blur(2px); }
+    12%  { opacity:.85; }
+    100% { transform: translate(var(--dx), var(--dy)) scale(var(--sc)) rotate(var(--rot)); opacity:0; filter:blur(14px); }
+  }
+  .bubble-smoke {
+    animation: bubbleSmoke .85s ease-in forwards;
+    transform-origin: 50% 60%;
+  }
+  @keyframes bubbleSmoke {
+    0%   { opacity:1; filter:blur(0);    transform:translateY(0)     scale(1); }
+    35%  { opacity:.7; filter:blur(2px); transform:translateY(-6px)  scale(1.01); }
+    100% { opacity:0; filter:blur(12px); transform:translateY(-34px) scale(1.05); }
+  }
   .bellpanel { position:absolute; right:0; top:46px; width:290px; max-height:340px; overflow:auto; background:#fff; border:1px solid var(--line); border-radius:12px; box-shadow:var(--card-shadow); padding:8px; display:none; }
   .bellpanel.open { display:block; }
   .bellitem { padding:7px 8px; border-bottom:1px solid var(--line); font-size:12px; }
@@ -813,7 +890,7 @@
         Change folder
       </button>
       <button id="askSaveIndexBtn" class="secondary hidden" style="flex:0 0 auto;" title="Save this index as a file you can put in Drive so your phone uses it too">⬇ Save index file</button>
-      <button id="askBackupBtn" class="secondary hidden" style="flex:0 0 auto;" title="Save a timestamped copy of the Master File, with your remarks written in, to Drive">☁ Back up Master File</button>
+      <button id="askBackupBtn" class="secondary hidden" style="flex:0 0 auto;" title="Download the current Master File (with your Update column written in) as &quot;Olisa Inventory Master File.xlsx&quot; — the exact name the tool looks for">⬇ Download Master File</button>
       <button id="askBuildIndexBtn" class="secondary hidden" style="flex:0 0 auto;">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h7" stroke-linecap="round"/></svg>
         Build style index
@@ -835,7 +912,7 @@
     <h2 class="ask-h2"><span class="ask-title">What do you need, Sadi?</span></h2>
     <div class="askRow">
       <div class="suggest-wrap">
-        <input type="text" id="askInput" placeholder="e.g. is M68024-A1 delivered? · a PI number like PI 138 · or paste a list of styles" disabled autocomplete="off">
+        <input type="text" id="askInput" placeholder="e.g. is M68024-A1 delivered? · PI 138 · manual challans · or paste a list of styles" disabled autocomplete="off">
         <div class="askSuggest" id="askSuggest"></div>
       </div>
       <button id="askBtn" disabled>
@@ -1856,13 +1933,11 @@ loadAcceptedShorts().then(() => {
     piIndex = clean;
     piIndexBuiltAt = cached.builtAt || null;
     piIndexRestoredAt = piIndexBuiltAt;
-    if (piIndexRestoredAt && Object.keys(clean).length) {
-      const box = document.getElementById('askPiDiag');
-      if (box) {
-        box.innerHTML = `<div class="sub-note">Index loaded: <b>${Object.keys(clean).length} PI(s)</b> \u2014 built ${stampText(piIndexBuiltAt)} (${agoText(piIndexBuiltAt)}).</div>`;
-        box.classList.remove('hidden');
-      }
-    }
+    // No status line is written here on purpose. This used to print "Index loaded: N PI(s)…"
+    // into askPiDiag — a THIRD copy of what the health strip already shows, rendered once at
+    // page load and never refreshed, so its "17 minutes ago" drifted away from the live ones.
+    // The health strip is now the single source of truth for index freshness.
+    if (typeof renderHealth === 'function') renderHealth();
   } catch (e) { /* no cached PI qty index yet */ }
 })();
 const folderBtn = document.getElementById('askFolderBtn');
@@ -1926,23 +2001,47 @@ function resetChat() {
   chatEl.innerHTML = '';
   chatEl.scrollTop = 0;
 }
+// Smoke, not confetti. Puffs are seeded across the area being cleared, drift upward and outward
+// at slightly different speeds, and blur out as they go — so an answer looks like it evaporates
+// rather than exploding. Puffs are only ever spawned for what is actually on screen: a rect that
+// has scrolled out of view produces nothing, which keeps a long report from smoking the whole page.
+function spawnSmoke(rect, count) {
+  const vh = window.innerHeight || 800;
+  const top = Math.max(rect.top, 0), bottom = Math.min(rect.bottom, vh);
+  if (bottom - top < 8) return;
+  for (let i = 0; i < count; i++) {
+    const p = document.createElement('div');
+    p.className = 'smoke-puff';
+    const size = 26 + Math.random() * 60;
+    p.style.width = size + 'px';
+    p.style.height = size + 'px';
+    p.style.left = (rect.left + Math.random() * Math.max(rect.width, 1) - size / 2) + 'px';
+    p.style.top = (top + Math.random() * (bottom - top) - size / 2) + 'px';
+    p.style.setProperty('--dx', (Math.random() * 90 - 45) + 'px');
+    p.style.setProperty('--dy', -(70 + Math.random() * 130) + 'px');
+    p.style.setProperty('--sc', (1.9 + Math.random() * 1.6).toFixed(2));
+    p.style.setProperty('--rot', (Math.random() * 90 - 45) + 'deg');
+    p.style.setProperty('--dur', (1150 + Math.random() * 900) + 'ms');
+    p.style.animationDelay = (Math.random() * 260) + 'ms';
+    document.body.appendChild(p);
+    p.addEventListener('animationend', () => p.remove(), { once: true });
+  }
+}
 function animatedClearChat() {
   if (pendingClearTimer !== null) { clearTimeout(pendingClearTimer); pendingClearTimer = null; }
   const kids = Array.from(chatEl.children);
   if (!kids.length) return;
   askClearBtn.classList.remove('clear-pop'); void askClearBtn.offsetWidth; askClearBtn.classList.add('clear-pop');
-  const flash = document.createElement('div');
-  flash.className = 'clear-flash';
-  askClearBtn.style.position = askClearBtn.style.position || 'relative';
-  askClearBtn.appendChild(flash);
-  flash.addEventListener('animationend', () => flash.remove(), { once: true });
 
-  const perBubble = Math.max(8, Math.min(26, Math.floor(240 / kids.length)));
-  kids.forEach(el => {
-    spawnParticleBurst(el.getBoundingClientRect(), perBubble);
-    el.classList.add('bubble-vanish');
+  const perBubble = Math.max(5, Math.min(14, Math.floor(70 / kids.length)));
+  kids.forEach((el, i) => {
+    // Staggered, so a stack of answers dissolves top-down like a line of smoke going out.
+    window.setTimeout(() => spawnSmoke(el.getBoundingClientRect(), perBubble), i * 70);
+    el.style.animationDelay = (i * 70) + 'ms';
+    el.classList.add('bubble-smoke');
   });
-  pendingClearTimer = window.setTimeout(() => { chatEl.innerHTML = ''; pendingClearTimer = null; }, 950);
+  const total = 900 + kids.length * 70;
+  pendingClearTimer = window.setTimeout(() => { chatEl.innerHTML = ''; pendingClearTimer = null; }, total);
 }
 
 askBtn.addEventListener('click', handleAsk);
@@ -2042,6 +2141,95 @@ function showShortageList() {
   }
 }
 
+// ---------- "manual challans" ----------
+// Typed as a plain question in the Ask box — no button, no tab. Every row the Master File marks
+// as a manual / hand challan, grouped by challan number, and downloadable like any other answer.
+function isManualChallanQuery(q) {
+  const t = String(q || '').toLowerCase();
+  if (!/\b(manual|hand)\s*-?\s*chall?ans?\b/.test(t)) return false;
+  // "is M82033A1 on a manual challan?" is a style question that merely mentions the words — a
+  // style code anywhere in the text hands it back to the normal lookup.
+  if (extractAllStyleCodes(q).length) return false;
+  return true;
+}
+function showManualChallanList() {
+  try {
+    resetChat();
+    const manualAll = allRecords.filter(r => r.manualCh);
+    if (!manualAll.length) {
+      addBubble(`No manual challans in the Master File — nothing is marked as a manual or hand challan.`, 'askA');
+      return;
+    }
+    const filterDesc = activeFilterDesc();
+    const rows = applyAskFilters(manualAll);
+    if (!rows.length) {
+      addBubble(`The Master File has ${manualAll.length} manual challan line(s), but none fall inside the active filter (<b>${escHtml(filterDesc || 'none')}</b>). Clear the filter to see them all.`, 'askA');
+      return;
+    }
+    const hidden = manualAll.length - rows.length;
+    // Group by challan number. A manual challan usually covers several styles in one go, so the
+    // per-challan view is the one that matches how these are actually discussed with Olisa.
+    const groups = new Map();
+    rows.forEach(r => {
+      const no = String(r.challanNo ?? '').trim() || '(no number)';
+      if (!groups.has(no)) groups.set(no, { no, date: r.challanDate, pis: new Set(), styles: new Set(), lines: 0, del: 0 });
+      const g = groups.get(no);
+      g.lines++;
+      g.del += r.delQty || 0;
+      g.styles.add(r.styleNorm);
+      if (r.piRef !== null && r.piRef !== undefined && r.piRef !== '') g.pis.add(String(r.piRef));
+      if (!g.date && r.challanDate) g.date = r.challanDate;
+    });
+    const grouped = [...groups.values()].sort((a, b) => parseDMY(b.date) - parseDMY(a.date));
+    const totalDel = rows.reduce((s, r) => s + (r.delQty || 0), 0);
+    // Manual challans are re-deliveries, so how much of the original shortage they actually closed
+    // is the number worth stating. Shorts and excesses stay separate — never netted against
+    // each other — exactly as everywhere else in the tool.
+    const stillShort = rows.reduce((s, r) => s + Math.min(0, effectiveShort(r)), 0);
+
+    let html = `<div class="summary-line">Manual challans \u2014 ${grouped.length} challan(s) across ${rows.length} line(s), ${totalDel} pcs delivered`;
+    if (stillShort < 0) html += `, ${Math.abs(stillShort)} pcs still short on these lines`;
+    if (filterDesc) html += ` <span class="sub-note">(filter: ${escHtml(filterDesc)}${hidden ? ` \u2014 ${hidden} further manual line(s) hidden by this filter` : ''})</span>`;
+    html += `</div>`;
+
+    html += `<div class="previewbox" style="margin-top:8px;max-height:300px;"><table class="preview"><tr><th>Challan No</th><th>Challan Date</th><th>PI Ref</th><th>Styles</th><th>Lines</th><th>Delivered Qty</th></tr>`;
+    grouped.forEach(g => {
+      const piCells = [...g.pis].map(p => `<a href="#" class="pi-link" data-pi="${escHtml(p)}">${escHtml(p)}</a>`).join(', ') || '<span class="sub-note">\u2014</span>';
+      html += `<tr><td>${escHtml(g.no)} <span class="sub-note">(Manual)</span></td><td>${escHtml(String(g.date ?? ''))}</td><td>${piCells}</td><td>${g.styles.size}</td><td>${g.lines}</td><td>${g.del}</td></tr>`;
+    });
+    html += `</table></div>`;
+
+    const sorted = [...rows].sort((a, b) => parseDMY(b.challanDate) - parseDMY(a.challanDate) || (Number(b.piRef) || 0) - (Number(a.piRef) || 0));
+    html += `<div class="summary-line" style="margin-top:14px;">Every manual challan line</div>`;
+    html += `<div class="previewbox" style="margin-top:6px;max-height:420px;"><table class="preview"><tr><th>PI Ref</th><th>Inv. Date</th><th>Style</th><th>Item</th><th>Measurement</th><th>Del Qty</th><th>Rec Qty</th><th>Short&Exs</th><th>Challan No</th><th>Challan Date</th><th>Remarks</th></tr>`;
+    sorted.slice(0, MAX_TABLE_ROWS).forEach(r => {
+      const piCell = (r.piRef !== null && r.piRef !== undefined && r.piRef !== '') ? `<a href="#" class="pi-link" data-pi="${r.piRef}">${r.piRef}</a>` : '';
+      html += `<tr class="${rowClass(r)}"><td>${piCell}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(String(r.item ?? ''))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${r.delQty ?? ''}</td><td>${r.recQty ?? ''}</td><td>${r.short ?? ''}</td><td>${escHtml(challanDisp(r))}</td><td>${escHtml(String(r.challanDate ?? ''))}</td>${remarkCell(r)}</tr>`;
+    });
+    html += tableCapNote(Math.min(sorted.length, MAX_TABLE_ROWS), sorted.length);
+    html += `</table></div>`;
+
+    const bubble = addBubble(html, 'askA');
+    bubble.querySelectorAll('.pi-link').forEach(a => a.addEventListener('click', e => { e.preventDefault(); openPiFolderFiles(a.dataset.pi); }));
+    wireRemarkCells(bubble, showManualChallanList);
+
+    const btn = document.createElement('button');
+    btn.className = 'secondary';
+    btn.style.marginTop = '10px';
+    btn.style.fontSize = '12.5px';
+    btn.style.padding = '7px 12px';
+    btn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16" stroke-linecap="round" stroke-linejoin="round"/></svg> Download manual challan list`;
+    const fRange = readAskFilters();
+    let fileTag = 'Manual_Challans';
+    if (!isNaN(fRange.from) || !isNaN(fRange.to)) fileTag += `_PI_${isNaN(fRange.from) ? 'start' : fRange.from}-${isNaN(fRange.to) ? 'latest' : fRange.to}`;
+    btn.onclick = () => downloadMatches(sorted, fileTag, { noFillers: true });
+    bubble.appendChild(btn);
+  } catch (err) {
+    addBubble(`Something went wrong building the manual challan list: ${err.message}`, 'askA');
+    console.error('Manual challan list error:', err);
+  }
+}
+
 // --- IndexedDB (persists folder handles + the style index across sessions) ---
 function idbOpen() {
   return new Promise((resolve, reject) => {
@@ -2112,6 +2300,42 @@ async function findFolderRecursive(dirHandle, predicate, maxDepth, depth = 0) {
   return null;
 }
 
+// ==================== WARM SESSION (15 MINUTES) ====================
+// Reopening the app, or hopping to the calculator and back, used to re-run the whole connect:
+// hunt for the Master File, download it again, then walk all 100+ PI folders to check the index
+// is current. That is the minute of "connecting…" that made switching tools annoying.
+// So a successful connect is snapshotted. Within WARM_MS the app restores from that snapshot
+// instead — no folder walk, no download, no freshness scan, nothing over the network at all.
+// After 15 minutes the next launch does the full scan again, exactly as before.
+const WARM_MS = 15 * 60 * 1000;
+let lastConnectWasWarm = false;   // true when the last connect resumed from the snapshot
+function warmIdOf(handle) { return handle && handle.isDrive ? 'drive:' + handle.id : 'local:' + (handle && handle.name || ''); }
+async function saveWarmSession(handle, fileName, bytes) {
+  try {
+    await idbSet('warmSession', {
+      at: Date.now(),
+      rootKey: warmIdOf(handle),
+      rootName: handle.name,
+      isDrive: !!handle.isDrive,
+      masterName: fileName,
+      masterBytes: bytes,
+      piRootId: (piRootHandle && piRootHandle.isDrive) ? piRootHandle.id : null,
+      piRootName: piRootHandle ? piRootHandle.name : null,
+      piRootLocal: (piRootHandle && !piRootHandle.isDrive) ? piRootHandle : null
+    });
+  } catch (e) { /* quota or an unclonable handle — the slow path still works */ }
+}
+async function loadWarmSession(handle) {
+  try {
+    const w = await idbGet('warmSession');
+    if (!w || !w.masterBytes) return null;
+    if (w.rootKey !== warmIdOf(handle)) return null;              // different folder — no shortcut
+    if (Date.now() - (w.at || 0) > WARM_MS) return null;          // gone cold
+    return w;
+  } catch (e) { return null; }
+}
+function warmMinutesLeft(w) { return Math.max(0, Math.ceil((WARM_MS - (Date.now() - w.at)) / 60000)); }
+
 async function connectFolder(existingHandle, forceNew) {
   try {
     const dirHandle = (existingHandle && !forceNew) ? existingHandle : await window.showDirectoryPicker();
@@ -2127,6 +2351,34 @@ async function connectFolder(existingHandle, forceNew) {
     savedRootHandle = dirHandle;
     folderBtnText.textContent = `Reconnect to "${dirHandle.name}"`;
     changeFolderBtn.classList.remove('hidden');
+
+    // ---- Warm path: everything below was done less than 15 minutes ago, so just restore it. ----
+    if (!forceNew) {
+      const warm = await loadWarmSession(dirHandle);
+      if (warm) {
+        try {
+          lastConnectWasWarm = true;
+          masterFileBytes = warm.masterBytes;
+          masterFileName = warm.masterName;
+          if (warm.isDrive && warm.piRootId) piRootHandle = new DriveDirHandle(warm.piRootId, warm.piRootName || 'Work Orders');
+          else if (warm.piRootLocal) piRootHandle = warm.piRootLocal;
+          await loadFile(new File([warm.masterBytes.slice(0)], warm.masterName));
+          if (piRootHandle) {
+            buildIndexBtn.classList.remove('hidden');
+            document.getElementById('askSaveIndexBtn').classList.remove('hidden');
+            document.getElementById('askBackupBtn').classList.remove('hidden');
+            const cachedIndex = await idbGet('styleIndex');
+            if (cachedIndex) styleIndex = cachedIndex.data;
+          }
+          loadStatus.textContent = `Master File loaded ("${warm.masterName}") \u00b7 ${piRootHandle ? 'Work Orders folder ready' : 'Work Orders folder not found'} \u00b7 resumed instantly (no rescan for another ${warmMinutesLeft(warm)} min).`;
+          loadStatus.className = 'status ok';
+          if (typeof renderHealth === 'function') renderHealth();
+          return;
+        } catch (e) { /* snapshot unusable — fall through to the full connect below */ }
+      }
+    }
+
+    lastConnectWasWarm = false;
     loadStatus.textContent = `Connected to "${dirHandle.name}". Searching for your Master File and Work Orders folder...`;
     loadStatus.className = 'status';
 
@@ -2200,7 +2452,10 @@ async function connectFolder(existingHandle, forceNew) {
     } else {
       bits.push('Work Orders folder not found');
     }
-    loadStatus.textContent = bits.join(' · ');
+    // Snapshot this connect. The next 15 minutes of app-switching resume from it with no network
+    // calls at all — no folder walk, no re-download, no freshness scan.
+    if (masterFileBytes) await saveWarmSession(dirHandle, masterFileName, masterFileBytes);
+    loadStatus.textContent = bits.join(' · ') + ' · staying connected for 15 min without rescanning.';
     loadStatus.className = masterSearch.handle ? 'status ok' : 'status err';
   } catch (err) {
     if (err.name !== 'AbortError') {
@@ -2499,39 +2754,110 @@ async function ensureBackupFolder() {
 // Rebuild the workbook from the ORIGINAL file bytes and write the current remarks into the
 // Remarks column. Starting from the original preserves sheets, columns and formatting that a
 // from-scratch rebuild would throw away.
+// ExcelJS hands back OBJECTS for anything that isn't a plain value: {formula,result},
+// {sharedFormula}, {error:'#N/A'}, {richText:[...]}, {text,hyperlink}. String()-ing those gives
+// "[object Object]" — which is precisely why the old key-matching write-back silently matched
+// nothing: Short&Exs in this Master File is a shared formula (G-F) on every row.
+function xlText(v) {
+  if (v === null || v === undefined) return '';
+  if (v instanceof Date) return fmtDate(v);
+  if (typeof v === 'object') {
+    if (Array.isArray(v.richText)) return v.richText.map(p => p.text || '').join('');
+    if ('result' in v) return v.result === null || v.result === undefined ? '' : String(v.result);
+    if ('error' in v) return String(v.error);
+    if ('text' in v) return String(v.text);
+    return '';
+  }
+  return String(v);
+}
+// The comment YOU gave in the tool, in Olisa-facing wording. This is what lands in the new
+// "Update" column — separate from Remarks, so Olisa's own note is never mistaken for yours.
+function updateTextFor(r) {
+  const parts = [];
+  const ov = remarkOverrides[acceptKey(r)];
+  if (ov && String(ov.text || '').trim()) parts.push(String(ov.text).trim());
+  const acc = acceptedFor(r);
+  if (acc) parts.push(`Settled by agreement${acc.reason ? ' — ' + acc.reason : ''} (${dmyFromMs(acc.at)})`);
+  if (r.autoNotes && r.autoNotes.length) parts.push(...r.autoNotes);
+  else if (r.autoNote) parts.push(r.autoNote);
+  return parts.join('; ');
+}
+// Find the header row and the Remarks column on a sheet, then guarantee an "Update" column sits
+// immediately beside it. Idempotent: re-uploading a file this tool already produced reuses the
+// existing Update column instead of inserting a second one.
+function ensureUpdateColumn(ws) {
+  let hdrRow = null, remarksCol = null, updateCol = null, styleCol = null;
+  for (let r = 1; r <= Math.min(ws.rowCount, 12); r++) {
+    const vals = ws.getRow(r).values || [];
+    let rc = null, uc = null, sc = null;
+    vals.forEach((v, i) => {
+      const s = xlText(v).trim().toLowerCase();
+      if (/^remarks?$/.test(s)) rc = i;
+      if (/^update$/.test(s)) uc = i;
+      if (/^st[yu]?le\s*ref/.test(s) || s === 'style') sc = i;
+    });
+    if (rc) { hdrRow = r; remarksCol = rc; updateCol = uc; styleCol = sc; break; }
+  }
+  if (!hdrRow) return null;
+  if (updateCol) return { hdrRow, remarksCol, updateCol, styleCol };
+  updateCol = remarksCol + 1;
+  try {
+    ws.spliceColumns(updateCol, 0, []);          // push everything right of Remarks along by one
+  } catch (e) {
+    updateCol = ws.columnCount + 1;              // some sheets refuse a splice — append instead
+  }
+  const h = ws.getRow(hdrRow).getCell(updateCol);
+  h.value = 'Update';
+  const src = ws.getRow(hdrRow).getCell(remarksCol);
+  try { h.font = src.font; h.fill = src.fill; h.border = src.border; h.alignment = src.alignment; } catch (e) {}
+  try { ws.getColumn(updateCol).width = 34; } catch (e) {}
+  return { hdrRow, remarksCol, updateCol, styleCol };
+}
+// Rebuild the workbook from the ORIGINAL file bytes and write your remarks back in, plus the new
+// "Update" column. Starting from the original preserves sheets, columns and formatting that a
+// from-scratch rebuild would throw away. Rows are addressed DIRECTLY (sheet name + row number
+// captured at load), so nothing depends on re-deriving a key out of formula cells.
 async function buildUpdatedMasterBlob() {
   if (!masterFileBytes) throw new Error('The Master File bytes were not captured — reload it first.');
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(masterFileBytes.slice(0));
   let patched = 0;
-  wb.eachSheet(ws => {
-    // Locate the header row and the Remarks / Challan No / Style columns by NAME, so a re-ordered
-    // export still lands the values in the right place.
-    let hdrRow = null, col = {};
-    for (let r = 1; r <= Math.min(ws.rowCount, 12); r++) {
-      const vals = ws.getRow(r).values || [];
-      const idx = {};
-      vals.forEach((v, i) => {
-        const s = String(v == null ? '' : v).trim().toLowerCase();
-        if (/^remarks?$/.test(s)) idx.remarks = i;
-        if (/challan\s*no/.test(s)) idx.challan = i;
-        if (/^style/.test(s)) idx.style = i;
-        if (/short/.test(s)) idx.short = i;
-        if (/description|item\s*desc/.test(s)) idx.desc = i;
-      });
-      if (idx.remarks && idx.challan && idx.style) { hdrRow = r; col = idx; break; }
+  const cols = new Map();   // sheet name -> {hdrRow, remarksCol, updateCol}
+  // Only sheets that actually produced records get an Update column — no clutter elsewhere.
+  const sheetsWithRecords = [...new Set(allRecords.map(r => r.xlSheet).filter(Boolean))];
+  sheetsWithRecords.forEach(name => {
+    const ws = wb.getWorksheet(name);
+    if (!ws) return;
+    const c = ensureUpdateColumn(ws);
+    if (c) cols.set(name, c);
+  });
+  allRecords.forEach(r => {
+    const c = cols.get(r.xlSheet);
+    if (!c || !r.xlRow) return;
+    const ws = wb.getWorksheet(r.xlSheet);
+    if (!ws) return;
+    const row = ws.getRow(r.xlRow);
+    // Cheap sanity check: the style sitting in the file must still be the style on this record.
+    // If the workbook in memory ever drifts from the one that was parsed, the row is skipped
+    // rather than written over blindly.
+    if (c.styleCol) {
+      const inFile = xlText(row.getCell(c.styleCol).value).trim().toUpperCase();
+      if (inFile !== r.styleNorm) return;
     }
-    if (!hdrRow) return;
-    for (let r = hdrRow + 1; r <= ws.rowCount; r++) {
-      const row = ws.getRow(r);
-      const key = [
-        String(row.getCell(col.challan).value ?? '').trim(),
-        String(row.getCell(col.style).value ?? '').trim().toUpperCase(),
-        measNorm(String(row.getCell(col.desc || col.style).value ?? '')),
-        String(row.getCell(col.short || col.style).value ?? '')
-      ].join('|');
-      const ov = remarkOverrides[key];
-      if (ov) { row.getCell(col.remarks).value = ov.text; patched++; }
+    const upd = updateTextFor(r);
+    const ov = remarkOverrides[acceptKey(r)];
+    if (ov) { row.getCell(c.remarksCol).value = ov.text; }
+    if (upd) {
+      row.getCell(c.updateCol).value = upd;
+      // Colour intelligence carries into Excel too: a "done / settled" comment shows green there,
+      // a "pending / urgent" one shows amber, so the file reads at a glance.
+      const cw = remarkColorWord(upd);
+      if (cw) {
+        try {
+          row.getCell(c.updateCol).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: cw === 'green' ? 'FFD9F3DF' : 'FFFFF4DD' } };
+        } catch (e) {}
+      }
+      patched++;
     }
   });
   const out = await wb.xlsx.writeBuffer();
@@ -2543,6 +2869,19 @@ function backupFileName(version) {
   const h12 = d.getHours() % 12 || 12;
   const ap = d.getHours() < 12 ? 'am' : 'pm';
   return `Olisa Master Inventory \u2014 ${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d.getFullYear()}, ${pad(h12)}-${pad(d.getMinutes())} ${ap} \u2014 v${version}.xlsx`;
+}
+// Everything currently sitting in the backup folder, newest first.
+async function listBackupFiles(folderId) {
+  const q = encodeURIComponent(`'${folderId}' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'`);
+  const res = await driveApi(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,modifiedTime)&orderBy=modifiedTime desc&pageSize=100&supportsAllDrives=true`);
+  return (res.files || []);
+}
+// The version number is a running count of how many times the file has been rewritten — v119
+// means 119 edits, not 119 files on Drive. It is read back off the folder as well as the local
+// counter, so switching between the laptop and the phone never restarts the count at v1.
+function versionInName(name) {
+  const m = String(name).match(/[\u2014-]\s*v(\d+)\s*\.xlsx$/i);
+  return m ? parseInt(m[1], 10) : 0;
 }
 async function backupMasterToDrive(silent) {
   if (!allRecords.length) { if (!silent) toast('Load the Master File first.'); return; }
@@ -2556,10 +2895,15 @@ async function backupMasterToDrive(silent) {
       a.href = url; a.download = backupFileName(nextBackupVersion());
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 4000);
+      bumpBackupVersion();
       notify('download', `Saved an updated Master File copy (${patched} remark(s) written in). Drive isn't connected here, so it went to your downloads.`);
       return;
     }
     const folderId = await ensureBackupFolder();
+    let existing = [];
+    try { existing = await listBackupFiles(folderId); } catch (e) { /* listing is advisory */ }
+    const highest = existing.reduce((m, f) => Math.max(m, versionInName(f.name)), 0);
+    if (highest >= backupVersion) backupVersion = highest;   // adopt the folder's count
     const version = nextBackupVersion();
     const name = backupFileName(version);
     const meta = { name, parents: [folderId] };
@@ -2579,10 +2923,65 @@ async function backupMasterToDrive(silent) {
       throw new Error(`${res.status}: ${txt}`);
     }
     bumpBackupVersion();
-    notify('drive', `Backed up to Drive \u2014 "${BACKUP_FOLDER_NAME}/${name}" (${patched} remark(s) written in, ${editCount} edit(s) on record).`);
+    // One file, not a growing pile. The new upload succeeded, so every earlier copy goes — the
+    // version number in the name is what carries the history forward.
+    const fresh = await res.json().catch(() => null);
+    const keepId = fresh && fresh.id;
+    let removed = 0;
+    for (const f of existing) {
+      if (keepId && f.id === keepId) continue;
+      try {
+        if (!driveToken) await requestDriveToken(false);
+        // DELETE answers 204 with an empty body — driveApi's JSON parse would throw on that.
+        const dr = await fetch(`https://www.googleapis.com/drive/v3/files/${f.id}?supportsAllDrives=true`, {
+          method: 'DELETE', headers: { Authorization: 'Bearer ' + driveToken }
+        });
+        if (dr.ok || dr.status === 404) removed++;
+      } catch (e) { /* a copy that refuses to delete is not worth failing the save over */ }
+    }
+    notify('drive', `Master File updated on Drive \u2014 "${BACKUP_FOLDER_NAME}/${name}" (${patched} line(s) written in, ${editCount} edit(s) on record)${removed ? `, ${removed} older cop${removed === 1 ? 'y' : 'ies'} replaced` : ''}.`);
   } catch (e) {
     notify('error', `Master File backup failed: ${e.message}`);
   }
+}
+// ---------- Download Master File ----------
+// Pulls the CURRENT file out of "Latest Master Inventory Files" and saves it under the exact name
+// everything else looks for — "Olisa Inventory Master File.xlsx". Download it, work on it, drop it
+// back into the Olisa folder: because the name never changes, the tool never gets confused about
+// which file is the Master File. Any unsaved edits are pushed up first, so what lands in your
+// downloads is always the latest.
+async function downloadLatestMasterFile() {
+  const OUT_NAME = 'Olisa Inventory Master File.xlsx';
+  try {
+    if (!allRecords.length) { toast('Load the Master File first.'); return; }
+    if (savedRootHandle && savedRootHandle.isDrive) {
+      if (backupTimer) { clearTimeout(backupTimer); backupTimer = null; }
+      await backupMasterToDrive(true);                    // make sure Drive holds the newest edits
+      const folderId = await ensureBackupFolder();
+      const files = await listBackupFiles(folderId);
+      if (files.length) {
+        const pick = files.slice().sort((a, b) => versionInName(b.name) - versionInName(a.name) ||
+          Date.parse(b.modifiedTime || 0) - Date.parse(a.modifiedTime || 0))[0];
+        const blob = await driveFetch(`https://www.googleapis.com/drive/v3/files/${pick.id}?alt=media&supportsAllDrives=true`, true);
+        saveBlobAs(blob, OUT_NAME);
+        notify('download', `Downloaded "${OUT_NAME}" (from "${BACKUP_FOLDER_NAME}/${pick.name}"). Edit it, then put it back in the Olisa folder under the same name.`);
+        return;
+      }
+    }
+    // Local mode, or nothing on Drive yet: build it from what is loaded right now.
+    const { blob, patched } = await buildUpdatedMasterBlob();
+    saveBlobAs(blob, OUT_NAME);
+    notify('download', `Downloaded "${OUT_NAME}" (${patched} line(s) written in, built from the copy loaded here).`);
+  } catch (e) {
+    notify('error', `Could not download the Master File: ${e.message}`);
+  }
+}
+function saveBlobAs(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 // Version counter, kept locally so file names read v1, v2, v3 in order.
 let backupVersion = 0;
@@ -2681,12 +3080,16 @@ const BELL_MAX = 300;
     const saved = await idbGet('bellLog');
     if (saved && Array.isArray(saved.items)) {
       bellLog = saved.items.map(e => ({ ...e, at: new Date(e.at) }));
+      // The unread COUNT is saved too. It used to live only in memory, so closing the app reset
+      // it to zero and the badge came back blank even though the messages were still unread —
+      // which is why the number never looked right after a restart.
+      bellUnread = Math.min(Number(saved.unread) || 0, bellLog.length);
       renderBell();
     }
   } catch (e) { /* first run */ }
 })();
 function persistBell() {
-  idbSet('bellLog', { items: bellLog.slice(0, BELL_MAX).map(e => ({ ...e, at: e.at.toISOString() })) }).catch(() => {});
+  idbSet('bellLog', { items: bellLog.slice(0, BELL_MAX).map(e => ({ ...e, at: e.at.toISOString() })), unread: bellUnread }).catch(() => {});
 }
 // Drop-down notification card: appears at the top of the screen regardless of scroll position,
 // auto-dismisses, and can be flicked away left/right/up like a phone notification.
@@ -2763,7 +3166,16 @@ function renderBell() {
   if (!wrap) {
     wrap = document.createElement('div');
     wrap.id = 'bellWrap'; wrap.className = 'bellwrap';
-    wrap.innerHTML = `<button class="bellbtn" id="bellBtn" title="Notifications">\ud83d\udd14<span class="bellbadge hidden" id="bellBadge"></span></button><div class="bellpanel" id="bellPanel"></div>`;
+    // Drawn, not typed. The emoji bell rendered as a boxed glyph with its own pale disc on some
+    // Androids — this is a flat path in currentColor, so it sits straight on the background with
+    // nothing behind it.
+    wrap.innerHTML = `<button class="bellbtn" id="bellBtn" title="Notifications" aria-label="Notifications">
+        <svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M18 8a6 6 0 1 0-12 0c0 6-2.5 7-2.5 7h17S18 14 18 8z"/>
+          <path d="M13.7 20a2 2 0 0 1-3.4 0"/>
+        </svg>
+        <span class="bellbadge hidden" id="bellBadge"></span>
+      </button><div class="bellpanel" id="bellPanel"></div>`;
     document.body.appendChild(wrap);
     document.getElementById('bellBtn').addEventListener('click', e => {
       e.stopPropagation();
@@ -2786,8 +3198,21 @@ function renderBell() {
     });
   }
   const badge = document.getElementById('bellBadge');
-  if (bellUnread > 0) { badge.textContent = bellUnread > 99 ? '99+' : String(bellUnread); badge.classList.remove('hidden'); }
-  else badge.classList.add('hidden');
+  const label = bellUnread > 99 ? '99+' : String(bellUnread);
+  if (bellUnread > 0) {
+    // Re-trigger the pop animation only when the NUMBER actually changed, so a re-render for an
+    // unrelated reason (search typing, panel redraw) doesn't make the badge jump about.
+    if (badge.textContent !== label) {
+      badge.textContent = label;
+      badge.style.animation = 'none'; void badge.offsetWidth; badge.style.animation = '';
+    }
+    badge.classList.remove('hidden');
+    wrap.classList.add('unread');
+  } else {
+    badge.classList.add('hidden');
+    badge.textContent = '';
+    wrap.classList.remove('unread');
+  }
   const icons = { download: '\u2b07', build: '\ud83d\udcda', drive: '\u2601', error: '\u26a0', info: '\u2139' };
   const q = bellFilter.trim().toLowerCase();
   const shown = q ? bellLog.filter(e => e.msg.toLowerCase().includes(q)) : bellLog;
@@ -2803,7 +3228,17 @@ function renderBell() {
       : `<div class="bellitem">${q ? 'Nothing matches that.' : 'Nothing yet.'}</div>`);
   const si = document.getElementById('bellSearch');
   si.addEventListener('input', () => { bellFilter = si.value; renderBell(); setTimeout(() => { const el = document.getElementById('bellSearch'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }, 0); });
-  document.getElementById('bellClear').addEventListener('click', () => { bellLog = []; bellFilter = ''; persistBell(); renderBell(); });
+  document.getElementById('bellClear').addEventListener('click', () => {
+    // Same smoke as the Ask tab, so "clear" means one thing everywhere in the app.
+    const items = Array.from(panel.querySelectorAll('.bellitem'));
+    if (items.length && typeof spawnSmoke === 'function') {
+      items.slice(0, 12).forEach((el, i) => window.setTimeout(() => spawnSmoke(el.getBoundingClientRect(), 4), i * 45));
+      items.forEach((el, i) => { el.style.animationDelay = (i * 45) + 'ms'; el.classList.add('bubble-smoke'); });
+      window.setTimeout(() => { bellLog = []; bellUnread = 0; bellFilter = ''; persistBell(); renderBell(); }, 620);
+      return;
+    }
+    bellLog = []; bellUnread = 0; bellFilter = ''; persistBell(); renderBell();
+  });
 }
 // Announce every generated-file download (called from each download site).
 function notifyDownload(filename) {
@@ -2819,9 +3254,16 @@ function renderIndexStamp() {
     el.innerHTML = `<span style="color:var(--accent-dark);font-weight:700;">\u27f3 Indexing in the background \u2014 you can keep searching; results may be incomplete until it finishes.</span>`;
     return;
   }
+  // Deliberately silent when everything is fine. The health strip above already carries the
+  // "N PI(s), built at…" figure permanently; repeating it here just gave the same fact twice.
+  // This line now exists only to raise something the strip does not: that a rebuild is due.
   if (!n) { el.textContent = ''; return; }
   const days = piIndexBuiltAt ? Math.floor((Date.now() - piIndexBuiltAt) / 86400000) : null;
-  el.innerHTML = `Style index: <b>${n} PI(s)</b> \u2014 built ${stampText(piIndexBuiltAt)} (${agoText(piIndexBuiltAt)})${days !== null && days > 7 ? ' <span style="color:var(--bad);font-weight:700;">\u2014 rebuild recommended</span>' : ''}`;
+  if (days !== null && days > 7) {
+    el.innerHTML = `<span style="color:var(--bad);font-weight:700;">\u26a0 Style index is ${days} days old \u2014 rebuild it so new PIs are included.</span>`;
+  } else {
+    el.textContent = '';
+  }
 }
 setInterval(renderIndexStamp, 60000);
 function renderHealth() {
@@ -3055,7 +3497,7 @@ async function tryLoadIndexFromFolder(rootHandle) {
   return false;
 }
 document.getElementById('askSaveIndexBtn').addEventListener('click', saveIndexFile);
-document.getElementById('askBackupBtn').addEventListener('click', () => backupMasterToDrive(false));
+document.getElementById('askBackupBtn').addEventListener('click', downloadLatestMasterFile);
 document.getElementById('driveLogoutLink').addEventListener('click', e => { e.preventDefault(); driveLogout(); });
 // ==================== IN-APP FILE VIEWER (works on Android) ====================
 // window.open + iframe cannot show PDFs on Android Chrome. This modal renders PDFs page by page
@@ -3261,6 +3703,12 @@ async function loadFile(file) {
         if (!styleVal) continue;
         records.push({
           sheet: sheetName,
+          // Exact position in the workbook this row came from. XLSX's array index r maps to
+          // spreadsheet row r+1 (the sheet range always starts at A1 here). Keeping it means the
+          // Update/Remarks write-back can go straight to the right cell instead of rebuilding a
+          // key from cells that are FORMULAS — which is exactly why remarks never landed before.
+          xlSheet: sheetName,
+          xlRow: r + 1,
           style: String(styleVal).trim(),
           styleNorm: String(styleVal).trim().toUpperCase(),
           piRef: idx.PIREF !== undefined ? row[idx.PIREF] : null,
@@ -4628,13 +5076,16 @@ function renderDetective(code) {
     const mic = document.createElement('button');
     mic.className = 'secondary'; mic.id = 'askMicBtn'; mic.title = 'Speak a style or PI number';
     mic.style.cssText = 'flex:0 0 auto;padding:9px 12px;';
-    mic.textContent = '\ud83c\udfa4';
+    // The messaging-app mic: rounded capsule, stand, base. Drawn in currentColor so it picks up
+    // the button's own colour instead of the emoji font's, which varied by device.
+    const MIC_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10.5v1a7 7 0 0 0 14 0v-1"/><path d="M12 18.5V22"/></svg>`;
+    mic.innerHTML = MIC_SVG;
     let rec = null, active = false;
     mic.addEventListener('click', () => {
       if (active) { rec && rec.stop(); return; }
       rec = new SR();
       rec.lang = 'en-US'; rec.interimResults = true; rec.continuous = false;
-      active = true; mic.textContent = '\u23fa Listening\u2026';
+      active = true; mic.classList.add('mic-live'); mic.innerHTML = MIC_SVG + '<span style="margin-left:6px;">Listening\u2026</span>';
       let finalTxt = '';
       rec.onresult = ev => {
         let interim = '';
@@ -4642,7 +5093,7 @@ function renderDetective(code) {
         askInput.value = normalizeSpoken(finalTxt + interim);
       };
       rec.onend = () => {
-        active = false; mic.textContent = '\ud83c\udfa4';
+        active = false; mic.classList.remove('mic-live'); mic.innerHTML = MIC_SVG;
         const heard = (finalTxt || '').trim();
         const code = normalizeSpoken(heard || askInput.value);
         let use = code;
@@ -4656,7 +5107,7 @@ function renderDetective(code) {
         askInput.value = use;
         if (use.trim()) handleAsk();
       };
-      rec.onerror = () => { active = false; mic.textContent = '\ud83c\udfa4'; toast('Voice input didn\u2019t work \u2014 check the mic permission.'); };
+      rec.onerror = () => { active = false; mic.classList.remove('mic-live'); mic.innerHTML = MIC_SVG; toast('Voice input didn\u2019t work \u2014 check the mic permission.'); };
       rec.start();
     });
     row.insertBefore(mic, askInput.nextSibling);
@@ -4995,6 +5446,9 @@ async function handleAsk() {
   try {
     // A PI number ("138", "PI-138", "pi 138") gets the full PI picture instead of a style search.
     if (askedDuringBuild) addBubble(`<span class="sub-note">\u27f3 The index is still building \u2014 this answer uses what has been read so far and may be incomplete. Search again when it finishes.</span>`, 'askA');
+    // "manual challans", "all manual challan", "hand challans" — checked before PI/style detection
+    // so the words are never mistaken for a code.
+    if (isManualChallanQuery(question)) { showManualChallanList(); return; }
     const piRef = detectPiQuery(question);
     if (piRef) {
       await showPiDetails(piRef);
@@ -5977,7 +6431,9 @@ document.getElementById('askDriveBtn').addEventListener('click', connectDrive);
     const rootHandle = new DriveDirHandle(remembered.id, remembered.name);
     document.getElementById('askDriveBtnText').textContent = `Drive: "${remembered.name}"`;
     await connectFolder(rootHandle, false);
-    if (typeof notify === 'function') notify('drive', `Reconnected to Drive folder "${remembered.name}" automatically.`);
+    // A warm resume is a non-event — it did nothing over the network and the folder never
+    // changed. Announcing it every time you switched tabs was just inflating the unread count.
+    if (!lastConnectWasWarm && typeof notify === 'function') notify('drive', `Reconnected to Drive folder "${remembered.name}" automatically.`);
     if (typeof renderHealth === 'function') renderHealth();
   } catch (e) { /* stays in the tap-to-reconnect state — no error is worth surfacing here */ }
 })();
