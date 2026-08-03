@@ -869,7 +869,6 @@
       Master Carton, Cross Divider) is generated automatically from the uploaded file(s).
     </div>
   </div>
-</div>
   </div>
 
   <div class="panel" id="panelAsk">
@@ -880,7 +879,7 @@
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span id="askFolderBtnText">Connect a folder (Chrome/Edge only)</span>
       </button>
-      <div class="healthbar" id="healthBar" style="flex-basis:100%;"></div></div>
+      <div class="healthbar" id="healthBar" style="flex-basis:100%;"></div>
       <button id="askDriveBtn" class="secondary" style="flex:1;">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3h8l6 10-4 7H6l-4-7L8 3z" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span id="askDriveBtnText">Connect Google Drive</span>
@@ -1517,7 +1516,13 @@ async function downloadXlsx() {
   const a = document.createElement('a');
   const _objUrl = URL.createObjectURL(blob);
   a.href = _objUrl;
-  a.download = `Olisa_PO_Summary_${(deliveryDateInput.value || 'draft').replace(/[^\w]+/g,'_')}.xlsx`;
+  // The file name records WHEN THE SUMMARY WAS MADE, which is what makes a folder of these
+  // sortable and lets you find "the one I sent on the 3rd". The delivery date belongs inside the
+  // document, not in the file name — two summaries generated weeks apart for the same delivery
+  // date used to land on identical names and quietly overwrite each other in Downloads.
+  const _t = new Date();
+  const _p = n => String(n).padStart(2, '0');
+  a.download = `Olisa_PO_Summary_${_p(_t.getDate())}_${_p(_t.getMonth() + 1)}_${_t.getFullYear()}.xlsx`;
   if (typeof notifyDownload === 'function') notifyDownload(a.download);
   document.body.appendChild(a);
   a.click();
