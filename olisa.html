@@ -495,9 +495,12 @@
     82%  { transform: rotate(4deg); }
     86%  { transform: rotate(-2deg); }
   }
-  /* A halo that pushes outward from the bell whenever it is unread — the "ring" made visible. */
+  /* A halo that pushes outward from the bell whenever it is unread — the "ring" made visible.
+     z-index:0 keeps it BEHIND the badge on purpose: a pseudo-element paints on top of its
+     sibling elements by default, so without this the expanding ring swept straight across the
+     "38" every cycle — a blue ring crossing a red badge, which is the stray shape you saw. */
   .bellwrap.unread .bellbtn::after {
-    content:''; position:absolute; inset:2px; border-radius:50%;
+    content:''; position:absolute; inset:2px; border-radius:50%; z-index:0;
     border:2px solid var(--accent); opacity:0; pointer-events:none;
     animation: bellRipple 3.2s ease-out infinite;
   }
@@ -506,13 +509,14 @@
     66%     { transform:scale(.8); opacity:.55; }
     100%    { transform:scale(1.75); opacity:0; }
   }
+  .bellbtn svg { position:relative; z-index:1; }
   .bellbadge {
     position:absolute; top:-3px; right:-3px; min-width:20px; height:20px; padding:0 6px;
-    display:inline-flex; align-items:center; justify-content:center;
+    display:inline-flex; align-items:center; justify-content:center; z-index:2;
     background:linear-gradient(140deg,#F97316,#E11D48); color:#fff;
-    border:2px solid var(--bg, #fff); border-radius:11px;
+    border:2px solid #fff; border-radius:11px;
     font-size:11px; font-weight:800; line-height:1; letter-spacing:.01em;
-    box-shadow:0 2px 8px rgba(225,29,72,.45);
+    box-shadow:0 1px 4px rgba(225,29,72,.35);
     animation: badgePop .42s cubic-bezier(.2,1.5,.4,1);
   }
   .bellbadge.hidden { display:none; }
@@ -898,6 +902,12 @@
     <div class="hint hidden" id="askFolderHint"></div>
     <div class="sub-note" id="askIndexStamp" style="margin-top:2px;"></div>
     <div class="status" id="askLoadStatus"></div>
+    <div class="hidden" id="connectProgressWrap" style="margin-top:7px;">
+      <div style="height:5px;background:#E3ECF5;border-radius:4px;overflow:hidden;">
+        <div id="connectProgressBar" style="height:100%;width:0%;background:linear-gradient(90deg,#14B8A6,#0EA5E9,#6366F1);transition:width .3s ease;"></div>
+      </div>
+      <div id="connectProgressText" style="font-size:11px;color:var(--sub);margin-top:3px;"></div>
+    </div>
     <div class="hidden" id="askProgressWrap" style="margin-top:8px;">
       <div style="height:8px;background:#E3ECF5;border-radius:6px;overflow:hidden;">
         <div id="askProgressBar" style="height:100%;width:0%;background:linear-gradient(90deg,#14B8A6,#0EA5E9,#6366F1);box-shadow:0 0 10px rgba(14,165,233,.5);transition:width .2s;"></div>
@@ -2235,6 +2245,52 @@ function showManualChallanList() {
   }
 }
 
+// ---------- Connect-scan progress bar ----------
+// The "Searching for your Master File and Work Orders folder..." step has no reliable step count
+// up front (it's a folder walk of unknown depth), so a real percentage isn't available. What IS
+// available is how long the SAME scan took last time — Drive scans of the same account are fairly
+// consistent run to run. So this keeps a rolling average of actual durations and fills the bar
+// against that estimate, capped short of 100% until the scan genuinely finishes, then snaps to
+// full. First run ever has no history, so it's labelled as a rough guess rather than pretending
+// to be precise.
+const connectProgressWrap = document.getElementById('connectProgressWrap');
+const connectProgressBar = document.getElementById('connectProgressBar');
+const connectProgressText = document.getElementById('connectProgressText');
+let connectAvgMs = 9000, connectAvgSamples = 0;
+(async () => {
+  try { const s = await idbGet('connectScanAvg'); if (s && s.avgMs) { connectAvgMs = s.avgMs; connectAvgSamples = s.samples || 1; } } catch (e) {}
+})();
+function startConnectProgress() {
+  if (!connectProgressWrap) return () => {};
+  const t0 = performance.now();
+  let timer = null;
+  connectProgressWrap.classList.remove('hidden');
+  connectProgressBar.style.width = '0%';
+  const tick = () => {
+    const elapsed = performance.now() - t0;
+    const pct = Math.min(92, Math.round((elapsed / connectAvgMs) * 100));
+    connectProgressBar.style.width = pct + '%';
+    const remainMs = Math.max(0, connectAvgMs - elapsed);
+    const s = Math.max(1, Math.round(remainMs / 1000));
+    connectProgressText.textContent = connectAvgSamples
+      ? `About ${s}s remaining\u2026`
+      : `First scan on this device \u2014 estimating\u2026 (about ${s}s, based on a rough guess)`;
+  };
+  tick();
+  timer = setInterval(tick, 250);
+  return function stop() {
+    if (timer) clearInterval(timer);
+    const elapsed = performance.now() - t0;
+    connectProgressBar.style.width = '100%';
+    // Exponential moving average: recent scans matter more than the very first one, but a single
+    // unusually slow or fast run (a cold Drive API, a big new PI batch) can't swing the estimate wildly.
+    connectAvgMs = connectAvgSamples ? Math.round(connectAvgMs * 0.7 + elapsed * 0.3) : elapsed;
+    connectAvgSamples++;
+    idbSet('connectScanAvg', { avgMs: connectAvgMs, samples: connectAvgSamples }).catch(() => {});
+    setTimeout(() => connectProgressWrap.classList.add('hidden'), 500);
+  };
+}
+
 // --- IndexedDB (persists folder handles + the style index across sessions) ---
 function idbOpen() {
   return new Promise((resolve, reject) => {
@@ -2342,6 +2398,7 @@ async function loadWarmSession(handle) {
 function warmMinutesLeft(w) { return Math.max(0, Math.ceil((WARM_MS - (Date.now() - w.at)) / 60000)); }
 
 async function connectFolder(existingHandle, forceNew) {
+  let stopConnectProgress = null;
   try {
     const dirHandle = (existingHandle && !forceNew) ? existingHandle : await window.showDirectoryPicker();
     const perm = await dirHandle.requestPermission({ mode: 'read' });
@@ -2386,6 +2443,7 @@ async function connectFolder(existingHandle, forceNew) {
     lastConnectWasWarm = false;
     loadStatus.textContent = `Connected to "${dirHandle.name}". Searching for your Master File and Work Orders folder...`;
     loadStatus.className = 'status';
+    stopConnectProgress = startConnectProgress();
 
     // ~$xxx.xlsx is Excel's lock file (an artifact, not data) — it rode along in folder uploads and
     // once got picked as "the Master File", which silently produced an empty dataset and a dead Ask box.
@@ -2460,9 +2518,11 @@ async function connectFolder(existingHandle, forceNew) {
     // Snapshot this connect. The next 15 minutes of app-switching resume from it with no network
     // calls at all — no folder walk, no re-download, no freshness scan.
     if (masterFileBytes) await saveWarmSession(dirHandle, masterFileName, masterFileBytes);
+    if (stopConnectProgress) stopConnectProgress();
     loadStatus.textContent = bits.join(' · ') + ' · staying connected for 15 min without rescanning.';
     loadStatus.className = masterSearch.handle ? 'status ok' : 'status err';
   } catch (err) {
+    if (stopConnectProgress) stopConnectProgress();
     if (err.name !== 'AbortError') {
       loadStatus.textContent = 'Folder connection failed: ' + err.message;
       loadStatus.className = 'status err';
@@ -3157,13 +3217,19 @@ function toast(msg, ms) {
   el.addEventListener('pointercancel', endDrag);
   return el;
 }
-function notify(kind, msg) {
-  bellLog.unshift({ kind, msg, at: new Date() });
+// The 3rd argument marks a notification as ROUTINE — worth keeping in the history if you open the
+// bell, but not something that should ring or push the unread count up. "Nothing changed" and
+// "already up to date" are confirmations, not events; only genuinely actionable news (an error, a
+// completed save, PIs that actually need a rebuild) rings the bell. Before this, every reconnect
+// silently added 1-2 "unread" entries even when there was nothing to report — which is exactly
+// what ran the badge up to 38 without anything having actually happened.
+function notify(kind, msg, quiet) {
+  bellLog.unshift({ kind, msg, at: new Date(), read: !!quiet });
   if (bellLog.length > BELL_MAX) bellLog.pop();
-  bellUnread++;
+  if (!quiet) bellUnread++;
   persistBell();
   renderBell();
-  toast(msg);
+  if (!quiet) toast(msg);
 }
 let bellFilter = '';
 function renderBell() {
@@ -3407,7 +3473,7 @@ function adoptIndexPayload(data, sourceLabel) {
   idbSet('piIndex', { data: piIndex, builtAt: incoming, version: PI_CACHE_VERSION }).catch(() => {});
   if (styleIndex) idbSet('styleIndex', { data: styleIndex, builtAt: incoming }).catch(() => {});
   renderIndexStamp(); renderHealth();
-  notify('build', `Index loaded from ${sourceLabel}: ${Object.keys(clean).length} PI(s), built ${agoText(incoming)}.`);
+  notify('build', `Index loaded from ${sourceLabel}: ${Object.keys(clean).length} PI(s), built ${agoText(incoming)}.`, true);
   return true;
 }
 // Look for the portable index in the connected folder's root (Drive or local) and adopt it.
@@ -3476,7 +3542,7 @@ async function reportIndexFreshness(loadedFromFile) {
     if (!stale.length) {
       notify('build', loadedFromFile
         ? `Found the index file in your folder and loaded it \u2014 ${n} PI(s) ready. No new or changed files detected, so no rebuild is needed.`
-        : `Index checked against your folder \u2014 ${n} PI(s) ready, nothing has changed.`);
+        : `Index checked against your folder \u2014 ${n} PI(s) ready, nothing has changed.`, true);
     } else {
       const list = stale.slice(0, 8).join(', ') + (stale.length > 8 ? `\u2026` : '');
       notify('build', `${loadedFromFile ? 'Index file loaded, but ' : ''}${stale.length} PI folder(s) are new or changed since it was built (PI ${list}). Click \u201cBuild style index\u201d to bring them in.`);
@@ -3492,7 +3558,7 @@ async function tryLoadIndexFromFolder(rootHandle) {
     const adopted = adoptIndexPayload(data, 'the shared index file in your folder');
     if (!adopted && data && data.kind === 'olisa-index') {
       // Not adopted because this device already holds an index at least as new — still worth saying.
-      notify('build', `Found the index file in your folder, but this device already has an index that is just as recent (${Object.keys(piIndex).length} PI(s)).`);
+      notify('build', `Found the index file in your folder, but this device already has an index that is just as recent (${Object.keys(piIndex).length} PI(s)).`, true);
     }
     await reportIndexFreshness(true);
     return adopted;
