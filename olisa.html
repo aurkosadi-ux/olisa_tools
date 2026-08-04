@@ -1295,6 +1295,7 @@ async function readOrderRows(file) {
     let colIdx = {};
     for (let r = 0; r < Math.min(aoa.length, 200); r++) {
       const row = aoa[r];
+      if (!row) continue;   // every other scan loop guards this; this one didn't
       const idx = {};
       row.forEach((cell, c) => {
         if (cell === null || cell === undefined) return;
@@ -1664,6 +1665,7 @@ async function readWorkbookRows(file) {
   if (!aoa.length) throw new Error(`${file.name}: the "${sheetName}" sheet appears to be empty.`);
 
   const headerRow = aoa[0];
+  if (!headerRow) throw new Error(`${file.name}: the "${sheetName}" sheet has no header row.`);
   const colIdx = {};
   headerRow.forEach((cell, i) => {
     const key = String(cell || '').trim();
@@ -1716,7 +1718,10 @@ function buildGroups(allRecords) {
     const key = r.style + '||' + (r.previousPi || '');
     let s = g.styles.get(key);
     if (!s) { s = { master: 0, cross: 0, style: r.style, previousPi: r.previousPi }; g.styles.set(key, s); }
-    if (r.itemDesc.toLowerCase() === 'cross divider') s.cross += r.uQty;
+    // Tolerant match, not exact equality. The report currently writes exactly "Cross Divider",
+    // but a variant like "Cross Divider (5 Ply)" would have fallen through to the Master Carton
+    // side and silently inflated it — a wrong split that looks perfectly clean in the output.
+    if (/cross\s*divider/i.test(r.itemDesc)) s.cross += r.uQty;
     else s.master += r.uQty;
   }
   return groups;
@@ -2161,7 +2166,11 @@ function showShortageList() {
 // as a manual / hand challan, grouped by challan number, and downloadable like any other answer.
 function isManualChallanQuery(q) {
   const t = String(q || '').toLowerCase();
-  if (!/\b(manual|hand)\s*-?\s*chall?ans?\b/.test(t)) return false;
+  // Two forms accepted. Normal typed text keeps its spaces; voice input arrives squashed
+  // ("all manual challan" -> "allmanualchallan"), which the word-boundary form would miss.
+  const spaced = /\b(manual|hand)\s*-?\s*chall?ans?\b/.test(t);
+  const squashed = /(manual|hand)-?chall?ans?/.test(t.replace(/[^a-z]/g, ''));
+  if (!spaced && !squashed) return false;
   // "is M82033A1 on a manual challan?" is a style question that merely mentions the words — a
   // style code anywhere in the text hands it back to the normal lookup.
   if (extractAllStyleCodes(q).length) return false;
@@ -2948,7 +2957,21 @@ function versionInName(name) {
   const m = String(name).match(/[\u2014-]\s*v(\d+)\s*\.xlsx$/i);
   return m ? parseInt(m[1], 10) : 0;
 }
-async function backupMasterToDrive(silent) {
+// Backups are SERIALIZED. The 10s auto-save and a manual "Download Master File" click can easily
+// land together; without this, both would read the same backupVersion, compute the same "vN",
+// and the cleanup step could delete the copy the other had just uploaded.
+// A routine auto-save JOINS a run already in progress (no point duplicating it). An explicit
+// call passes force and CHAINS after it instead — joining would hand back a file built before
+// your latest edit, which is exactly what a manual download must never do.
+let backupInFlight = null;
+function backupMasterToDrive(silent, force) {
+  if (backupInFlight && !force) return backupInFlight;
+  const run = () => backupMasterToDriveInner(silent).finally(() => { if (backupInFlight === p) backupInFlight = null; });
+  const p = backupInFlight ? backupInFlight.catch(() => {}).then(run) : run();
+  backupInFlight = p;
+  return p;
+}
+async function backupMasterToDriveInner(silent) {
   if (!allRecords.length) { if (!silent) toast('Load the Master File first.'); return; }
   const editCount = Object.keys(remarkOverrides).length;
   try {
@@ -3021,7 +3044,7 @@ async function downloadLatestMasterFile() {
     if (!allRecords.length) { toast('Load the Master File first.'); return; }
     if (savedRootHandle && savedRootHandle.isDrive) {
       if (backupTimer) { clearTimeout(backupTimer); backupTimer = null; }
-      await backupMasterToDrive(true);                    // make sure Drive holds the newest edits
+      await backupMasterToDrive(true, true);              // force: never reuse a run started before your last edit
       const folderId = await ensureBackupFolder();
       const files = await listBackupFiles(folderId);
       if (files.length) {
@@ -3441,8 +3464,42 @@ async function saveIndexFile() {
   addBubble(`Saved <b>${name}</b> (${savedKb} KB${gz ? ` compressed from ${rawKb} KB` : ''}). Put this file in your OLISA GROUP folder on Google Drive \u2014 your phone loads it automatically on connect, so you never build the index there.`, 'askA');
 }
 // Adopt an index payload if it is genuinely newer than what this device already has.
+// Your remarks and acceptances are a SEPARATE stream from the PI-quantity index. They ride in the
+// same file for convenience, but they must merge on their own merit — per-line, latest-timestamp-
+// wins — regardless of how old or new the index part is. Keeping them together was the bug: an
+// equal-or-newer local index made the function return early and the notes never merged at all,
+// so a remark written on the laptop could silently never reach the phone.
+function mergeOverlays(data) {
+  let merged = 0;
+  if (data && data.remarkOverrides) {
+    Object.entries(data.remarkOverrides).forEach(([k, v]) => {
+      if (!v) return;
+      if (!remarkOverrides[k] || (v.at || 0) > (remarkOverrides[k].at || 0)) { remarkOverrides[k] = v; merged++; }
+    });
+    persistRemarkOverrides();
+  }
+  if (data && data.acceptedShorts) {
+    Object.entries(data.acceptedShorts).forEach(([k, v]) => {
+      if (!v) return;
+      if (!acceptedShorts[k] || (v.at || 0) > (acceptedShorts[k].at || 0)) { acceptedShorts[k] = v; merged++; }
+    });
+    persistAcceptedShorts();
+  }
+  if (merged) {
+    migrateOverlayKeys();
+    if (allRecords.length) reconcileManualChallans();
+  }
+  return merged;
+}
 function adoptIndexPayload(data, sourceLabel) {
   if (!data || data.kind !== 'olisa-index') return false;
+  // Notes merge before ANY other gate, including the version check: the overlay format is
+  // independent of the index format, so an index file from an older build still carries valid
+  // remarks that must not be thrown away.
+  const overlaysMerged = mergeOverlays(data);
+  if (overlaysMerged) {
+    notify('info', `${overlaysMerged} remark/acceptance update(s) picked up from ${sourceLabel}.`, true);
+  }
   if (data.version !== PI_CACHE_VERSION) { toast(`Index file is from an older version — rebuild on the device that made it.`); return false; }
   const incoming = data.builtAt || 0;
   if (piIndexBuiltAt && incoming <= piIndexBuiltAt) return false; // ours is same age or newer
@@ -3453,20 +3510,6 @@ function adoptIndexPayload(data, sourceLabel) {
   });
   piIndex = clean;
   if (data.styleIndex && Object.keys(data.styleIndex).length) styleIndex = data.styleIndex;
-  // Merge acceptances rather than replace: a decision made on this device must not be lost just
-  // because the incoming file is newer, and vice versa. Latest timestamp per line wins.
-  if (data.remarkOverrides) {
-    Object.entries(data.remarkOverrides).forEach(([k, v]) => {
-      if (!remarkOverrides[k] || (v.at || 0) > (remarkOverrides[k].at || 0)) remarkOverrides[k] = v;
-    });
-    persistRemarkOverrides();
-  }
-  if (data.acceptedShorts) {
-    Object.entries(data.acceptedShorts).forEach(([k, v]) => {
-      if (!acceptedShorts[k] || (v.at || 0) > (acceptedShorts[k].at || 0)) acceptedShorts[k] = v;
-    });
-    persistAcceptedShorts();
-  }
   piIndexBuiltAt = incoming;
   piIndexRestoredAt = incoming;
   piQtyMisses.clear();
@@ -3531,8 +3574,11 @@ async function reportIndexFreshness(loadedFromFile) {
         try {
           for await (const [fname, fh] of handle.entries()) {
             if (fh.kind !== 'file' || !fh.meta) continue;
-            const fp = `${fname}|${fh.meta.size}|${fh.meta.modifiedTime ? Date.parse(fh.meta.modifiedTime) : 0}`;
-            if (entry.srcFp.endsWith(`|${fh.meta.size}|${fh.meta.modifiedTime ? Date.parse(fh.meta.modifiedTime) : 0}`)) { changed = false; break; }
+            // Deliberately a TAIL match on |size|mtime. srcFp is stored as "path|size|mtime" where
+            // path includes any sub-folder prefix, while this listing only yields the bare name —
+            // comparing the whole string would never match and would flag every folder as stale.
+            const tail = `|${fh.meta.size}|${fh.meta.modifiedTime ? Date.parse(fh.meta.modifiedTime) : 0}`;
+            if (entry.srcFp.endsWith(tail)) { changed = false; break; }
           }
         } catch (e) { changed = false; } // local mode has no metadata here — don't cry wolf
         if (changed) stale.push(ref);
@@ -3802,7 +3848,10 @@ async function loadFile(file) {
     }
     if (!records.length) throw new Error('Could not find a "Style Ref" column in this file.');
     allRecords = records;
+    // Re-attach any note orphaned by a changed Short quantity before anything reads the records.
+    const movedKeys = repairOverlayKeys();
     reconcileManualChallans();
+    if (movedKeys) notify('info', `${movedKeys} saved remark/acceptance re-linked to its line after a Master File change.`, true);
     loadStatus.textContent = `Loaded ${records.length} record(s) from: ${sheets.join(', ')}. Ask away below.`;
     loadStatus.className = 'status ok';
     askInput.disabled = false;
@@ -3897,12 +3946,55 @@ function dmyFromMs(ms) {
   const d = new Date(ms);
   return `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`;
 }
-// Key deliberately avoids row position and dates that get re-formatted on export: challan number,
-// style, measurement and the short quantity together identify one physical line, and survive Olisa
-// re-exporting the Master File.
+// Identity of one physical challan line. Deliberately avoids row position and re-formatted dates
+// so it survives Olisa re-exporting the Master File.
+// Short&Exs stays IN the key: it is the only thing separating otherwise-identical lines on the
+// same challan (dropping it was measured against the real file and collided on 223 keys instead
+// of 194, which would let one line's remark bleed onto another). The downside — that a formula
+// recalculation changes the key and orphans the note — is handled by repairOverlayKeys() below
+// instead, which re-attaches orphans without weakening the key.
 function acceptKey(r) {
   return [String(r.challanNo ?? '').trim(), r.styleNorm, measNorm(r.itemDesc), String(r.short ?? '')].join('|');
 }
+// The part of the key that never changes: challan + style + measurement. A note whose exact key
+// no longer matches any row is looked up on this prefix.
+function stableKeyPart(k) { return String(k).split('|').slice(0, 3).join('|'); }
+// Re-attach notes orphaned by a changed Short quantity. If Olisa's Short&Exs formula recalculates
+// (a correction elsewhere in the sheet, a re-export), the exact key stops matching and the remark
+// silently disappears from its row. This finds those orphans and re-links them — but ONLY when the
+// stable part matches exactly ONE record, so a note can never be attached to the wrong line. An
+// ambiguous orphan is left alone rather than guessed at.
+function repairOverlayKeys() {
+  if (!allRecords.length) return 0;
+  const liveKeys = new Set();
+  const byStable = new Map();
+  allRecords.forEach(r => {
+    const k = acceptKey(r);
+    liveKeys.add(k);
+    const sp = stableKeyPart(k);
+    if (!byStable.has(sp)) byStable.set(sp, []);
+    byStable.get(sp).push(k);
+  });
+  let repaired = 0;
+  const fix = store => {
+    Object.keys(store).forEach(k => {
+      if (liveKeys.has(k)) return;                      // still attached — nothing to do
+      const cands = byStable.get(stableKeyPart(k));
+      if (!cands || cands.length !== 1) return;         // missing or ambiguous — leave it alone
+      const target = cands[0];
+      if (store[target]) return;                        // the live row already has its own note
+      store[target] = store[k];
+      delete store[k];
+      repaired++;
+    });
+  };
+  fix(remarkOverrides);
+  fix(acceptedShorts);
+  if (repaired) { persistRemarkOverrides(); persistAcceptedShorts(); }
+  return repaired;
+}
+// Kept as an alias so callers read naturally; the overlay "migration" is now a repair pass.
+function migrateOverlayKeys() { return repairOverlayKeys(); }
 async function loadAcceptedShorts() {
   try {
     const saved = await idbGet('acceptedShorts');
@@ -3977,6 +4069,11 @@ function rowClass(r) {
   if (s > 0) return 'excess';
   return '';
 }
+// ONE date rule for manual challans, used both for ordering them and for deciding what they can
+// cover. These used to disagree — the sort preferred challanDate while the eligibility check
+// preferred invDate — so challans could be processed in a different order than the matching
+// assumed. Challan date is the real re-delivery date, so it leads; inventory date is the fallback.
+function manualTime(r) { return parseDMY(r.challanDate) || parseDMY(r.invDate) || 0; }
 function reconcileManualChallans() {
   // reset any previous computation
   allRecords.forEach(r => { delete r.autoNotes; delete r.autoNote; delete r.resolved; delete r._covered; delete r.accepted; delete r.forceColor; delete r.remarkEdited; });
@@ -3998,21 +4095,50 @@ function reconcileManualChallans() {
     (r.autoNotes = r.autoNotes || []).push(`Accepted by Olisa${acc.reason ? ` — ${acc.reason}` : ''} (${dmyFromMs(acc.at)})`);
   });
   const manuals = allRecords.filter(r => r.manualCh)
-    .sort((a, b) => parseDMY(a.challanDate || a.invDate) - parseDMY(b.challanDate || b.invDate));
+    .sort((a, b) => manualTime(a) - manualTime(b));
   for (const m of manuals) {
-    const mTime = parseDMY(m.invDate) || parseDMY(m.challanDate);
+    const mTime = manualTime(m);
     const noteDate = fmtNoteDate(m.challanDate || m.invDate);
-    // earlier short rows of the SAME style + SAME measurement
-    const shorts = allRecords.filter(r =>
-      r !== m && !r.manualCh && (r.short || 0) < 0 &&
-      r.styleNorm === m.styleNorm && measNorm(r.itemDesc) === measNorm(m.itemDesc) &&
-      (parseDMY(r.invDate) || 0) <= (mTime || Infinity)
-    ).sort((a, b) => parseDMY(a.invDate) - parseDMY(b.invDate));
+    const mPi = normPiKey(m.piRef);
+    // Candidate shorts: same style + same measurement, and NOT this row itself.
+    // A manual challan can now itself be short and be covered by a LATER manual challan — a
+    // re-delivery that arrives short is still an open shortage and must stay reconcilable.
+    // Undated manual challans no longer match everything: without a readable date there is no
+    // way to know what came before it, so it only settles shorts it can be ordered against.
+    const shorts = allRecords.filter(r => {
+      if (r === m) return false;
+      if ((r.short || 0) >= 0) return false;
+      // An accepted line is settled by agreement — Olisa dropped the claim, so there is nothing
+      // left to re-deliver against it. The block above already marks these; without this check
+      // they still counted as open shortages and quietly ate manual-challan quantity that
+      // belonged to a genuinely outstanding short, starving the real one.
+      if (r.accepted) return false;
+      if (r.styleNorm !== m.styleNorm || measNorm(r.itemDesc) !== measNorm(m.itemDesc)) return false;
+      if (r.manualCh && manualTime(r) >= mTime) return false;   // only EARLIER manual challans
+      const rTime = parseDMY(r.invDate) || parseDMY(r.challanDate) || 0;
+      if (!mTime) return false;          // undated manual challan — cannot be ordered, so no claim
+      return rTime <= mTime;
+    }).sort((a, b) => {
+      // Same PI first: a re-delivery almost always settles the PI it belongs to. Only when that
+      // PI's shortage is fully covered does the surplus spill to another PI — and when it does,
+      // the note says so explicitly rather than moving quantity between PIs silently.
+      const aSame = normPiKey(a.piRef) === mPi ? 0 : 1;
+      const bSame = normPiKey(b.piRef) === mPi ? 0 : 1;
+      if (aSame !== bSame) return aSame - bSame;
+      return (parseDMY(a.invDate) || 0) - (parseDMY(b.invDate) || 0);
+    });
+    if (!mTime) { m.autoNote = 'Manual challan has no readable date — cannot be matched to earlier shortages'; continue; }
     if (!shorts.length) {
       m.autoNote = 'No style was matched with previous information';
       continue;
     }
     let remaining = m.recQty || 0; // what actually arrived on the manual challan
+    if (remaining <= 0) {
+      // Matching shorts exist but nothing was actually received — say so, rather than leaving the
+      // row looking silently skipped.
+      m.autoNote = `Matching earlier shortage found, but no received quantity is recorded on this manual challan`;
+      continue;
+    }
     for (const s of shorts) {
       if (remaining <= 0) break;
       const shortAbs = Math.abs(s.short || 0);
@@ -4022,14 +4148,16 @@ function reconcileManualChallans() {
       const applied = Math.min(need, remaining);
       s._covered = covered + applied;
       remaining -= applied;
+      const crossPi = mPi && normPiKey(s.piRef) && normPiKey(s.piRef) !== mPi
+        ? ` (covered by a manual challan raised under PI ${m.piRef})` : '';
       let note;
       if (s._covered >= shortAbs) {
         note = (s.autoNotes && s.autoNotes.length)
-          ? `On ${noteDate}, Balance Short Qty is delivered`
-          : `On ${noteDate}, Full Short Qty is delivered`;
+          ? `On ${noteDate}, Balance Short Qty is delivered${crossPi}`
+          : `On ${noteDate}, Full Short Qty is delivered${crossPi}`;
         s.resolved = true;
       } else {
-        note = `On ${noteDate}, Short qty ${applied} pcs out of ${shortAbs} pcs is re-delivered by a manual challan`;
+        note = `On ${noteDate}, Short qty ${applied} pcs out of ${shortAbs} pcs is re-delivered by a manual challan${crossPi}`;
       }
       (s.autoNotes = s.autoNotes || []).push(note);
     }
@@ -5166,6 +5294,15 @@ function renderDetective(code) {
       rec.onend = () => {
         active = false; mic.classList.remove('mic-live'); mic.innerHTML = MIC_SVG;
         const heard = (finalTxt || '').trim();
+        // "manual challans" is a phrase, not a code. normalizeSpoken() strips spaces to rebuild
+        // style codes, turning it into "ALLMANUALCHALLAN" — which fails the word-boundary check
+        // and then gets handed to the closest-style matcher, so speaking it could search a
+        // completely unrelated style. Checked on the RAW words, before any of that happens.
+        if (heard && isManualChallanQuery(heard)) {
+          askInput.value = heard;
+          handleAsk();
+          return;
+        }
         const code = normalizeSpoken(heard || askInput.value);
         let use = code;
         if (code && !/^PI\s/i.test(code)) {
@@ -6321,7 +6458,28 @@ function withTimeout(promise, ms, msg) {
     new Promise((_, rej) => setTimeout(() => rej(new Error(msg || 'Timed out')), ms))
   ]);
 }
+// Google's token client is a SINGLE shared object whose .callback gets reassigned per call. With
+// index builds running 4-6 folder reads concurrently, two overlapping sign-in requests used to
+// clobber each other: the second one's callback replaced the first's, so when Google answered,
+// the first promise never resolved OR rejected — it hung forever, stalling that worker and often
+// the whole batch, with no error shown. Now a request already in flight is SHARED: every caller
+// waits on the same promise and they all settle together.
+let driveTokenInFlight = null;
 function requestDriveToken(interactive) {
+  // A stored, still-valid token means we are already logged in — resolve instantly, no dedupe needed.
+  if (!interactive && driveToken && driveTokenExp - Date.now() > 60 * 1000) return Promise.resolve(driveToken);
+  // An identical request is already running — join it rather than starting a competing one.
+  // Interactive requests are never folded into a silent one (they need the consent prompt).
+  if (driveTokenInFlight && !interactive) return driveTokenInFlight;
+  const p = requestDriveTokenInner(interactive);
+  if (!interactive) {
+    driveTokenInFlight = p;
+    // Clear the slot however it settles, so a failure can be retried rather than cached forever.
+    p.then(() => { driveTokenInFlight = null; }, () => { driveTokenInFlight = null; });
+  }
+  return p;
+}
+function requestDriveTokenInner(interactive) {
   return new Promise(async (resolve, reject) => {
     // A stored, still-valid token means we are already logged in — resolve instantly.
     if (!interactive && driveToken && driveTokenExp - Date.now() > 60 * 1000) return resolve(driveToken);
@@ -6335,6 +6493,11 @@ function requestDriveToken(interactive) {
         callback: () => {}
       });
     }
+    // Belt and braces: even with the in-flight guard above, never let a stuck Google callback
+    // hang a caller indefinitely. 45s is far longer than a real sign-in ever takes.
+    let settled = false;
+    const finish = (fn, arg) => { if (settled) return; settled = true; clearTimeout(guard); fn(arg); };
+    const guard = setTimeout(() => finish(reject, new Error('Google sign-in did not respond — check your connection and try again.')), 45000);
     driveTokenClient.callback = resp => {
       if (resp && resp.access_token) {
         driveToken = resp.access_token;
@@ -6347,11 +6510,11 @@ function requestDriveToken(interactive) {
         }).then(r => r.ok ? r.json() : null).then(j => {
           if (j && j.user && j.user.emailAddress) { driveHint = j.user.emailAddress; saveDriveSession(); }
         }).catch(() => {});
-        resolve(driveToken);
+        finish(resolve, driveToken);
       }
-      else reject(new Error(resp && resp.error ? resp.error : 'Sign-in was cancelled.'));
+      else finish(reject, new Error(resp && resp.error ? resp.error : 'Sign-in was cancelled.'));
     };
-    driveTokenClient.error_callback = err => reject(new Error(err && err.message || 'Sign-in failed.'));
+    driveTokenClient.error_callback = err => finish(reject, new Error(err && err.message || 'Sign-in failed.'));
     const req = { prompt: interactive ? 'consent' : '' };
     if (driveHint) req.hint = driveHint;
     driveTokenClient.requestAccessToken(req);
