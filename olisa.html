@@ -578,8 +578,12 @@
   @keyframes noteIn { from { opacity:0; transform:translateX(-50%) translateY(-18px); } to { opacity:1; transform:translateX(-50%) translateY(0); } }
   @media (prefers-reduced-motion: reduce) { .anote { animation:none; } }
   .toast { position:fixed; left:50%; transform:translateX(-50%); bottom:70px; background:#0F2540; color:#fff; padding:10px 16px; border-radius:10px; font-size:13px; z-index:9500; box-shadow:0 8px 30px rgba(0,0,0,.25); max-width:88vw; }
-  .pdfmodal { position:fixed; inset:0; background:rgba(15,37,64,.55); z-index:9400; display:flex; flex-direction:column; }
-  .pdfmodal .bar { background:#fff; padding:10px 12px; display:flex; gap:8px; align-items:center; }
+  /* 9400 put this UNDER the sticky app-switch bar (9500), the bell (9800) and the Drive log-out
+     link (9600): the nav painted straight over the Close button, so the preview could not be shut
+     at all and the page had to be reloaded. It now sits above every other fixed layer. */
+  .pdfmodal { position:fixed; inset:0; background:rgba(15,37,64,.55); z-index:9950; display:flex; flex-direction:column; }
+  .pdfmodal .bar { background:#fff; padding:10px 12px; display:flex; gap:8px; align-items:center;
+                   position:sticky; top:0; flex:0 0 auto; box-shadow:0 1px 6px rgba(15,37,64,.14); }
   .pdfmodal .bar b { flex:1; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .pdfmodal .pages { flex:1; overflow:auto; text-align:center; padding:10px; }
   .pdfmodal canvas { max-width:100%; background:#fff; margin-bottom:10px; box-shadow:0 2px 10px rgba(0,0,0,.2); border-radius:4px; }
@@ -2762,14 +2766,36 @@ async function buildStyleIndex() {
   const withPi = piResult.entries.filter(e => e.ok).length;
   const b = bucketPiEntries(piResult.entries);
 
+  // ---- Challan copies, in the same build ----
+  // The challan index used to be a separate on-demand scan, which meant a perfectly successful
+  // "Build style index" still left the challan pill sitting grey and unread on screen, with no way
+  // to tell that a second, different action was needed. One button now produces one complete index.
+  // A missing or unreadable Challans folder is reported, never fatal: the style index is already
+  // built by this point and must not be thrown away because the challan folder was renamed.
+  let challanResult = null, challanError = '';
+  try {
+    progressBar.style.width = '0%';
+    progressText.textContent = 'Style index ready. Now reading your challan copies\u2026';
+    challanResult = await buildChallanIndex((d, total, found, eta) => {
+      progressBar.style.width = Math.round((d / total) * 100) + '%';
+      progressText.textContent = `Reading challan copies: ${d} / ${total} document(s) \u2014 ${found} challan(s) found${eta || ''}`;
+    });
+  } catch (e) {
+    challanError = e.message;
+  }
+
   piIndexBuiltAt = Date.now();
   piIndexRestoredAt = piIndexBuiltAt;
   piIndexPartial = false;   // this build ran to the end — the index is whole
   if (typeof renderIndexStamp === 'function') renderIndexStamp();
   if (typeof renderHealth === 'function') renderHealth();
-  if (typeof notify === 'function') notify('build', `Index built: ${withPi} PI(s), ${Object.keys(index).length} style(s).`);
+  const chCount = Object.keys(challanIndex).length;
+  if (typeof notify === 'function') notify('build', `Index built: ${withPi} PI(s), ${Object.keys(index).length} style(s)${chCount ? `, ${chCount} challan copies` : ''}.`);
   if (typeof uploadIndexToDrive === 'function') uploadIndexToDrive(); // fire-and-forget; notifies on its own
-  progressText.textContent = `Done \u2014 indexed ${Object.keys(index).length} style(s) across ${foldersScanned} PI folder(s); PI Qty read for ${withPi} PI(s).`;
+  progressText.textContent = `Done \u2014 indexed ${Object.keys(index).length} style(s) across ${foldersScanned} PI folder(s); PI Qty read for ${withPi} PI(s); `
+    + (challanError ? `challan copies NOT read (${challanError})`
+       : challanResult ? `${challanResult.challans} challan copies read from ${challanResult.files} document(s)`
+       : 'no challan copies found') + '.';
   renderPiIndexDiagnostics(piFolders.length, withPi, b, sweep);
   indexBuilding = false;
   releaseBuildWakeLock();
@@ -3470,17 +3496,20 @@ function renderHealth() {
   const ageMs = piIndexBuiltAt ? Date.now() - piIndexBuiltAt : null;
   const days = ageMs === null ? null : Math.floor(ageMs / 86400000);
   const chCount = Object.keys(challanIndex).length;
-  const idxDot = piCount === 0 ? 'hgrey' : days === null ? 'hgreen' : days <= 3 ? 'hgreen' : days <= 7 ? 'hyellow' : 'hred';
+  // Amber, not green, when the PI side built but no challan copy was readable: everything worked
+  // except the part that did not, and that distinction has to survive on one line.
+  const idxDot = piCount === 0 ? 'hgrey' : !chCount ? 'hyellow' : days === null ? 'hgreen' : days <= 3 ? 'hgreen' : days <= 7 ? 'hyellow' : 'hred';
+  // One index, one line. PI folders and challan copies are read by the same build, so splitting
+  // them across two pills implied two separate jobs and left a permanent grey "not read" beside a
+  // green "built" — which read as a failure even when everything had worked.
+  const chPart = chCount ? ` and ${chCount} challan copies` : '';
   const idxTxt = piCount === 0 ? 'Index: not built'
-    : `Index: ${piCount} PI(s) \u2014 ${stampText(piIndexBuiltAt)} (${agoText(piIndexBuiltAt)})${days !== null && days > 7 ? ' \u2014 rebuild recommended' : ''}`;
+    : `Index: ${piCount} PI(s)${chPart} \u2014 ${stampText(piIndexBuiltAt)} (${agoText(piIndexBuiltAt)})${days !== null && days > 7 ? ' \u2014 rebuild recommended' : ''}`;
   el.innerHTML = [
     `<span><span class="hdot ${online ? 'hgreen' : 'hred'}"></span>${online ? 'Online' : 'Offline \u2014 waiting for connection'}</span>`,
     `<span><span class="hdot ${driveOn ? 'hgreen' : localOn ? 'hgreen' : 'hgrey'}"></span>${driveOn ? 'Drive connected' : localOn ? 'Local folder connected' : 'No folder connected'}</span>`,
     `<span><span class="hdot ${rows ? 'hgreen' : 'hgrey'}"></span>${rows ? `Master: ${rows} rows` : 'Master File: not loaded'}</span>`,
-    `<span><span class="hdot ${idxDot}"></span>${idxTxt}</span>`,
-    // Challan copies are their own index with their own freshness: the style index can be perfectly
-    // current while a challan added yesterday is still unread, and only this line would show it.
-    `<span><span class="hdot ${chCount ? 'hgreen' : 'hgrey'}"></span>${chCount ? `Challans: ${chCount} readable${challanIndexBuiltAt ? ` \u2014 ${agoText(challanIndexBuiltAt)}` : ''}` : 'Challan copies: not read'}</span>`
+    `<span><span class="hdot ${idxDot}"></span>${idxTxt}</span>`
   ].join('');
 }
 setInterval(renderHealth, 5000);
@@ -3743,7 +3772,19 @@ async function openFilePreview(fileHandle) {
       <button class="secondary" id="pvX" style="padding:7px 12px;font-size:12.5px;">\u2715 Close</button>
     </div><div class="pages" id="pvPages">Loading\u2026</div>`;
   document.body.appendChild(modal);
-  modal.querySelector('#pvX').onclick = () => modal.remove();
+  // Three ways out, because one hidden button is not enough: the Close button, the Esc key, and a
+  // click on the dark backdrop. The key listener is removed with the modal so previews never stack
+  // up listeners, and clicks INSIDE the document must not close it — only the backdrop itself.
+  const closePreview = () => {
+    document.removeEventListener('keydown', onKey, true);
+    modal.remove();
+  };
+  function onKey(ev) {
+    if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); closePreview(); }
+  }
+  document.addEventListener('keydown', onKey, true);
+  modal.addEventListener('click', ev => { if (ev.target === modal) closePreview(); });
+  modal.querySelector('#pvX').onclick = closePreview;
   modal.querySelector('#pvDl').onclick = () => {
     const url = URL.createObjectURL(new Blob([buf]));
     const a = document.createElement('a');
@@ -4121,7 +4162,10 @@ function normChallanKey(v) {
   const m = s.match(/\d[\d\s]*/);
   if (!m) return '';
   const digits = m[0].replace(/\D/g, '').replace(/^0+(?=\d)/, '');
-  return digits.length >= 5 ? digits : '';
+  // Hand challans are numbered by hand: "114", "42" are real challan numbers in the Master File,
+  // sitting right beside 8-digit system ones. An older 5-digit minimum here silently refused to
+  // link exactly those rows, which is why some challan numbers were not clickable.
+  return digits.length >= 1 && digits.length <= 20 ? digits : '';
 }
 // Every text item on the page, flattened. Deliberately NOT line-clustered: the header only has to
 // be regex-matched, and joining items with a space is both faster and immune to a header that
@@ -4147,7 +4191,7 @@ async function scanChallanPdf(file, path, driveId) {
     let current = null;
     for (let p = 1; p <= pdf.numPages; p++) {
       const txt = await pdfPageText(pdf, p);
-      const m = txt.match(/Challan\s*No\s*[:\uff1a]?\s*(\d{5,})/i);
+      const m = txt.match(/Challan\s*No\s*[:\uff1a]?\s*(\d{2,})/i);
       if (m) {
         current = { no: normChallanKey(m[1]), pages: [p], path, driveId,
                     date: (txt.match(/Challan\s*Date\s*[:\uff1a]?\s*([0-9]{1,2}\s*-\s*[A-Za-z]{3}\s*-\s*[0-9]{2,4})/i) || [])[1] || '',
@@ -4171,7 +4215,7 @@ async function scanChallanRtf(file, path, driveId) {
 // page breaks, so a text challan has no page range — the file itself IS the challan, which is
 // exactly right for the hand challans, one per file.
 function scanChallanText(text, path, driveId, kind) {
-  const hits = [...String(text).matchAll(/Challan\s*No\s*[:\uff1a]?\s*(\d{5,})\s*(-\s*M\b)?/gi)];
+  const hits = [...String(text).matchAll(/Challan\s*No\s*[:\uff1a]?\s*(\d{2,})\s*(-\s*M\b)?/gi)];
   return hits.map((m, k) => {
     // Every field belongs to the challan it sits under, so read only the slice from this header to
     // the next one. A file with a single challan is the normal case; this just never assumes it.

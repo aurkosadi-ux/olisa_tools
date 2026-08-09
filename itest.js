@@ -95,11 +95,33 @@ t('format is decided by magic bytes, not extension', /startsWith\('%PDF'\)/.test
 t('RTF renders in the preview instead of "no preview"', /head4\.startsWith\('\{\\\\rt'\)/.test(html));
 t('unreadable binary Word files are named, not hidden', /binaryDoc/.test(html));
 t('a text challan is served whole (nothing to split)', /if \(!entry\.pages\)/.test(html));
+// The preview must outrank the PERSISTENT chrome — the sticky nav, the bell, the offline banner,
+// the toast layer, the Drive log-out link. Transient overlays that deliberately sit on top of
+// everything (the folder picker, the fatal-error box) are not in scope, and the particle burst is
+// pointer-events:none so it can never swallow a click.
+t('preview outranks every persistent fixed layer', (() => {
+  const modal = Number((html.match(/\.pdfmodal \{[^}]*z-index:(\d+)/) || [])[1]);
+  if (!modal) return false;
+  const chrome = ['.appswitch', '.bellwrap', '.offbanner', '.toast', '.anote'].map(sel => {
+    const m = html.match(new RegExp('\\' + sel + ' \\{[^}]*z-index:\\s*(\\d+)'));
+    return m ? Number(m[1]) : 0;
+  });
+  const logout = Number((html.match(/driveLogoutLink[^>]*z-index:(\d+)/) || [])[1] || 0);
+  return [...chrome, logout].every(z => z < modal);
+})(), 'modal must outrank .appswitch/.bellwrap/.offbanner/.toast/.anote/log-out link');
+t('preview closes on Escape', /ev\.key === 'Escape'/.test(html));
+t('preview closes on a backdrop click', /ev\.target === modal/.test(html));
+t('the Escape listener is removed with the modal', /removeEventListener\('keydown', onKey, true\)/.test(html));
+t('preview still offers Download', /id="pvDl"/.test(html));
+t('short hand-challan numbers are linkable', /digits\.length >= 1/.test(html));
+t('challan copies are built by the same button as the style index', /await buildChallanIndex\(\(d, total, found, eta\)/.test(html));
+t('a challan-folder failure does not lose the style index', /challanError = e\.message/.test(html));
+t('one merged index line, not two pills', / and \$\{chCount\} challan copies/.test(html) && !/Challan copies: not read/.test(html));
 
 console.log('\n8. Service worker');
 const sw = fs.readFileSync(process.argv[3] || 'sw.js', 'utf8');
 const ver = (sw.match(/olisa-tools-v(\d+)/) || [])[1];
-t('cache version bumped past v29', ver && Number(ver) > 29, 'v' + ver);
+t('cache version bumped past v30', ver && Number(ver) > 30, 'v' + ver);
 const swCode = sw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 t('shell is cached per-entry, not atomically', !/\.addAll\(/.test(swCode));
 t('shell entries fail independently', /\.add\(u\)\.catch/.test(swCode));
