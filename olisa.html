@@ -3779,6 +3779,20 @@ async function openFilePreview(fileHandle) {
     } else if (ext === 'docx' && window.mammoth) {
       const result = await mammoth.convertToHtml({ arrayBuffer: buf });
       pages.innerHTML = `<div style="background:#fff;padding:18px;border-radius:8px;max-width:820px;margin:0 auto;text-align:left;">${result.value}</div>`;
+    } else if (head4.startsWith('{\\rt')) {
+      // The hand challans. Named ".doc", actually Rich Text — which no browser renders, so this
+      // used to fall through to "No preview for this file type" on the one document type that
+      // exists in no other format. The reader keeps the table shape (tabs are cell breaks), so it
+      // is laid back out as a table rather than dumped as a wall of text.
+      const lines = rtfToText(buf).split('\n').filter(l => l.trim());
+      const body = lines.map(l => {
+        const cells = l.split('\t').map(c => c.trim());
+        if (cells.length > 1) return `<tr>${cells.map(c => `<td style="border:1px solid #dde5f0;padding:4px 7px;font-size:12.5px;vertical-align:top;">${escHtml(c)}</td>`).join('')}</tr>`;
+        return `<tr><td colspan="6" style="padding:3px 7px;font-size:12.5px;">${escHtml(cells[0])}</td></tr>`;
+      }).join('');
+      pages.innerHTML = `<div style="background:#fff;padding:16px;border-radius:8px;max-width:900px;margin:0 auto;text-align:left;">
+        <table style="border-collapse:collapse;width:100%;">${body}</table></div>`;
+      pages.style.background = '#fff'; pages.style.textAlign = 'left';
     } else {
       pages.innerHTML = `<div style="color:#fff;padding:20px;">No preview for this file type \u2014 use Download.</div>`;
     }
@@ -4006,6 +4020,81 @@ function challanCell(r) {
   if (!key) return escHtml(no + tail);
   return `<a href="#" class="ch-link" data-ch="${escHtml(key)}">${escHtml(no)}</a>${escHtml(tail)}`;
 }
+// ==================== RTF ("\u2026.doc" that isn't Word) ====================
+// The hand challans arrive as ".doc" but are NOT binary Word files \u2014 `file` reports every one of
+// them as "Rich Text Format data". RTF is plain text with control words, so it needs no library at
+// all: the reader below is the whole dependency. This matters because manual challans are typed in
+// Word and never exported to PDF, so a PDF-only index would miss precisely the documents that the
+// manual-challan reconciliation depends on.
+//
+// It is a real tokenizer, not a regex strip. Naive stripping turns "\\pard" into a paragraph break
+// plus a stray "d", eats "\\cellx4627" into visible junk, and cannot honour \\uc skip counts \u2014 which
+// is what mangles the Chinese style descriptions ("\u6df77PRS 59*45*32CM") that these challans carry.
+function rtfToText(bytes) {
+  let s = '';
+  const u8 = new Uint8Array(bytes);
+  for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]); // RTF is 7-bit ASCII + escapes
+  const SKIP = /^(fonttbl|colortbl|stylesheet|info|pict|themedata|colorschememapping|latentstyles|datastore|listtable|listoverridetable|rsidtbl|generator|xmlnstbl|wgrffmtfilter|objdata|mmathPr|panose|falt|filetbl|revtbl|shppict|nonshppict|bkmkstart|bkmkend|template|operator|company|author|creatim|revtim|printim|docvar)$/;
+  const out = [];
+  let i = 0, depth = 0;
+  const skipAt = [];      // group depths whose content must be dropped
+  // A destination is often BOTH ignorable and named ("{\\*\\panose ...}"), which used to push the
+  // same depth twice while only one pop ever happened — one stale entry and the rest of the
+  // document silently vanished. Pushing at most once per group depth is the whole fix.
+  const markSkip = () => { if (skipAt[skipAt.length - 1] !== depth) skipAt.push(depth); };
+  let ucSkip = 1;
+  const ucStack = [];
+  while (i < s.length) {
+    const c = s[i];
+    if (c === '{') { depth++; ucStack.push(ucSkip); i++; continue; }
+    if (c === '}') {
+      if (skipAt.length && skipAt[skipAt.length - 1] === depth) skipAt.pop();
+      depth--; ucSkip = ucStack.pop() ?? 1; i++; continue;
+    }
+    if (c === '\\') {
+      const next = s[i + 1];
+      if (next === '*') {                       // \*\destination — ignorable, drop the group
+        markSkip(); i += 2; continue;
+      }
+      if (next === "'") {                       // \'hh escaped byte
+        const hex = s.substr(i + 2, 2);
+        if (!skipAt.length) out.push(String.fromCharCode(parseInt(hex, 16)));
+        i += 4; continue;
+      }
+      if (next === '\\' || next === '{' || next === '}') {
+        if (!skipAt.length) out.push(next);
+        i += 2; continue;
+      }
+      if (next === '\n' || next === '\r') { if (!skipAt.length) out.push('\n'); i += 2; continue; }
+      if (next === '~') { if (!skipAt.length) out.push('\u00a0'); i += 2; continue; }
+      if (next === '-' || next === '_') { i += 2; continue; }
+      const m = /^\\([a-zA-Z]+)(-?\d+)? ?/.exec(s.slice(i));
+      if (!m) { i++; continue; }
+      const word = m[1], param = m[2] === undefined ? null : parseInt(m[2], 10);
+      i += m[0].length;
+      if (SKIP.test(word)) { markSkip(); continue; }
+      if (skipAt.length) continue;
+      if (word === 'uc') { ucSkip = param || 0; continue; }
+      if (word === 'u') {
+        if (param !== null) out.push(param < 0 ? String.fromCharCode(param + 65536) : String.fromCharCode(param));
+        let k = ucSkip;                          // skip the ANSI fallback characters
+        while (k > 0 && i < s.length) {
+          if (s[i] === '\\' && s[i + 1] === "'") { i += 4; }
+          else { i++; }
+          k--;
+        }
+        continue;
+      }
+      if (word === 'par' || word === 'line' || word === 'row' || word === 'sect' || word === 'page') { out.push('\n'); continue; }
+      if (word === 'cell' || word === 'tab' || word === 'nestcell') { out.push('\t'); continue; }
+      continue;                                  // every other control word is formatting
+    }
+    if (c === '\r' || c === '\n') { i++; continue; }
+    if (!skipAt.length) out.push(c);
+    i++;
+  }
+  return out.join('').replace(/[ \t]*\t[ \t]*/g, '\t').replace(/\n{3,}/g, '\n\n');
+}
 // ==================== CHALLAN COPY INDEX ====================
 // One PDF in the Challans folder holds SEVERAL challans, and a single challan can run over more
 // than one page. Opening the whole file to hunt for one challan is exactly the manual work this
@@ -4072,6 +4161,48 @@ async function scanChallanPdf(file, path, driveId) {
   } finally { try { await pdf.destroy(); } catch (e) { /* already gone */ } }
   return out;
 }
+// A ".doc" here is Rich Text, and each one holds a single hand challan. Splitting is neither
+// possible nor needed: the file IS the challan, so it is served whole. If a future file ever holds
+// more than one, each is indexed separately and the viewer shows only the one that was clicked.
+async function scanChallanRtf(file, path, driveId) {
+  return scanChallanText(rtfToText(await file.arrayBuffer()), path, driveId, 'rtf');
+}
+// Shared by the RTF and .docx paths: both arrive as plain text laid out the same way. RTF has no
+// page breaks, so a text challan has no page range — the file itself IS the challan, which is
+// exactly right for the hand challans, one per file.
+function scanChallanText(text, path, driveId, kind) {
+  const hits = [...String(text).matchAll(/Challan\s*No\s*[:\uff1a]?\s*(\d{5,})\s*(-\s*M\b)?/gi)];
+  return hits.map((m, k) => {
+    // Every field belongs to the challan it sits under, so read only the slice from this header to
+    // the next one. A file with a single challan is the normal case; this just never assumes it.
+    const from = m.index, to = k + 1 < hits.length ? hits[k + 1].index : text.length;
+    const seg = text.slice(Math.max(0, from - 600), to);
+    return {
+      no: normChallanKey(m[1]), pages: null, kind, part: k, parts: hits.length, path, driveId,
+      hand: !!m[2],     // "-M" straight after the number is how a hand challan marks itself
+      date: (seg.match(/Challan\s*Date\s*[:\uff1a]?\s*([0-9]{1,2}\s*-\s*[A-Za-z]{3,9}\s*-\s*[0-9]{2,4})/i) || [])[1] || '',
+      piRef: piFromChallanText(seg)
+    };
+  }).filter(c => c.no);
+}
+// Route by CONTENT, not by extension. This folder holds files named ".doc" that are actually Rich
+// Text, and elsewhere the tool meets scrambled cloud placeholders with no usable extension at all.
+// The first bytes never lie: "%PDF" is a PDF, "{\rt" is RTF, "PK" is a .docx zip.
+async function scanChallanDoc(file, path, driveId) {
+  const head = new Uint8Array(await file.slice(0, 8).arrayBuffer());
+  let magic = '';
+  for (let i = 0; i < head.length; i++) magic += String.fromCharCode(head[i]);
+  if (magic.startsWith('%PDF')) return scanChallanPdf(file, path, driveId);
+  if (magic.startsWith('{\\rt')) return scanChallanRtf(file, path, driveId);
+  if (magic.startsWith('PK') && window.mammoth) {
+    const res = await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() });
+    return scanChallanText(res.value, path, driveId, 'docx');
+  }
+  // A true binary Word file (OLE compound header D0 CF 11 E0) genuinely cannot be read in a
+  // browser. Say so plainly instead of reporting "no challan found", so the fix is obvious.
+  if (head[0] === 0xD0 && head[1] === 0xCF) throw new Error('old binary Word file — re-save it as PDF or .docx');
+  return [];
+}
 async function findChallanRoot() {
   if (!savedRootHandle) return null;
   if (savedRootHandle.isDrive) {
@@ -4102,18 +4233,21 @@ async function buildChallanIndex(onProgress) {
     const subs = [];
     for await (const [name, handle] of dir.entries()) {
       if (handle.kind === 'directory') subs.push([name, handle]);
-      else if (/\.pdf$/i.test(name)) pdfs.push({ name, path: prefix + name, handle });
+      // ".doc" is included on purpose: those are the hand challans, and they exist in no other form.
+      else if (/\.(pdf|docx?|rtf)$/i.test(name)) pdfs.push({ name, path: prefix + name, handle });
     }
     for (const [name, handle] of subs) {
       try { await walk(handle, prefix + name + '/', depth + 1); } catch (e) { /* unreadable subfolder */ }
     }
   }
   await walk(root, '', 0);
-  if (!pdfs.length) throw new Error(`The "${root.name}" folder has no PDF files in it.`);
+  if (!pdfs.length) throw new Error(`The "${root.name}" folder has no challan documents (PDF or .doc) in it.`);
 
   const next = {};
   const clock = newEtaClock();
   let done = 0, challans = 0, failed = 0;
+  const skipped = [];     // opened fine, but no challan header inside — reported, never silent
+  const binaryDoc = [];   // genuinely unreadable in a browser; needs re-saving, so name the files
   for (const f of pdfs) {
     let file = null, fp = '';
     try {
@@ -4127,9 +4261,10 @@ async function buildChallanIndex(onProgress) {
       reused.forEach(e => { next[normChallanKey(e.no)] = e; challans++; });
     } else {
       try {
-        const found = await scanChallanPdf(file, f.path, f.handle.meta && f.handle.meta.id);
+        const found = await scanChallanDoc(file, f.path, f.handle.meta && f.handle.meta.id);
         found.forEach(c => { next[c.no] = { ...c, fp }; challans++; });
-      } catch (e) { failed++; }
+        if (!found.length) skipped.push(f.path);
+      } catch (e) { failed++; if (/binary Word/.test(e.message)) binaryDoc.push(f.path); }
     }
     done++;
     await checkpointChallanIndex(next);
@@ -4138,7 +4273,7 @@ async function buildChallanIndex(onProgress) {
   challanIndex = next;
   challanIndexBuiltAt = Date.now();
   await checkpointChallanIndex(next, true);
-  return { files: pdfs.length, challans, failed, folder: root.name };
+  return { files: pdfs.length, challans, failed, skipped, binaryDoc, folder: root.name };
 }
 let lastChallanCheckpoint = 0;
 async function checkpointChallanIndex(data, force) {
@@ -4156,7 +4291,8 @@ async function checkpointChallanIndex(data, force) {
   } catch (e) { /* no cached challan index yet */ }
 })();
 // Pull one challan out of its file as a standalone PDF: only its own pages, nothing else.
-async function extractChallanPdf(entry) {
+// Locate the file an index entry points at, wherever it now sits in the Challans tree.
+async function challanFileHandle(entry) {
   const root = await findChallanRoot();
   if (!root) throw new Error('The Challans folder could not be found.');
   let handle = null;
@@ -4174,7 +4310,10 @@ async function extractChallanPdf(entry) {
   }
   await find(root, '', 0);
   if (!handle) throw new Error(`The file "${entry.path}" is no longer in the Challans folder — rebuild the challan index.`);
-  const file = await getFileWithRetry(handle, 4);
+  return handle;
+}
+async function extractChallanPdf(entry) {
+  const file = await getFileWithRetry(await challanFileHandle(entry), 4);
   const buf = await file.arrayBuffer();
   if (!window.PDFLib) throw new Error('The PDF splitter did not load — check your connection and reload.');
   const src = await PDFLib.PDFDocument.load(buf);
@@ -4199,6 +4338,20 @@ async function openChallanCopy(challanNo) {
     return;
   }
   const label = `Challan ${key}${entry.piRef ? ` (PI ${entry.piRef})` : ''}`;
+  // A text challan (the hand challans, written in Word and saved as RTF) has no page range to cut:
+  // one file holds exactly one challan, so the file itself is already the single-challan copy.
+  if (!entry.pages) {
+    const note = addBubble(`Opening ${escHtml(label)}${entry.hand ? ' (hand challan)' : ''} from <code>${escHtml(entry.path)}</code>\u2026`, 'askA');
+    try {
+      const handle = await challanFileHandle(entry);
+      note.innerHTML = `<div class="summary-line">${escHtml(label)}${entry.hand ? ' \u2014 hand challan' : ''}${entry.date ? ` \u2014 dated ${escHtml(entry.date)}` : ''}</div>` +
+        `<div class="sub-note">Read from <code>${escHtml(entry.path)}</code>. This document holds ${entry.parts > 1 ? `${entry.parts} challans` : 'this challan only'}, so it opens whole \u2014 there is nothing to split out.</div>`;
+      await openFilePreview(handle);
+    } catch (e) {
+      note.innerHTML = `Couldn't open challan <b>${escHtml(key)}</b> \u2014 ${escHtml(e.message)}`;
+    }
+    return;
+  }
   const note = addBubble(`Pulling out ${escHtml(label)} \\u2014 page${entry.pages.length > 1 ? 's' : ''} ${entry.pages.join(' & ')} of <code>${escHtml(entry.path)}</code>\\u2026`, 'askA');
   try {
     const { bytes, pageCount } = await extractChallanPdf(entry);
@@ -4222,7 +4375,9 @@ async function runChallanIndexBuild(retryChallan) {
       bubble.innerHTML = `Reading challan copies: ${done} / ${total} PDF(s) \\u2014 ${challans} challan(s) found${escHtml(eta || '')}`;
     });
     bubble.innerHTML = `Challan copies ready \\u2014 <b>${res.challans}</b> challan(s) across ${res.files} PDF(s) in "${escHtml(res.folder)}".` +
-      (res.failed ? `<br><span class="sub-note" style="color:var(--bad);">${res.failed} file(s) could not be read (scanned image, corrupt, or still a cloud placeholder).</span>` : '');
+      (res.failed ? `<br><span class="sub-note" style="color:var(--bad);">${res.failed} file(s) could not be read (scanned image, corrupt, or still a cloud placeholder).</span>` : '') +
+      (res.binaryDoc.length ? `<br><span class="sub-note" style="color:var(--bad);">${res.binaryDoc.length} file(s) are old binary Word documents, which no browser can open. Re-save these as PDF and rebuild:<br>${res.binaryDoc.slice(0, 6).map(escHtml).join('<br>')}</span>` : '') +
+      (res.skipped.length ? `<br><span class="sub-note">${res.skipped.length} file(s) opened but had no challan number printed inside (cover pages, gate passes).</span>` : '');
     if (typeof renderHealth === 'function') renderHealth();
     if (retryChallan && challanIndex[retryChallan]) openChallanCopy(retryChallan);
   } catch (e) {
