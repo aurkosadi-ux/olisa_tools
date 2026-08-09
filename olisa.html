@@ -740,11 +740,25 @@
 </style>
 </head>
 <body>
-<div class="appswitch">
+<div class="appswitch" id="appSwitch">
   <a href="olisa.html" class="on">Olisa Tools</a>
   <a href="calculator.html">Price Calculator</a>
   <a href="index.html" class="home">All tools</a>
 </div>
+<script>
+// Tapping Price Calculator or All tools is a real same-tab navigation: this page unloads and any
+// index build running on it dies instantly. That is the genuine "it started from the beginning"
+// — nothing to do with tab switching inside the app, which only toggles CSS.
+// While a build is running these two links open in a NEW tab instead, so the build keeps going in
+// this one. When nothing is building they behave exactly as before: same tab, no new windows.
+document.addEventListener('click', function (e) {
+  var a = e.target && e.target.closest && e.target.closest('#appSwitch a');
+  if (!a || a.classList.contains('on')) return;
+  if (typeof window.__olisaBuilding !== 'function' || !window.__olisaBuilding()) return;
+  e.preventDefault();
+  window.open(a.getAttribute('href'), '_blank', 'noopener');
+});
+</script>
 
 <div class="bg-scene" aria-hidden="true" id="bgScene">
   <div class="wash w1"></div><div class="wash w2"></div><div class="wash w3"></div>
@@ -1016,6 +1030,20 @@ function switchTab(which) {
 // true top level, outside any IIFE, since it's used across all of them.
 function escHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+// Same rule, same reason — and this one was NOT obeying it. snapToLocalMidnight lived inside the
+// Ask section's IIFE while the Undelivered Report's formatDateValue() called it from a different
+// IIFE, which is a plain ReferenceError the moment a real Date cell is met. It is pure (no state,
+// no DOM), so true top level is where it belongs and every section can now reach it.
+function snapToLocalMidnight(v) {
+  // SheetJS builds dates on a pre-1900 local base; timezones with historical LMT offsets
+  // (e.g. Asia/Dhaka) drift midnight by a few minutes, which can push the date to the
+  // previous/next day. Snap to the nearest local midnight to recover the real calendar date.
+  const d = new Date(v.getTime());
+  const drift = (d.getHours()*3600 + d.getMinutes()*60 + d.getSeconds())*1000 + d.getMilliseconds();
+  if (drift > 43200000) d.setTime(d.getTime() + (86400000 - drift));
+  else d.setTime(d.getTime() - drift);
+  return d;
 }
 
 (function() { // PO Summary Generator
@@ -1933,7 +1961,15 @@ const chatEl = document.getElementById('askChat');
 const PI_CACHE_VERSION = 3;
 let piIndexRestoredAt = null;
 let indexBuilding = false; // true while a build is running: searches still work, but say results may be partial
+// indexBuilding lives inside this IIFE, but the nav guard in <head> runs at true top level and has
+// to ask whether a build is in progress. A probe function rather than a mirrored flag, so there is
+// only ever one source of truth and the two cannot drift apart.
+window.__olisaBuilding = function () { return indexBuilding; };
 let piIndexBuiltAt = null; // when the CURRENT in-memory PI index was produced (restored or freshly built)
+// True when the index on disk came from a checkpoint of a build that never finished. Such an index
+// is genuinely useful — it saves re-reading everything — but it is INCOMPLETE, and an incomplete
+// index that looks complete quietly under-reports styles. So it is flagged, and the flag is shown.
+let piIndexPartial = false;
 // Load acceptances first, then re-apply them if the Master File is already in memory (the two
 // load independently, and without this a refresh could briefly show settled lines as outstanding).
 loadRemarkOverrides();
@@ -1953,6 +1989,7 @@ loadAcceptedShorts().then(() => {
     piIndex = clean;
     piIndexBuiltAt = cached.builtAt || null;
     piIndexRestoredAt = piIndexBuiltAt;
+    piIndexPartial = !!cached.partial;
     // No status line is written here on purpose. This used to print "Index loaded: N PI(s)…"
     // into askPiDiag — a THIRD copy of what the health strip already shows, rendered once at
     // page load and never refreshed, so its "17 minutes ago" drifted away from the live ones.
@@ -2607,10 +2644,38 @@ function extractStyleTokens(text) {
   return out;
 }
 
+// ==================== BUILD CHECKPOINTS ====================
+// Both indexes used to reach IndexedDB only once, at the very end of the build. Anything that
+// killed the page before that line — tapping through to the Calculator, Android reclaiming memory,
+// a dropped connection — threw away every folder already read, so the next attempt started from
+// zero. That is the real "it restarts from the beginning".
+//
+// Writing a checkpoint every few seconds instead means a build that dies has still banked its work:
+// parsePiFolderPdf already skips any PI whose file fingerprint (path|size|mtime) matches what is
+// cached, so the retry re-reads only what is genuinely missing and takes a fraction of the time.
+// Throttled rather than per-folder because each write serialises the whole index — cheap at one
+// write per few seconds, wasteful at one per file.
+const CHECKPOINT_MS = 4000;
+let lastCheckpoint = { style: 0, pi: 0 };
+async function checkpointStyleIndex(index, force) {
+  const now = Date.now();
+  if (!force && now - lastCheckpoint.style < CHECKPOINT_MS) return;
+  lastCheckpoint.style = now;
+  try { await idbSet('styleIndex', { data: index, builtAt: now, partial: !force }); } catch (e) { /* quota — in-memory index still fine */ }
+}
+async function checkpointPiIndex(force) {
+  const now = Date.now();
+  if (!force && now - lastCheckpoint.pi < CHECKPOINT_MS) return;
+  lastCheckpoint.pi = now;
+  try { await idbSet('piIndex', { data: piIndex, builtAt: now, version: PI_CACHE_VERSION, partial: !force }); } catch (e) { /* quota */ }
+}
 async function buildStyleIndex() {
   if (!piRootHandle) return;
   buildIndexBtn.disabled = true;
   indexBuilding = true;
+  // Hold the screen awake for the duration. Nothing else keeps a long Drive read alive on a phone:
+  // the screen sleeps, the page is frozen and then evicted, and the whole build is genuinely lost.
+  acquireBuildWakeLock();
   renderIndexStamp();
   progressWrap.classList.remove('hidden');
   piQtyMisses.clear(); rootPdfCatalog = null; driveListCache.clear(); // a rebuild re-tries everything from scratch
@@ -2625,7 +2690,7 @@ async function buildStyleIndex() {
   }
   progressText.textContent = `Found ${piFolders.length} PI folder(s). Starting scan...`;
 
-  const scanStart = Date.now();
+  const scanStart = newEtaClock();
   for (let i = 0; i < piFolders.length; i++) {
     const { name, handle } = piFolders[i];
     const piRef = parsePiNumber(name);
@@ -2654,10 +2719,12 @@ async function buildStyleIndex() {
     const pct = Math.round(((i + 1) / piFolders.length) * 100);
     progressBar.style.width = pct + '%';
     progressText.textContent = `Scanning work orders: ${i + 1} / ${piFolders.length} PI folders (${filesScanned} files)${etaText(scanStart, i + 1, piFolders.length)}`;
+    styleIndex = index;                 // searchable as it grows, not only when the whole scan ends
+    await checkpointStyleIndex(index);  // banked every few seconds — see CHECKPOINT_MS
   }
 
   styleIndex = index;
-  await idbSet('styleIndex', { data: index, builtAt: Date.now() });
+  await checkpointStyleIndex(index, true);
 
   // Also read each PI's Proforma-Invoice PDF to capture PI Qty per style.
   progressText.textContent = `Style index ready. Now reading PI quantities from invoice PDFs...`;
@@ -2681,15 +2748,15 @@ async function buildStyleIndex() {
     piResult.entries.forEach(e => { if (!e.ok && e.ref && piIndex[e.ref]) { e.ok = true; e.foundAt = sweep.foundAt[e.ref] || ''; } });
   }
 
-  try {
-    await idbSet('piIndex', { data: piIndex, builtAt: Date.now(), version: PI_CACHE_VERSION });
-  } catch (e) { /* cache write failed (quota) — the in-memory index still works this session */ }
+  // force=true clears the `partial` flag: this one is the complete, finished index.
+  await checkpointPiIndex(true);
 
   const withPi = piResult.entries.filter(e => e.ok).length;
   const b = bucketPiEntries(piResult.entries);
 
   piIndexBuiltAt = Date.now();
   piIndexRestoredAt = piIndexBuiltAt;
+  piIndexPartial = false;   // this build ran to the end — the index is whole
   if (typeof renderIndexStamp === 'function') renderIndexStamp();
   if (typeof renderHealth === 'function') renderHealth();
   if (typeof notify === 'function') notify('build', `Index built: ${withPi} PI(s), ${Object.keys(index).length} style(s).`);
@@ -2697,6 +2764,7 @@ async function buildStyleIndex() {
   progressText.textContent = `Done \u2014 indexed ${Object.keys(index).length} style(s) across ${foldersScanned} PI folder(s); PI Qty read for ${withPi} PI(s).`;
   renderPiIndexDiagnostics(piFolders.length, withPi, b, sweep);
   indexBuilding = false;
+  releaseBuildWakeLock();
   buildIndexBtn.disabled = false;
   renderIndexStamp();
 }
@@ -2745,7 +2813,21 @@ function renderPiIndexDiagnostics(totalFolders, withPi, buckets, sweep) {
   box.innerHTML = h;
   box.classList.remove('hidden');
 }
-buildIndexBtn.addEventListener('click', buildStyleIndex);
+// buildStyleIndex sets indexBuilding=true and disables the button on the way in, and clears both on
+// the way out — but only on the SUCCESS path. One thrown error (a dropped connection mid-build is
+// enough) left the flag stuck on, the wake lock held, and the Build button disabled for the rest of
+// the session, with the header still claiming "Indexing in the background" for ever. Nothing short
+// of reloading the page recovered it. The state is now unwound whatever happens.
+buildIndexBtn.addEventListener('click', () => {
+  buildStyleIndex().catch(err => {
+    indexBuilding = false;
+    releaseBuildWakeLock();
+    buildIndexBtn.disabled = false;
+    if (typeof renderIndexStamp === 'function') renderIndexStamp();
+    if (progressText) progressText.textContent = `Index build stopped: ${err && err.message ? err.message : err}. Nothing already read was lost — press Build again to carry on.`;
+    if (typeof notify === 'function') notify('error', `Index build stopped: ${err && err.message ? err.message : err}`);
+  });
+});
 
 // --- generic file preview (pdf / xlsx / docx) ---
 // ==================== AUTO INDEX UPLOAD ====================
@@ -3338,6 +3420,11 @@ function renderBell() {
 function notifyDownload(filename) {
   notify('download', `Downloaded: ${filename}. Check your phone's Downloads / browser downloads.`);
 }
+// It needs notify(), which is scoped here, so it stays here — but the PO Summary and Undelivered
+// Report download from their own IIFEs and guard the call with `typeof notifyDownload === 'function'`.
+// That guard was ALWAYS false across an IIFE boundary, so those two tabs downloaded a file and
+// silently announced nothing. Publishing it globally makes the existing guards resolve and fire.
+window.notifyDownload = notifyDownload;
 // ---------- Health strip ----------
 // The index age shown right beside the Build button, so its freshness is visible before clicking.
 function renderIndexStamp() {
@@ -3351,6 +3438,10 @@ function renderIndexStamp() {
   // Deliberately silent when everything is fine. The health strip above already carries the
   // "N PI(s), built at…" figure permanently; repeating it here just gave the same fact twice.
   // This line now exists only to raise something the strip does not: that a rebuild is due.
+  if (piIndexPartial && n) {
+    el.innerHTML = `<span style="color:var(--bad);font-weight:700;">\u26a0 Last build was interrupted \u2014 ${n} PI(s) were saved and will not need re-reading, but the index is incomplete. Press Build to finish it.</span>`;
+    return;
+  }
   if (!n) { el.textContent = ''; return; }
   const days = piIndexBuiltAt ? Math.floor((Date.now() - piIndexBuiltAt) / 86400000) : null;
   if (days !== null && days > 7) {
@@ -3752,16 +3843,8 @@ async function openPiFolderFiles(piRef) {
 }
 window.openPiFolderFiles = openPiFolderFiles;
 
-function snapToLocalMidnight(v) {
-  // SheetJS builds dates on a pre-1900 local base; timezones with historical LMT offsets
-  // (e.g. Asia/Dhaka) drift midnight by a few minutes, which can push the date to the
-  // previous/next day. Snap to the nearest local midnight to recover the real calendar date.
-  const d = new Date(v.getTime());
-  const drift = (d.getHours()*3600 + d.getMinutes()*60 + d.getSeconds())*1000 + d.getMilliseconds();
-  if (drift > 43200000) d.setTime(d.getTime() + (86400000 - drift));
-  else d.setTime(d.getTime() - drift);
-  return d;
-}
+// snapToLocalMidnight now lives at true top level (beside escHtml) so the Undelivered Report can
+// reach it too — see the note there.
 function fmtDate(v) {
   if (v instanceof Date && !isNaN(v.getTime())) {
     const d = snapToLocalMidnight(v);
@@ -4020,6 +4103,11 @@ function acceptedFor(r) { return acceptedShorts[acceptKey(r)] || null; }
 function effectiveShort(r) {
   if (r.accepted) return 0; // waived by agreement — no longer outstanding, raw short still shown
   if ((r.short || 0) < 0) { const cov = r._covered || 0; return Math.min(0, (r.short || 0) + cov); }
+  // An excess whose pieces have been traced back to an earlier short of the SAME item at the SAME
+  // measurement is not really an excess: those pieces were the missing ones arriving late. Only
+  // the unexplained remainder is a true excess. The raw Short&Exs figure is untouched and still
+  // shown on the line — this is only what is left OUTSTANDING, exactly as _covered works for shorts.
+  if ((r.short || 0) > 0) { const used = r._consumed || 0; return Math.max(0, (r.short || 0) - used); }
   return r.short || 0;
 }
 // A remarks cell you can click and type into. Edits save on blur/Enter and immediately re-run
@@ -4076,7 +4164,7 @@ function rowClass(r) {
 function manualTime(r) { return parseDMY(r.challanDate) || parseDMY(r.invDate) || 0; }
 function reconcileManualChallans() {
   // reset any previous computation
-  allRecords.forEach(r => { delete r.autoNotes; delete r.autoNote; delete r.resolved; delete r._covered; delete r.accepted; delete r.forceColor; delete r.remarkEdited; });
+  allRecords.forEach(r => { delete r.autoNotes; delete r.autoNote; delete r.resolved; delete r._covered; delete r._consumed; delete r.accepted; delete r.forceColor; delete r.remarkEdited; });
   // Overlay first: an accepted line is settled and must not also be "covered" by a manual challan.
   // Re-attach your remark edits to whatever Master File is currently loaded. A fresh export from
   // Olisa arrives without them; this puts them straight back on the matching lines.
@@ -4160,6 +4248,83 @@ function reconcileManualChallans() {
         note = `On ${noteDate}, Short qty ${applied} pcs out of ${shortAbs} pcs is re-delivered by a manual challan${crossPi}`;
       }
       (s.autoNotes = s.autoNotes || []).push(note);
+    }
+  }
+  reconcileExcessAgainstShorts();
+}
+// ==================== UNFLAGGED RE-DELIVERIES (excess settles an earlier short) ====================
+// A shortage is not always made good by a challan somebody remembered to tick "Manual". The far
+// commoner pattern is silent: the missing pieces travel out with the next shipment of the same
+// item, Olisa receives more than that challan declares, and the line lands as an EXCESS. Style,
+// measurement and dates all line up perfectly — the only thing missing is the manual flag, so the
+// loop above never even looked at the row and the earlier short stayed red for ever.
+//
+// M82039-1B1-5 is the case in point: 1 pc short on PI 124 (challan 31910793, 09/06), then +2 excess
+// on PI 144 (challan 32021081, 16/06) at the identical measurement L71.5 x W45 x H32. Neither line
+// carries a manual flag, so nothing happened. One of those two extra pieces IS the missing one.
+//
+// This is matching, not netting. Netting is adding an excess on one item to a short on a DIFFERENT
+// item to produce a smaller, dishonest number — that stays forbidden, and nothing here does it. The
+// two lines matched below carry the SAME physical item at the SAME measurement, so applying one to
+// the other just records where the pieces actually went. Both raw Short&Exs figures stay untouched
+// and on screen, and both lines get a note naming the other, so every movement is auditable.
+function reconcileExcessAgainstShorts() {
+  // Manual challans are deliberately excluded as sources: the loop above already spends their whole
+  // received quantity on earlier shorts, so letting their excess pay out a second time would cover
+  // the same shortage twice and quietly delete a real one.
+  const excesses = allRecords.filter(r => (r.short || 0) > 0 && !r.manualCh)
+    .sort((a, b) => manualTime(a) - manualTime(b));
+  for (const x of excesses) {
+    const xTime = manualTime(x);
+    if (!xTime) continue;           // undated line cannot be ordered against anything — no claim
+    const xPi = normPiKey(x.piRef);
+    const noteDate = fmtNoteDate(x.challanDate || x.invDate);
+    let pool = (x.short || 0) - (x._consumed || 0);
+    if (pool <= 0) continue;
+    const shorts = allRecords.filter(r => {
+      if (r === x) return false;
+      if ((r.short || 0) >= 0) return false;
+      if (r.accepted) return false; // waived by agreement — nothing left to re-deliver against it
+      if (r.styleNorm !== x.styleNorm || measNorm(r.itemDesc) !== measNorm(x.itemDesc)) return false;
+      if (Math.abs(r.short || 0) - (r._covered || 0) <= 0) return false; // already fully covered
+      return (manualTime(r) || 0) <= xTime;   // only shorts that happened BEFORE this delivery
+    }).sort((a, b) => {
+      // Same PI first, exactly as the manual-challan pass does: a late delivery almost always
+      // belongs to its own PI, and only the surplus spills elsewhere — said out loud when it does.
+      const aSame = normPiKey(a.piRef) === xPi ? 0 : 1;
+      const bSame = normPiKey(b.piRef) === xPi ? 0 : 1;
+      if (aSame !== bSame) return aSame - bSame;
+      return (manualTime(a) || 0) - (manualTime(b) || 0);
+    });
+    for (const s of shorts) {
+      if (pool <= 0) break;
+      const shortAbs = Math.abs(s.short || 0);
+      const need = shortAbs - (s._covered || 0);
+      if (need <= 0) continue;
+      const applied = Math.min(need, pool);
+      s._covered = (s._covered || 0) + applied;
+      x._consumed = (x._consumed || 0) + applied;
+      pool -= applied;
+      const ch = challanDisp(x);
+      const chRef = ch ? ` on challan ${ch}` : '';
+      const crossPi = xPi && normPiKey(s.piRef) && normPiKey(s.piRef) !== xPi
+        ? ` (delivered under PI ${x.piRef})` : '';
+      let note;
+      if (s._covered >= shortAbs) {
+        note = (s.autoNotes && s.autoNotes.length)
+          ? `On ${noteDate}, Balance Short Qty is delivered${chRef}${crossPi}`
+          : `On ${noteDate}, Full Short Qty is delivered${chRef}${crossPi}`;
+        s.resolved = true;
+      } else {
+        note = `On ${noteDate}, Short qty ${applied} pcs out of ${shortAbs} pcs is re-delivered${chRef}${crossPi}`;
+      }
+      (s.autoNotes = s.autoNotes || []).push(note);
+      // The other half of the audit trail: the excess line says where its extra pieces went, so the
+      // figure can never look like it shrank on its own.
+      const sCh = challanDisp(s);
+      (x.autoNotes = x.autoNotes || []).push(
+        `${applied} pcs of this excess covers the earlier short${s.piRef ? ` on PI ${s.piRef}` : ''}${sCh ? ` (challan ${sCh})` : ''} dated ${fmtNoteDate(s.challanDate || s.invDate)}`
+      );
     }
   }
 }
@@ -4632,12 +4797,79 @@ async function runPool(items, limit, worker) {
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
   return results;
 }
-function etaText(startMs, done, total) {
-  if (!done) return '';
-  const rate = (Date.now() - startMs) / done;
-  const remainMs = Math.max(0, (total - done) * rate);
+// ==================== PROGRESS ESTIMATE ====================
+// Wall-clock time is the wrong basis for "seconds remaining". The moment the app is backgrounded —
+// another app, another page, screen off — the browser throttles or outright suspends the Drive
+// requests, so `done` stops advancing while the clock keeps ticking. Divide the frozen `done` into
+// the grown elapsed time and the estimate gets WORSE every time you look away: 60s becomes 76s
+// becomes 90s, which reads exactly like the job restarting when in fact nothing was lost.
+//
+// The clock below counts only the time the page was actually visible, and measures the rate over a
+// sliding window of recent work rather than the whole run, so one slow patch early on stops
+// distorting the figure for ever. Backgrounding the app now costs nothing at all on the display.
+const etaClocks = [];
+function newEtaClock() {
+  const c = {
+    activeMs: 0,
+    since: (typeof document !== 'undefined' && document.visibilityState === 'hidden') ? 0 : Date.now(),
+    marks: [],
+    rate: 0
+  };
+  etaClocks.push(c);
+  if (etaClocks.length > 8) etaClocks.shift();  // only a couple run at once; never let this grow
+  return c;
+}
+function etaActiveMs(c) {
+  if (!c) return 0;
+  return c.activeMs + (c.since ? Date.now() - c.since : 0);
+}
+// One listener for every clock: fold the visible stretch into the running total on the way out,
+// restart the stopwatch on the way back in.
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    const hidden = document.visibilityState === 'hidden';
+    etaClocks.forEach(c => {
+      if (hidden) { if (c.since) { c.activeMs += Date.now() - c.since; c.since = 0; } }
+      else if (!c.since) { c.since = Date.now(); }
+    });
+  });
+}
+function etaText(clock, done, total) {
+  if (!clock || !done || !total || done >= total) return '';
+  const now = etaActiveMs(clock);
+  if (now <= 0) return '';                       // started while hidden — no honest estimate yet
+  clock.marks.push({ done, at: now });
+  if (clock.marks.length > 30) clock.marks.shift();
+  const first = clock.marks[0];
+  const dDone = done - first.done, dMs = now - first.at;
+  const inst = (dDone > 0 && dMs > 0) ? dMs / dDone : (now / done);
+  if (!isFinite(inst) || inst <= 0) return '';
+  // Smoothed so the number settles instead of jumping on every single file.
+  clock.rate = clock.rate ? (clock.rate * 0.7 + inst * 0.3) : inst;
+  const remainMs = Math.max(0, (total - done) * clock.rate);
   const m = Math.floor(remainMs / 60000), s = Math.round((remainMs % 60000) / 1000);
   return ` \u2014 about ${m ? m + 'm ' : ''}${s}s remaining`;
+}
+// ==================== KEEPING A LONG BUILD ALIVE ====================
+// The single biggest cause of a build genuinely dying on Android is the screen going off: the page
+// is frozen, then evicted. A screen wake lock while indexing removes that. It is dropped the moment
+// the build ends, and re-taken on return to the foreground because the browser releases it for us
+// whenever the page is hidden.
+let buildWakeLock = null;
+async function acquireBuildWakeLock() {
+  try {
+    if (!navigator.wakeLock || buildWakeLock) return;
+    buildWakeLock = await navigator.wakeLock.request('screen');
+    buildWakeLock.addEventListener('release', () => { buildWakeLock = null; });
+  } catch (e) { /* unsupported, or denied because the page was already hidden — not fatal */ }
+}
+function releaseBuildWakeLock() {
+  try { if (buildWakeLock) { buildWakeLock.release(); buildWakeLock = null; } } catch (e) { /* already gone */ }
+}
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && typeof indexBuilding !== 'undefined' && indexBuilding) acquireBuildWakeLock();
+  });
 }
 // Every PDF under the connected root, with its relative path.
 async function sweepRootForPdfs(rootHandle, maxDepth, onProgress) {
@@ -4705,7 +4937,7 @@ async function fillPiQtyFromRoot(rootHandle, missingRefs, onProgress) {
   const need = new Set(missingRefs);
   // Pass A - match on the file name. Targeted, so only invoices we actually need get opened,
   // four at a time with a live countdown.
-  let doneA = 0; const startA = Date.now();
+  let doneA = 0; const startA = newEtaClock();
   await runPool(missingRefs, 4, async (ref) => {
     for (const cand of (byRef.get(ref) || [])) {
       if (await tryInvoiceCandidate(ref, cand)) {
@@ -4844,7 +5076,7 @@ async function ensurePiQty(piRefRaw, onProgress, opts) {
 // its chance, so a PI whose invoice lives outside its work-order folder isn't reported as missing.
 async function buildPiQtyIndex(piFolders, onProgress) {
   let done = 0, withData = 0;
-  const startMs = Date.now();
+  const startMs = newEtaClock();
   const entries = await runPool(piFolders, 5, async ({ name, handle }) => {
     const piRef = normPiKey(parsePiNumber(name)) || parsePiNumber(name);
     let entry;
@@ -4856,6 +5088,9 @@ async function buildPiQtyIndex(piFolders, onProgress) {
       entry = { name, ref: piRef, ok: false, reason: 'error', detail: e.message };
     }
     done++;
+    // Bank what has been read so far. If the page dies now, the next build skips every PI whose
+    // fingerprint still matches instead of downloading and parsing all of them again.
+    await checkpointPiIndex();
     if (onProgress) onProgress(done, piFolders.length, withData, etaText(startMs, done, piFolders.length));
     return entry;
   });
@@ -5473,7 +5708,10 @@ async function showPiDetails(refRaw) {
   stat.push(`<div class="pistat"><span>Challan rows</span><b>${rows.length}</b></div>`);
   html += `<div class="pistats">${stat.join('')}</div>`;
 
-  if (resolvedCount) html += `<div class="sub-note" style="margin-top:5px;">${resolvedCount} short line${resolvedCount > 1 ? 's have' : ' has'} since been covered by a manual challan and no longer counts as outstanding.</div>`;
+  // Coverage no longer comes only from manual challans — an excess on a later ordinary challan of
+  // the same item settles a short too — so this line no longer names one source. Each row's own
+  // remark says exactly which challan and which date covered it.
+  if (resolvedCount) html += `<div class="sub-note" style="margin-top:5px;">${resolvedCount} short line${resolvedCount > 1 ? 's have' : ' has'} since been re-delivered and no longer counts as outstanding \\u2014 see the remark on each line for the covering challan.</div>`;
   if (piQty !== null && entry && entry.items && entry.items.length && rows.length) {
     html += `<div class="sub-note" style="margin-top:3px;">Balance is PI Qty minus everything dispatched against PI ${escHtml(ref)} in the Master File. Item-by-item split isn't shown \u2014 that needs challan-level detail.</div>`;
   }
