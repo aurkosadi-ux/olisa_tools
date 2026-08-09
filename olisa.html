@@ -3785,18 +3785,51 @@ async function openFilePreview(fileHandle) {
   document.addEventListener('keydown', onKey, true);
   modal.addEventListener('click', ev => { if (ev.target === modal) closePreview(); });
   modal.querySelector('#pvX').onclick = closePreview;
-  modal.querySelector('#pvDl').onclick = () => {
-    const url = URL.createObjectURL(new Blob([buf]));
+  // A correct MIME type matters for sharing: Android's share sheet filters targets by type, and
+  // "application/octet-stream" offers WhatsApp and Gmail almost nothing to do with the file.
+  const mimeOf = nm => {
+    const e = String(nm).toLowerCase().split('.').pop();
+    return e === 'pdf' ? 'application/pdf'
+      : e === 'doc' ? 'application/msword'
+      : e === 'rtf' ? 'application/rtf'
+      : e === 'docx' ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+      : e === 'xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      : e === 'xls' ? 'application/vnd.ms-excel'
+      : 'application/octet-stream';
+  };
+  const doDownload = () => {
+    const url = URL.createObjectURL(new Blob([buf], { type: mimeOf(file.name) }));
     const a = document.createElement('a');
-    a.href = url; a.download = file.name; a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    a.href = url; a.download = file.name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 8000);
     notifyDownload(file.name);
   };
+  modal.querySelector('#pvDl').onclick = doDownload;
   const shareBtn = modal.querySelector('#pvShare');
-  const shareFile = new File([buf], file.name, { type: isPdf ? 'application/pdf' : 'application/octet-stream' });
-  if (navigator.canShare && navigator.canShare({ files: [shareFile] })) {
-    shareBtn.onclick = () => navigator.share({ files: [shareFile], title: file.name }).catch(() => {});
-  } else shareBtn.style.display = 'none';
+  const shareFile = new File([buf], file.name, { type: mimeOf(file.name) });
+  // Share used to be wired with `.catch(() => {})` \u2014 every failure swallowed in silence, so on a
+  // desktop with no share target the button simply did nothing and looked broken. It now always
+  // does something: share where the browser really supports it, download otherwise, and say which.
+  // The button is never hidden, because a Share that quietly falls back to a download is more use
+  // than a Share that is not there.
+  shareBtn.onclick = async () => {
+    try {
+      if (!(navigator.canShare && navigator.canShare({ files: [shareFile] }))) {
+        throw Object.assign(new Error('unsupported'), { name: 'UnsupportedError' });
+      }
+      await navigator.share({ files: [shareFile], title: file.name });
+    } catch (err) {
+      // Closing the share sheet is a normal choice, not a failure \u2014 stay quiet for that one.
+      if (err && (err.name === 'AbortError' || err.name === 'NotAllowedError' && /abort/i.test(err.message || ''))) return;
+      if (typeof notify === 'function') {
+        notify('info', err && err.name === 'UnsupportedError'
+          ? `This browser can't share files directly \u2014 downloading "${file.name}" instead so you can attach it.`
+          : `Sharing wasn't available (${err && err.name ? err.name : 'error'}) \u2014 downloading "${file.name}" instead.`);
+      }
+      doDownload();
+    }
+  };
   const pages = modal.querySelector('#pvPages');
   try {
     if (isPdf) {
@@ -4154,6 +4187,7 @@ function rtfToText(bytes) {
 let challanIndex = {};          // "32021081" -> { path, pages:[4,5], date, piRef, driveId?, fp }
 let challanIndexBuiltAt = null;
 let challanIndexBuilding = false;
+let challanFileLog = [];   // one row per document the last build met — see fileLog in buildChallanIndex
 const CHALLAN_CACHE_VERSION = 1;
 // Challan numbers arrive from the Master File as numbers, as text, and occasionally with stray
 // spaces or a trailing ".0" from Excel. One key format, or the click never finds its own copy.
@@ -4292,29 +4326,41 @@ async function buildChallanIndex(onProgress) {
   let done = 0, challans = 0, failed = 0;
   const skipped = [];     // opened fine, but no challan header inside — reported, never silent
   const binaryDoc = [];   // genuinely unreadable in a browser; needs re-saving, so name the files
+  // Every document the walk met, and what came of it. Without this a miss can only say "not in the
+  // index", which is a dead end: it cannot say whether the file was never seen, was seen and
+  // unreadable, or was read fine but prints no challan number anywhere.
+  const fileLog = [];
   for (const f of pdfs) {
     let file = null, fp = '';
     try {
       file = await f.handle.getFile();
       fp = `${f.path}|${file.size}|${file.lastModified}`;
-    } catch (e) { failed++; done++; continue; }
+    } catch (e) { failed++; done++; fileLog.push({ path: f.path, count: 0, status: 'unopenable' }); continue; }
     // Unchanged file: reuse what was read last time instead of parsing every page again. This is
     // what keeps a rebuild after one new challan to seconds rather than minutes.
     const reused = Object.values(challanIndex).filter(e => e && e.fp === fp);
     if (reused.length) {
       reused.forEach(e => { next[normChallanKey(e.no)] = e; challans++; });
+      fileLog.push({ path: f.path, count: reused.length, status: 'ok' });
     } else {
       try {
         const found = await scanChallanDoc(file, f.path, f.handle.meta && f.handle.meta.id);
         found.forEach(c => { next[c.no] = { ...c, fp }; challans++; });
         if (!found.length) skipped.push(f.path);
-      } catch (e) { failed++; if (/binary Word/.test(e.message)) binaryDoc.push(f.path); }
+        fileLog.push({ path: f.path, count: found.length, status: found.length ? 'ok' : 'no-challan-number' });
+      } catch (e) {
+        failed++;
+        const binary = /binary Word/.test(e.message);
+        if (binary) binaryDoc.push(f.path);
+        fileLog.push({ path: f.path, count: 0, status: binary ? 'old-binary-word' : 'unreadable', reason: e.message });
+      }
     }
     done++;
     await checkpointChallanIndex(next);
     if (onProgress) onProgress(done, pdfs.length, challans, etaText(clock, done, pdfs.length));
   }
   challanIndex = next;
+  challanFileLog = fileLog;
   challanIndexBuiltAt = Date.now();
   await checkpointChallanIndex(next, true);
   return { files: pdfs.length, challans, failed, skipped, binaryDoc, folder: root.name };
@@ -4324,13 +4370,14 @@ async function checkpointChallanIndex(data, force) {
   const now = Date.now();
   if (!force && now - lastChallanCheckpoint < CHECKPOINT_MS) return;
   lastChallanCheckpoint = now;
-  try { await idbSet('challanIndex', { data, builtAt: now, version: CHALLAN_CACHE_VERSION, partial: !force }); } catch (e) { /* quota */ }
+  try { await idbSet('challanIndex', { data, files: challanFileLog, builtAt: now, version: CHALLAN_CACHE_VERSION, partial: !force }); } catch (e) { /* quota */ }
 }
 (async function initChallanIndex() {
   try {
     const cached = await idbGet('challanIndex');
     if (!cached || !cached.data || cached.version !== CHALLAN_CACHE_VERSION) return;
     challanIndex = cached.data;
+    challanFileLog = cached.files || [];
     challanIndexBuiltAt = cached.builtAt || null;
   } catch (e) { /* no cached challan index yet */ }
 })();
@@ -4372,15 +4419,7 @@ async function extractChallanPdf(entry) {
 async function openChallanCopy(challanNo) {
   const key = normChallanKey(challanNo);
   const entry = challanIndex[key];
-  if (!entry) {
-    const n = Object.keys(challanIndex).length;
-    const reason = n
-      ? `Challan <b>${escHtml(String(challanNo))}</b> is not in the challan index (${n} challan(s) indexed${challanIndexBuiltAt ? `, read ${dmyFromMs(challanIndexBuiltAt)}` : ''}). If its PDF was added since, rebuild below.`
-      : `The challan copies have not been read yet. This is a one-off scan of every PDF in your Challans folder; after it, opening a challan is instant.`;
-    const b = addBubble(`${reason}<br><button class="secondary chBuildBtn" style="margin-top:8px;padding:7px 12px;font-size:12.5px;">${n ? 'Rebuild challan index' : 'Read my challan copies now'}</button>`, 'askA');
-    b.querySelectorAll('.chBuildBtn').forEach(btn => btn.addEventListener('click', () => runChallanIndexBuild(key)));
-    return;
-  }
+  if (!entry) { showChallanMiss(key, challanNo); return; }
   const label = `Challan ${key}${entry.piRef ? ` (PI ${entry.piRef})` : ''}`;
   // A text challan (the hand challans, written in Word and saved as RTF) has no page range to cut:
   // one file holds exactly one challan, so the file itself is already the single-challan copy.
@@ -4407,6 +4446,48 @@ async function openChallanCopy(challanNo) {
   } catch (e) {
     note.innerHTML = `Couldn't open challan <b>${escHtml(key)}</b> \\u2014 ${escHtml(e.message)}`;
   }
+}
+// "Not in the index" on its own is a dead end: it cannot tell you whether the document was never
+// seen, was seen but unreadable, or was read perfectly and simply does not print that number
+// anywhere. A hand challan numbered "114" in the Master File is very often filed under a name that
+// says 114 while the page itself prints the system number — so the file name is searched too, and
+// any near miss is offered as something to open right now rather than a message to puzzle over.
+function showChallanMiss(key, raw) {
+  const n = Object.keys(challanIndex).length;
+  if (!n) {
+    const b0 = addBubble(`The challan copies have not been read yet. Press <b>Build style index</b> \u2014 it now reads your challan copies in the same run \u2014 or read just the challans here.` +
+      `<br><button class="secondary chBuildBtn" style="margin-top:8px;padding:7px 12px;font-size:12.5px;">Read my challan copies now</button>`, 'askA');
+    b0.querySelectorAll('.chBuildBtn').forEach(btn => btn.addEventListener('click', () => runChallanIndexBuild(key)));
+    return;
+  }
+  const log = challanFileLog || [];
+  // Word-boundary match so "114" does not also drag in "31142057" or "2114".
+  const numRe = new RegExp(`(^|[^0-9])0*${key}([^0-9]|$)`);
+  const nameHits = log.filter(f => numRe.test(String(f.path)));
+  const problems = log.filter(f => f.status && f.status !== 'ok');
+  let html = `<div class="summary-line">Challan ${escHtml(String(raw))} \u2014 no document prints this number</div>`;
+  html += `<div class="sub-note">${n} challan(s) were read from ${log.length || '?'} document(s)${challanIndexBuiltAt ? `, ${agoText(challanIndexBuiltAt)}` : ''}. Every document is searched by its printed &ldquo;Challan No&rdquo; line, never by its file name \u2014 so a hand challan whose page shows a different number will not be found by its Master File number.</div>`;
+  if (nameHits.length) {
+    html += `<div style="margin-top:9px;font-weight:700;">${nameHits.length} document(s) have &ldquo;${escHtml(key)}&rdquo; in the file name \u2014 open one:</div>`;
+    html += nameHits.slice(0, 8).map(f => `<div style="margin-top:5px;"><a href="#" class="ch-file" data-p="${escHtml(f.path)}" style="color:var(--accent-dark);font-weight:600;text-decoration:none;">&#128196; ${escHtml(f.path)}</a> <span class="sub-note">(${f.count} challan(s) read from it)</span></div>`).join('');
+  }
+  if (problems.length) {
+    html += `<details style="margin-top:9px;"><summary style="cursor:pointer;color:var(--accent-dark);">${problems.length} document(s) the scan could not take a challan number from \u2014 tap to see and open them</summary>`;
+    html += `<div class="sub-note" style="margin-top:5px;">A scanned photo, an old binary Word file, or a page with no &ldquo;Challan No&rdquo; line will land here. Opening one shows whether it is the challan you are after.</div>`;
+    html += problems.slice(0, 40).map(f => `<div style="margin-top:4px;"><a href="#" class="ch-file" data-p="${escHtml(f.path)}" style="color:var(--accent-dark);text-decoration:none;">&#128196; ${escHtml(f.path)}</a> <span class="sub-note">\u2014 ${escHtml(f.status)}</span></div>`).join('');
+    html += `</details>`;
+  }
+  if (!nameHits.length && !problems.length) {
+    html += `<div class="sub-note" style="margin-top:8px;">Every document read cleanly and none of them carries this number, so the copy is not in the Challans folder yet \u2014 or it is filed somewhere else under your connected folder.</div>`;
+  }
+  html += `<div style="margin-top:9px;"><button class="secondary chBuildBtn" style="padding:7px 12px;font-size:12.5px;">Rebuild challan index</button></div>`;
+  const b = addBubble(html, 'askA');
+  b.querySelectorAll('.chBuildBtn').forEach(btn => btn.addEventListener('click', () => runChallanIndexBuild(key)));
+  b.querySelectorAll('.ch-file').forEach(a2 => a2.addEventListener('click', async e => {
+    e.preventDefault();
+    try { await openFilePreview(await challanFileHandle({ path: a2.dataset.p })); }
+    catch (err) { addBubble(`Couldn't open <code>${escHtml(a2.dataset.p)}</code> \u2014 ${escHtml(err.message)}`, 'askA'); }
+  }));
 }
 async function runChallanIndexBuild(retryChallan) {
   if (challanIndexBuilding) { addBubble('The challan index is already being read \\u2014 one moment.', 'askA'); return; }
