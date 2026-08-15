@@ -974,9 +974,9 @@ document.addEventListener('click', function (e) {
       </select>
       <input type="text" id="askPiFrom" placeholder="PI from" title="Only show PI numbers &ge; this">
       <input type="text" id="askPiTo" placeholder="PI to" title="Only show PI numbers &le; this">
-      <button id="piDownloadBtn" class="secondary" style="flex:0 0 auto;padding:6px 11px;" title="Download every file from a set of PI folders as one compressed .zip">
+      <button id="piDownloadBtn" class="secondary" style="flex:0 0 auto;padding:6px 11px;" title="Download the Proforma Invoice PDF for a set of PIs as one compressed .zip">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        PI Download
+        ALL PI DOWNLOAD
       </button>
       <span class="filterhint" id="askFilterHint"></span>
     </div>
@@ -2533,6 +2533,13 @@ async function connectFolderInner(existingHandle, forceNew) {
     // Drive handles are class instances — IndexedDB can't clone them; their identity {id,name}
     // is persisted separately by connectDrive, so only real local handles are stored here.
     if (!dirHandle.isDrive) await idbSet('olisaRoot', dirHandle);
+    // Session caches belong to the folder that produced them. "Change folder" without this served
+    // the previous folder's invoices from memory, which is silently wrong rather than merely stale.
+    if (forceNew || (savedRootHandle && warmIdOf(savedRootHandle) !== warmIdOf(dirHandle))) {
+      piInvoiceCatalog = null;
+      rootPdfCatalog = null;
+      driveListCache.clear();
+    }
     savedRootHandle = dirHandle;
     folderBtnText.textContent = `Reconnect to "${dirHandle.name}"`;
     changeFolderBtn.classList.remove('hidden');
@@ -2860,17 +2867,110 @@ const ZIP_LIMIT_BYTES = 3.6 * 1024 * 1024 * 1024;
 function zipSafeName(s) {
   return String(s == null ? '' : s).replace(/[\\/:*?"<>|]+/g, '_').replace(/^\.+/, '_').trim() || 'unnamed';
 }
-// Every file under one PI folder, with its path relative to that folder.
-async function collectFolderFiles(dir, prefix, depth, out) {
-  if (depth > 6) return;
-  const subs = [];
-  try {
-    for await (const [name, handle] of dir.entries()) {
-      if (handle.kind === 'file') out.push({ path: prefix + zipSafeName(name), handle });
-      else if (handle.kind === 'directory') subs.push({ name, handle });
+// ==================== FINDING THE INVOICE PDFs FAST ====================
+// The first version of this walked into each PI folder one at a time and packed everything it
+// found. Two things were wrong with that. It grabbed work orders, challan copies and every other
+// file in the folder when the only thing wanted is the Proforma Invoice; and walking 20 folders
+// one after another over Drive is 20 round trips of pure latency before a single byte downloads,
+// which is where the three minutes went.
+//
+// Drive can answer the whole question in ONE request. Every Proforma Invoice carries the Olisa
+// party code 700768 in its file name ("Proforma Invoice-Olisa Group.-700768-0156.pdf"), so a
+// single name-contains search returns all of them at once, however deeply they are filed and
+// whatever their folder is called. From there it is pure parallel downloading — the PI number
+// comes from the name via piRefFromPdfName(), which already knows that the digits after 700768
+// are the PI (0156 -> 156) and that a challan or delivery note is never an invoice.
+async function driveSearchFiles(query) {
+  const out = [];
+  let pageToken = '';
+  do {
+    const q = encodeURIComponent(query);
+    const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=nextPageToken,files(id,name,mimeType,size,modifiedTime)&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true${pageToken ? '&pageToken=' + pageToken : ''}`;
+    const j = await driveFetch(url);
+    (j.files || []).forEach(f => out.push(f));
+    pageToken = j.nextPageToken || '';
+  } while (pageToken);
+  return out;
+}
+// ref (as a plain number string) -> { name, handle }, best candidate only.
+// Cached for the session: the catalogue is the same for every download, and rebuilding it per
+// click would put the round trip back that this whole function exists to remove.
+// One rule for "is this PDF the invoice for some PI", shared by the bulk catalogue and by the
+// targeted lookup below so the two can never disagree about what counts.
+//   tier 1 = the name reads like a Proforma Invoice — this is what gets packed.
+//   tier 2 = some other PDF that still resolves to a PI number, used only when a requested PI has
+//            no tier-1 file at all, so an invoice someone renamed by hand isn't a dead end.
+// A challan, gate pass or delivery note reaches neither: piRefFromPdfName() returns null outright.
+function invoiceCandidate(name) {
+  if (!/\.pdf$/i.test(name)) return null;
+  const ref = piRefFromPdfName(name);
+  if (!ref) return null;
+  const score = piPdfScore(name, ref);
+  if (score <= 0) return null;
+  return { ref, tier: looksLikeInvoiceFile(name) ? 1 : 2, score };
+}
+function considerInto(map, name, handle) {
+  const c = invoiceCandidate(name);
+  if (!c) return;
+  const prev = map.get(c.ref);
+  if (!prev || c.tier < prev.tier || (c.tier === prev.tier && c.score > prev.score)) {
+    map.set(c.ref, { tier: c.tier, score: c.score, name, handle });
+  }
+}
+let piInvoiceCatalog = null;
+async function buildPiInvoiceCatalog(onProgress, force) {
+  if (piInvoiceCatalog && !force) return piInvoiceCatalog;
+  const best = new Map();
+  if (savedRootHandle && savedRootHandle.isDrive) {
+    if (onProgress) onProgress('Asking Google Drive for every Proforma Invoice\u2026');
+    // Two searches rather than one: the party code catches the standard naming, "proforma" catches
+    // any that were renamed without it. Ids are de-duplicated across both.
+    const seenIds = new Set();
+    for (const q of [
+      "name contains '700768' and mimeType='application/pdf' and trashed=false",
+      "name contains 'Proforma' and mimeType='application/pdf' and trashed=false"
+    ]) {
+      let files = [];
+      try { files = await driveSearchFiles(q); } catch (e) { /* one search failing is not fatal */ }
+      for (const f of files) {
+        if (seenIds.has(f.id)) continue;
+        seenIds.add(f.id);
+        considerInto(best, f.name, new DriveFileHandle(f));
+      }
+      if (onProgress) onProgress(`Found ${best.size} Proforma Invoice(s) so far\u2026`);
     }
-  } catch (e) { /* unreadable folder — take what the rest of the tree gives */ }
-  for (const s of subs) await collectFolderFiles(s.handle, prefix + zipSafeName(s.name) + '/', depth + 1, out);
+  } else {
+    // Local folder mode: no search API, so fall back to the PDF catalogue the rest of the tool
+    // already builds and caches. Local reads have no network latency, so this is fast anyway.
+    const pdfs = await getRootPdfCatalog((folders, found) => {
+      if (onProgress) onProgress(`Scanning the connected folder\u2026 ${folders} folder(s), ${found} PDF(s)`);
+    });
+    pdfs.forEach(p => considerInto(best, p.name, p.handle));
+  }
+  piInvoiceCatalog = best;
+  return best;
+}
+// Last resort for the handful of PIs the bulk catalogue missed. An invoice renamed to something
+// like "PI 175 copy.pdf" carries neither the party code nor the word Proforma, so neither bulk
+// search can see it — but a search for the PI's own digits will. Runs ONLY for PIs already known
+// to be missing, so a normal download never pays for it.
+async function findInvoiceByPiSearch(ref) {
+  if (!(savedRootHandle && savedRootHandle.isDrive)) return null;
+  const padded = String(ref).padStart(4, '0');
+  const terms = padded === String(ref) ? [String(ref)] : [padded, String(ref)];
+  const found = new Map();
+  for (const t of terms) {
+    let files = [];
+    try { files = await driveSearchFiles(`name contains '${t}' and mimeType='application/pdf' and trashed=false`); }
+    catch (e) { continue; }
+    for (const f of files) {
+      const c = invoiceCandidate(f.name);
+      if (!c || c.ref !== String(ref)) continue;   // must resolve to the PI actually asked for
+      considerInto(found, f.name, new DriveFileHandle(f));
+    }
+    if (found.size) break;   // the zero-padded form is the normal spelling; stop as soon as it hits
+  }
+  return found.get(String(ref)) || null;
 }
 
 function openPiDownloadModal() {
@@ -2881,16 +2981,11 @@ function openPiDownloadModal() {
   wrap.innerHTML = `
     <div id="piDlBox" style="background:#fff;border-radius:16px;max-width:520px;width:100%;max-height:88vh;overflow:auto;box-shadow:0 20px 60px rgba(0,0,0,.3);padding:18px;">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
-        <h3 style="margin:0;font-size:16px;color:var(--ink);">PI Download</h3>
+        <h3 style="margin:0;font-size:16px;color:var(--ink);">ALL PI DOWNLOAD</h3>
         <button id="piDlClose" class="secondary" style="flex:0 0 auto;padding:4px 10px;font-size:16px;line-height:1;">&times;</button>
       </div>
-      <div class="hint" style="margin-top:8px;">
-        Type the PIs you want. Any of these work, and you can mix them:<br>
-        <code>124-159</code> &middot; <code>PI-124-159</code> &middot; <code>124, 125, 139, 159, 120, 90</code> &middot;
-        <code>PI124,PI129,PI90,PI-158</code> &middot; <code>pi 124 to 130</code>
-      </div>
       <input type="text" id="piDlInput" placeholder="e.g. 124-159" autocomplete="off"
-        style="width:100%;margin-top:10px;padding:11px 12px;border:1.5px solid #CBD9E8;border-radius:10px;font:600 15px Outfit,Arial,sans-serif;">
+        style="width:100%;margin-top:12px;padding:11px 12px;border:1.5px solid #CBD9E8;border-radius:10px;font:600 15px Outfit,Arial,sans-serif;">
       <div id="piDlEcho" class="sub-note" style="margin-top:6px;min-height:17px;"></div>
       <div class="hidden" id="piDlProgWrap" style="margin-top:10px;">
         <div style="height:7px;background:#E3ECF5;border-radius:5px;overflow:hidden;">
@@ -2902,7 +2997,7 @@ function openPiDownloadModal() {
       <div class="actions" style="margin-top:12px;">
         <button id="piDlGo">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          PI Download
+          ALL PI Download
         </button>
         <button id="piDlCancel" class="secondary hidden">Stop</button>
       </div>
@@ -2947,8 +3042,8 @@ function openPiDownloadModal() {
     if (running) return;
     const { nums, errors } = parsePiRequest(input.value);
     if (!nums.length) { result.innerHTML = `<span style="color:var(--bad);">${escHtml(errors.join(' ') || 'Type some PI numbers first.')}</span>`; return; }
-    if (!piRootHandle) {
-      result.innerHTML = `<span style="color:var(--bad);">No Work Orders folder is connected yet. Connect your Olisa Group folder at the top of this tab first.</span>`;
+    if (!savedRootHandle) {
+      result.innerHTML = `<span style="color:var(--bad);">No folder is connected yet. Connect your Olisa Group folder at the top of this tab first.</span>`;
       return;
     }
     running = true; stopped = false;
@@ -2961,49 +3056,95 @@ function openPiDownloadModal() {
     acquireBuildWakeLock();
     const clock = newEtaClock();
     const zip = makeZipBuilder();
-    const missing = [], empty = [], failed = [];
-    let filesAdded = 0, piDone = 0, hitLimit = false;
+    const missing = [], failed = [];
+    let filesAdded = 0, done = 0, hitLimit = false;
     try {
-      for (const n of nums) {
-        if (stopped) break;
-        piDone++;
-        const pct = Math.round((piDone / nums.length) * 100);
-        bar.style.width = pct + '%';
-        progText.textContent = `PI ${n} \u2014 ${piDone} of ${nums.length} folder(s), ${filesAdded} file(s), ${(zip.bytes() / 1048576).toFixed(1)} MB${etaText(clock, piDone, nums.length)}`;
+      bar.style.width = '2%';
+      progText.textContent = 'Looking up the invoices\u2026';
+      await uiTick();
+      const catalog = await buildPiInvoiceCatalog(msg => { progText.textContent = msg; });
+      if (stopped) throw new Error('__stopped');
+
+      const pick = (cat) => {
+        const w = [], miss = [];
+        nums.forEach(n => {
+          const hit = cat.get(String(n));
+          if (hit) w.push({ n, hit }); else miss.push(n);
+        });
+        return { w, miss };
+      };
+      let { w: wanted, miss } = pick(catalog);
+      // Something missing usually means the invoice was added after this session's catalogue was
+      // taken. One forced re-search costs a single Drive call and saves a reconnect.
+      if (miss.length) {
+        progText.textContent = `Re-checking Drive for PI ${miss.slice(0, 6).join(', ')}${miss.length > 6 ? '\u2026' : ''}`;
         await uiTick();
-        let found = null;
-        try { found = await findPiSubfolder(piRootHandle, String(n)); }
-        catch (e) { failed.push(`PI ${n} (${e.message})`); continue; }
-        if (!found || !found.handle) { missing.push(n); continue; }
-        const files = [];
-        await collectFolderFiles(found.handle, '', 0, files);
-        if (!files.length) { empty.push(n); continue; }
-        const folderLabel = zipSafeName(found.path.split('/').pop() || ('PI-' + n));
-        for (const f of files) {
-          if (stopped) break;
-          if (zip.bytes() > ZIP_LIMIT_BYTES) { hitLimit = true; break; }
-          try {
-            const file = await f.handle.getFile();
-            const bytes = new Uint8Array(await file.arrayBuffer());
-            zip.add(`${folderLabel}/${f.path}`, bytes, file.lastModified ? new Date(file.lastModified) : new Date());
-            filesAdded++;
-            if (filesAdded % 4 === 0) {
-              progText.textContent = `PI ${n} \u2014 ${piDone} of ${nums.length} folder(s), ${filesAdded} file(s), ${(zip.bytes() / 1048576).toFixed(1)} MB${etaText(clock, piDone, nums.length)}`;
-              await uiTick();
-            }
-          } catch (e) { failed.push(`${folderLabel}/${f.path} (${e.message})`); }
+        const fresh = await buildPiInvoiceCatalog(m => { progText.textContent = m; }, true);
+        ({ w: wanted, miss } = pick(fresh));
+      }
+      // Still missing: search Drive for each one by its own number, in parallel. This is the only
+      // way to reach an invoice renamed without the party code or the word "Proforma", and it runs
+      // only for PIs already known to be absent, so a clean download never pays for it.
+      if (miss.length && miss.length <= 60) {
+        progText.textContent = `Searching by number for ${miss.length} PI(s) not found yet\u2026`;
+        await uiTick();
+        const stillMissing = [];
+        await runPool(miss, 6, async (n) => {
+          if (stopped) return;
+          const hit = await findInvoiceByPiSearch(n);
+          if (hit) { wanted.push({ n, hit }); piInvoiceCatalog.set(String(n), hit); }
+          else stillMissing.push(n);
+        });
+        wanted.sort((a, b) => a.n - b.n);   // keep archive order in PI order
+        miss = stillMissing.sort((a, b) => a - b);
+      }
+      miss.forEach(n => missing.push(n));
+      if (stopped) throw new Error('__stopped');
+
+      if (!wanted.length) {
+        result.innerHTML = `<span style="color:var(--bad);">No Proforma Invoice PDF found for ${missing.length === 1 ? 'PI ' + missing[0] : 'any of those PIs'}.</span>`
+          + `<div class="sub-note" style="margin-top:6px;">Searched ${catalog.size} invoice(s) under your connected folder.</div>`;
+        return;
+      }
+
+      // Downloads run 8 at a time. These are latency-bound cloud reads of one small PDF each, so
+      // parallelism is where nearly all the speed comes from — 8 in flight finishes in about an
+      // eighth of the time, and driveFetch's backoff still guards against a burst of 429s.
+      // Results are collected first and zipped afterwards so the archive order stays PI order
+      // however the downloads happen to finish.
+      const fetched = new Array(wanted.length);
+      await runPool(wanted, 8, async (w, i) => {
+        if (stopped || hitLimit) return;
+        try {
+          const file = await getFileWithRetry(w.hit.handle, 3);
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          fetched[i] = { name: w.hit.name, bytes, when: file.lastModified ? new Date(file.lastModified) : new Date() };
+        } catch (e) {
+          failed.push(`PI ${w.n} (${e.message})`);
         }
-        if (hitLimit) break;
+        done++;
+        bar.style.width = Math.max(5, Math.round((done / wanted.length) * 96)) + '%';
+        progText.textContent = `Downloading invoices\u2026 ${done} of ${wanted.length}${etaText(clock, done, wanted.length)}`;
+        if (done % 4 === 0) await uiTick();
+      });
+      if (stopped) throw new Error('__stopped');
+
+      for (let i = 0; i < fetched.length; i++) {
+        const f = fetched[i];
+        if (!f) continue;
+        if (zip.bytes() + f.bytes.length > ZIP_LIMIT_BYTES) { hitLimit = true; break; }
+        zip.add(zipSafeName(f.name), f.bytes, f.when);
+        filesAdded++;
       }
 
       if (!filesAdded) {
-        result.innerHTML = `<span style="color:var(--bad);">Nothing was downloaded.</span> ${missing.length ? `No folder found for PI ${escHtml(missing.join(', '))}.` : ''} ${empty.length ? `PI ${escHtml(empty.join(', '))} had no files in them.` : ''}`;
+        result.innerHTML = `<span style="color:var(--bad);">Nothing downloaded.</span> ${failed.length ? escHtml(failed.slice(0, 4).join('; ')) : ''}`;
         return;
       }
-      progText.textContent = `Packing ${filesAdded} file(s) into the archive\u2026`;
+      progText.textContent = `Packing ${filesAdded} invoice(s)\u2026`;
       await uiTick();
       const blob = new Blob(zip.finish(), { type: 'application/zip' });
-      const label = nums.length === 1 ? `PI-${nums[0]}` : `PI-${nums[0]}-to-${nums[nums.length - 1]}_${nums.length}PIs`;
+      const label = nums.length === 1 ? `PI-${nums[0]}` : `PI-${nums[0]}-to-${nums[nums.length - 1]}_${filesAdded}PIs`;
       const name = `Olisa_${label}.zip`;
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -3014,18 +3155,20 @@ function openPiDownloadModal() {
       if (typeof notifyDownload === 'function') notifyDownload(name);
 
       const notes = [];
-      if (stopped) notes.push(`<b>Stopped early</b> \u2014 only the PIs processed so far are in the file.`);
       if (hitLimit) notes.push(`<b>Size limit reached</b> at about 3.6 GB \u2014 the rest were left out. Split the range into smaller batches.`);
-      if (missing.length) notes.push(`No folder found for PI ${escHtml(missing.join(', '))}.`);
-      if (empty.length) notes.push(`PI ${escHtml(empty.join(', '))} contained no files.`);
-      if (failed.length) notes.push(`${failed.length} file(s) couldn't be read: ${escHtml(failed.slice(0, 5).join('; '))}${failed.length > 5 ? '\u2026' : ''}`);
-      result.innerHTML = `<div style="color:var(--good);font-weight:700;">Downloaded ${escHtml(name)} \u2014 ${filesAdded} file(s) from ${piDone - missing.length - empty.length} PI folder(s), ${(blob.size / 1048576).toFixed(1)} MB.</div>`
+      if (missing.length) notes.push(`No Proforma Invoice found for PI ${escHtml(missing.join(', '))}.`);
+      if (failed.length) notes.push(`${failed.length} couldn't be downloaded: ${escHtml(failed.slice(0, 5).join('; '))}${failed.length > 5 ? '\u2026' : ''}`);
+      result.innerHTML = `<div style="color:var(--good);font-weight:700;">Downloaded ${escHtml(name)} \u2014 ${filesAdded} Proforma Invoice(s), ${(blob.size / 1048576).toFixed(1)} MB.</div>`
         + (notes.length ? `<div class="sub-note" style="margin-top:6px;">${notes.join('<br>')}</div>` : '');
-      addBubble(`Downloaded <b>${escHtml(name)}</b> \u2014 ${filesAdded} file(s) from ${nums.length} requested PI(s), ${(blob.size / 1048576).toFixed(1)} MB.`
+      addBubble(`Downloaded <b>${escHtml(name)}</b> \u2014 ${filesAdded} Proforma Invoice PDF(s) out of ${nums.length} requested PI(s), ${(blob.size / 1048576).toFixed(1)} MB.`
         + (notes.length ? `<br><span class="sub-note">${notes.join('<br>')}</span>` : ''), 'askA');
     } catch (err) {
-      result.innerHTML = `<span style="color:var(--bad);">PI Download failed: ${escHtml(err.message)}</span>`;
-      console.error('PI Download error:', err);
+      if (err && err.message === '__stopped') {
+        result.innerHTML = `<span class="sub-note">Stopped. Nothing was downloaded.</span>`;
+      } else {
+        result.innerHTML = `<span style="color:var(--bad);">All PI Download failed: ${escHtml(err.message)}</span>`;
+        console.error('All PI Download error:', err);
+      }
     } finally {
       running = false; stopped = false;
       releaseBuildWakeLock();
@@ -3079,7 +3222,7 @@ async function buildStyleIndex() {
   acquireBuildWakeLock();
   renderIndexStamp();
   progressWrap.classList.remove('hidden');
-  piQtyMisses.clear(); rootPdfCatalog = null; driveListCache.clear(); // a rebuild re-tries everything from scratch
+  piQtyMisses.clear(); rootPdfCatalog = null; piInvoiceCatalog = null; driveListCache.clear(); // a rebuild re-tries everything from scratch
   const diagBox = document.getElementById('askPiDiag');
   if (diagBox) { diagBox.classList.add('hidden'); diagBox.innerHTML = ''; }
   const index = {};
