@@ -2398,6 +2398,92 @@ async function idbSet(key, value) {
 }
 
 // --- recursive search helpers (bounded depth so we never scan forever) ---
+// ==================== ALWAYS THE NEWEST MASTER FILE ====================
+// This existed as two separate bugs that hid each other, and together they pinned the tool to an
+// old Master File indefinitely:
+//
+//  1. The Drive shortcut cached the master's FILE ID. Saving a new version creates a NEW file with
+//     a NEW id ("...09-08-2026...v9.xlsx" -> "...15-08-2026...v10.xlsx"). The old file is still
+//     there and still not trashed, so the cached id kept resolving perfectly and the tool loaded
+//     v9 forever. It would only look again if v9 were deleted.
+//  2. Even a full search returned the FIRST name matching /master/i in folder order. v8, v9 and
+//     v10 all match. Nothing anywhere compared dates.
+//
+// So the master is now RE-FOUND on every connect and the newest one wins. On Drive that is a
+// single search call — no folder walk, so this costs a fraction of a second, not minutes.
+const MASTER_NAME_RE = /master/i;
+function isMasterFileName(name) {
+  return MASTER_NAME_RE.test(name) && /\.(xlsx|xls)$/i.test(name) && !/^~\$/.test(name) && !/\.tmp$/i.test(name);
+}
+// "Olisa Master Inventory — 09-08-2026, 04-28 pm — v9.xlsx" -> version 9. Used only to break a tie
+// between two files modified within a couple of minutes of each other, which is what a sync burst
+// looks like; the modified time is the primary signal.
+function masterVersionOf(name) {
+  const m = String(name).match(/\bv\s*(\d{1,4})\b/i);
+  return m ? parseInt(m[1], 10) : 0;
+}
+function masterRankOf(cand) {
+  return { t: cand.modifiedMs || 0, v: masterVersionOf(cand.name) };
+}
+function newerMaster(a, b) {   // is a newer than b?
+  const ra = masterRankOf(a), rb = masterRankOf(b);
+  if (Math.abs(ra.t - rb.t) > 120000) return ra.t > rb.t;   // clearly different times
+  if (ra.v !== rb.v) return ra.v > rb.v;                     // same sync burst: higher v wins
+  return ra.t > rb.t;
+}
+// Returns { handle, name, modifiedMs, id } for the newest master, or null.
+async function findNewestMaster(dirHandle, onProgress) {
+  let best = null;
+  const consider = c => { if (c && (!best || newerMaster(c, best))) best = c; };
+  if (dirHandle && dirHandle.isDrive) {
+    if (onProgress) onProgress('Checking Drive for the latest Master File\u2026');
+    // One search across the account. Drive has no "search under this folder recursively", but the
+    // name is distinctive enough that this is precise, and it is vastly cheaper than any walk.
+    const q = "name contains 'Master' and trashed=false and (mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' or mimeType='application/vnd.ms-excel')";
+    let files = [];
+    try { files = await driveSearchFiles(q); } catch (e) { /* fall through to the walk below */ }
+    for (const f of files) {
+      if (!isMasterFileName(f.name)) continue;
+      consider({
+        handle: new DriveFileHandle(f), name: f.name, id: f.id,
+        modifiedMs: f.modifiedTime ? Date.parse(f.modifiedTime) : 0
+      });
+    }
+    if (best) return best;
+  }
+  // Local folder mode, or Drive search unavailable: walk, but collect EVERY match and compare,
+  // instead of stopping at the first one the way the old code did.
+  const all = [];
+  await collectMasterCandidates(dirHandle, 6, 0, all);
+  for (const c of all) {
+    let ms = c.modifiedMs;
+    if (ms === undefined) {
+      try { const f = await c.handle.getFile(); ms = f.lastModified || 0; } catch (e) { ms = 0; }
+    }
+    consider({ handle: c.handle, name: c.name, id: c.id || null, modifiedMs: ms });
+  }
+  return best;
+}
+async function collectMasterCandidates(dir, maxDepth, depth, out, diag) {
+  if (!dir) return;
+  try {
+    for await (const [name, handle] of dir.entries()) {
+      if (handle.kind === 'file') {
+        if (diag && /\.(xlsx|xls)$/i.test(name)) diag.xlsxSeen.push(name);
+        if (isMasterFileName(name)) {
+          out.push({
+            name, handle,
+            id: handle.meta && handle.meta.id,
+            modifiedMs: handle.meta && handle.meta.modifiedTime ? Date.parse(handle.meta.modifiedTime) : undefined
+          });
+        }
+      } else if (handle.kind === 'directory' && depth < maxDepth) {
+        await collectMasterCandidates(handle, maxDepth, depth + 1, out, diag);
+      }
+    }
+  } catch (e) { if (diag) diag.errors.push(`${dir.name}: ${e.message}`); }
+}
+
 async function findFileRecursive(dirHandle, predicate, maxDepth, depth = 0, diag = null) {
   diag = diag || { folders: [], xlsxSeen: [], errors: [] };
   diag.folders.push(dirHandle.name);
@@ -2458,6 +2544,11 @@ async function saveWarmSession(handle, fileName, bytes) {
       isDrive: !!handle.isDrive,
       masterName: fileName,
       masterBytes: bytes,
+      // Identity of the exact file this snapshot came from, so a resume can tell whether a newer
+      // Master File has landed in Drive since. Without these the snapshot has no way to know it
+      // has been superseded.
+      masterId: currentMasterMeta ? currentMasterMeta.id : null,
+      masterModifiedMs: currentMasterMeta ? currentMasterMeta.modifiedMs : 0,
       piRootId: (piRootHandle && piRootHandle.isDrive) ? piRootHandle.id : null,
       piRootName: piRootHandle ? piRootHandle.name : null,
       piRootLocal: (piRootHandle && !piRootHandle.isDrive) ? piRootHandle : null
@@ -2474,6 +2565,60 @@ async function loadWarmSession(handle) {
   } catch (e) { return null; }
 }
 function warmMinutesLeft(w) { return Math.max(0, Math.ceil((WARM_MS - (Date.now() - w.at)) / 60000)); }
+
+// Which exact Master File is loaded right now: { id, name, modifiedMs }. This is what makes
+// "is there a newer one?" answerable at all.
+let currentMasterMeta = null;
+
+// ==================== AUTO-PICKUP OF A NEWER MASTER FILE ====================
+// Updating the Master File on the laptop syncs it to Drive, and the tool has to notice on its own —
+// without a reconnect, without a reload, without anyone remembering to press anything. So while the
+// app is on screen and idle, it asks Drive once every two minutes whether a newer Master File
+// exists, and if one does it loads it and says so.
+const MASTER_POLL_MS = 120000;
+let masterPollTimer = null;
+let masterPollBusy = false;
+async function checkForNewerMaster(announce) {
+  if (masterPollBusy || !savedRootHandle || !currentMasterMeta) return false;
+  if (typeof indexBuilding !== 'undefined' && indexBuilding) return false;   // never fight a build
+  if (connectInFlight) return false;
+  masterPollBusy = true;
+  try {
+    const newest = await findNewestMaster(savedRootHandle);
+    if (!newest) return false;
+    const changed = (newest.id && currentMasterMeta.id && newest.id !== currentMasterMeta.id)
+      || newest.name !== currentMasterMeta.name
+      || (newest.modifiedMs && currentMasterMeta.modifiedMs && newest.modifiedMs > currentMasterMeta.modifiedMs);
+    if (!changed) return false;
+    const file = await getFileWithRetry(newest.handle, 3);
+    if (!/\.(xlsx|xls)$/i.test(file.name)) return false;
+    try { masterFileBytes = await file.arrayBuffer(); masterFileName = file.name; } catch (e) { masterFileBytes = null; }
+    await loadFile(file);
+    currentMasterMeta = { id: newest.id, name: newest.name, modifiedMs: newest.modifiedMs };
+    if (masterFileBytes) await saveWarmSession(savedRootHandle, masterFileName, masterFileBytes);
+    if (announce !== false) {
+      loadStatus.textContent = `Master File updated to "${file.name}" \u2014 loaded automatically just now.`;
+      loadStatus.className = 'status ok';
+      if (typeof notify === 'function') notify('drive', `A newer Master File appeared in Drive ("${file.name}") and was loaded automatically.`);
+      if (typeof toast === 'function') toast('Master File updated to the latest version', 4000);
+    }
+    if (typeof renderHealth === 'function') renderHealth();
+    return true;
+  } catch (e) {
+    return false;   // a failed poll must never disturb what is already loaded
+  } finally { masterPollBusy = false; }
+}
+function startMasterPolling() {
+  if (masterPollTimer) return;
+  masterPollTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') checkForNewerMaster(true);
+  }, MASTER_POLL_MS);
+  // Coming back to the app is the most likely moment for the file to have changed while you were
+  // away, so check then too rather than waiting out the rest of the interval.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') checkForNewerMaster(true);
+  });
+}
 
 // ==================== ONE CONNECT AT A TIME, AND IT KEEPS GOING ====================
 // Three different things can ask for a connect: the auto-resume on launch, the Connect Google
@@ -2554,7 +2699,19 @@ async function connectFolderInner(existingHandle, forceNew) {
           masterFileName = warm.masterName;
           if (warm.isDrive && warm.piRootId) piRootHandle = new DriveDirHandle(warm.piRootId, warm.piRootName || 'Work Orders');
           else if (warm.piRootLocal) piRootHandle = warm.piRootLocal;
+          // BEFORE trusting the snapshot, confirm it is still the newest Master File. A 15-minute
+          // window is fine for saving a folder walk; it is NOT fine for serving yesterday's
+          // inventory. One search call settles it, and if a newer file has landed the snapshot is
+          // abandoned and the full connect below reloads properly.
+          const newestNow = await findNewestMaster(dirHandle).catch(() => null);
+          const warmStale = newestNow && (
+            (currentMasterMeta && newestNow.id && currentMasterMeta.id && newestNow.id !== currentMasterMeta.id) ||
+            newestNow.name !== warm.masterName ||
+            (warm.masterModifiedMs && newestNow.modifiedMs && newestNow.modifiedMs > warm.masterModifiedMs)
+          );
+          if (warmStale) throw new Error('__newer_master');
           await loadFile(new File([warm.masterBytes.slice(0)], warm.masterName));
+          currentMasterMeta = { id: warm.masterId || null, name: warm.masterName, modifiedMs: warm.masterModifiedMs || 0 };
           if (piRootHandle) {
             buildIndexBtn.classList.remove('hidden');
             document.getElementById('askSaveIndexBtn').classList.remove('hidden');
@@ -2564,9 +2721,10 @@ async function connectFolderInner(existingHandle, forceNew) {
           }
           loadStatus.textContent = `Master File loaded ("${warm.masterName}") \u00b7 ${piRootHandle ? 'Work Orders folder ready' : 'Work Orders folder not found'} \u00b7 resumed instantly (no rescan for another ${warmMinutesLeft(warm)} min).`;
           loadStatus.className = 'status ok';
+          startMasterPolling();
           if (typeof renderHealth === 'function') renderHealth();
           return;
-        } catch (e) { /* snapshot unusable — fall through to the full connect below */ }
+        } catch (e) { /* snapshot unusable, or superseded — fall through to the full connect */ }
       }
     }
 
@@ -2580,28 +2738,41 @@ async function connectFolderInner(existingHandle, forceNew) {
     // The recursive search below walks EVERY folder (all 155 PI folders included) and was the
     // 4-5 minute reconnect. So the first successful find remembers the Drive file IDs, and every
     // later connect jumps straight to them — the full walk only happens again if they vanish.
-    let masterSearch = null;
+    // The master is looked up FRESH every single connect. The cached Drive id is now used only for
+    // the Work Orders folder (a folder keeps its id when its contents change; a re-saved spreadsheet
+    // does not), never for the spreadsheet itself.
+    let masterSearch = { handle: null, diag: { xlsxSeen: [], folders: [], errors: [] } };
     if (dirHandle.isDrive) {
       try {
         const sc = await idbGet('driveShortcuts');
-        if (sc && sc.rootId === dirHandle.id && sc.masterId) {
-          const meta = await driveFetch(`https://www.googleapis.com/drive/v3/files/${sc.masterId}?fields=id,name,size,modifiedTime,trashed&supportsAllDrives=true`);
-          if (meta && !meta.trashed) {
-            masterSearch = { handle: new DriveFileHandle(meta), diag: { xlsxSeen: [], folders: [], errors: [] } };
-            if (sc.piRootId) piRootHandle = new DriveDirHandle(sc.piRootId, sc.piRootName || 'Work Orders');
-          }
+        if (sc && sc.rootId === dirHandle.id && sc.piRootId) {
+          piRootHandle = new DriveDirHandle(sc.piRootId, sc.piRootName || 'Work Orders');
         }
-      } catch (e) { masterSearch = null; /* stale shortcut — fall through to the full search */ }
+      } catch (e) { /* no shortcut yet */ }
     }
-    if (!masterSearch || !masterSearch.handle) {
-      masterSearch = await findFileRecursive(dirHandle, name => /master/i.test(name) && !/^~\$/.test(name) && !/\.tmp$/i.test(name), 6);
-      piRootHandle = await findFolderRecursive(dirHandle, name => /work\s*orders?/i.test(name), 4);
-      if (dirHandle.isDrive && masterSearch.handle && masterSearch.handle.meta) {
+    const newest = await findNewestMaster(dirHandle, msg => { loadStatus.textContent = msg; });
+    if (newest) {
+      masterSearch.handle = newest.handle;
+      currentMasterMeta = { id: newest.id, name: newest.name, modifiedMs: newest.modifiedMs };
+    }
+    if (!masterSearch.handle || !piRootHandle) {
+      // Only now is the expensive walk justified: either no master turned up, or the Work Orders
+      // folder isn't known yet on this device.
+      if (!masterSearch.handle) {
+        const walked = await findFileRecursive(dirHandle, isMasterFileName, 6);
+        masterSearch = walked;
+        if (walked.handle) {
+          let ms = 0;
+          try { const f = await walked.handle.getFile(); ms = f.lastModified || 0; } catch (e) { /* keep 0 */ }
+          currentMasterMeta = { id: walked.handle.meta && walked.handle.meta.id, name: walked.handle.name, modifiedMs: ms };
+        }
+      }
+      if (!piRootHandle) piRootHandle = await findFolderRecursive(dirHandle, name => /work\s*orders?/i.test(name), 4);
+      if (dirHandle.isDrive && piRootHandle) {
         idbSet('driveShortcuts', {
           rootId: dirHandle.id,
-          masterId: masterSearch.handle.meta.id,
-          piRootId: piRootHandle && piRootHandle.id || null,
-          piRootName: piRootHandle && piRootHandle.name || null
+          piRootId: piRootHandle.id || null,
+          piRootName: piRootHandle.name || null
         }).catch(() => {});
       }
     }
@@ -2630,7 +2801,11 @@ async function connectFolderInner(existingHandle, forceNew) {
         // that died at 90% left nothing behind and the next launch re-downloaded everything again.
         // Written now, the very next launch resumes instantly even if all that follows fails.
         if (masterFileBytes) await saveWarmSession(dirHandle, masterFileName, masterFileBytes);
-        bits.push(`Master File loaded ("${file.name}")`);
+        // Show WHEN the loaded file was last changed. A name alone can't tell you whether you are
+        // looking at today's inventory, which is exactly how a six-day-old file went unnoticed.
+        const mAge = currentMasterMeta && currentMasterMeta.modifiedMs
+          ? ` \u2014 updated ${stampText(currentMasterMeta.modifiedMs)}, ${agoText(currentMasterMeta.modifiedMs)}` : '';
+        bits.push(`Master File loaded ("${file.name}"${mAge})`);
       } else {
         bits.push(`Found "${file.name}" (matches "master") but it isn't an Excel file, so it wasn't loaded`);
       }
@@ -2663,7 +2838,8 @@ async function connectFolderInner(existingHandle, forceNew) {
     // calls at all — no folder walk, no re-download, no freshness scan.
     if (masterFileBytes) await saveWarmSession(dirHandle, masterFileName, masterFileBytes);
     if (stopConnectProgress) stopConnectProgress();
-    loadStatus.textContent = bits.join(' · ') + ' · staying connected for 15 min without rescanning.';
+    startMasterPolling();   // from here on, a newer Master File is picked up on its own
+    loadStatus.textContent = bits.join(' · ') + ' · watching Drive for a newer Master File.';
     loadStatus.className = masterSearch.handle ? 'status ok' : 'status err';
   } catch (err) {
     if (stopConnectProgress) stopConnectProgress();
@@ -2973,6 +3149,32 @@ async function findInvoiceByPiSearch(ref) {
   return found.get(String(ref)) || null;
 }
 
+// If the phone shows no download notification, the installed-app container is almost certainly
+// swallowing it — a standalone PWA does not always hand blob downloads to the browser's download
+// manager. Handing the archive to an ordinary browser tab does go through that manager, and that
+// is what makes the notification appear. Offered only when it's needed, not as a standing button.
+function offerPhoneFallback(msgEl, blob) {
+  if (!msgEl) return;
+  const isStandalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches)
+    || window.navigator.standalone === true;
+  const isPhone = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+  if (!isPhone) return;
+  msgEl.innerHTML = `No notification on your phone? Open <b>Files \u2192 Downloads</b>, or search it for <b>Olisa Tools</b>.`
+    + (isStandalone ? ` Installed apps sometimes swallow that notification \u2014 ` : ' ');
+  const b = document.createElement('button');
+  b.className = 'secondary';
+  b.textContent = 'Open in browser instead';
+  b.style.cssText = 'margin-top:7px;flex:0 0 auto;';
+  b.onclick = () => {
+    const opened = openBlobInTab(blob, lastZipNameGlobal);
+    msgEl.innerHTML = opened
+      ? `Opened in a browser tab \u2014 the download runs there, which is what makes your phone show its own notification.`
+      : `<span style="color:var(--bad);">The browser blocked the new tab. Allow pop-ups for this site, then try again.</span>`;
+  };
+  msgEl.appendChild(document.createElement('br'));
+  msgEl.appendChild(b);
+}
+let lastZipNameGlobal = '';
 function openPiDownloadModal() {
   if (document.getElementById('piDlWrap')) return;
   const wrap = document.createElement('div');
@@ -2994,8 +3196,9 @@ function openPiDownloadModal() {
         <div id="piDlProgText" style="font-size:11.5px;color:var(--sub);margin-top:5px;"></div>
       </div>
       <div id="piDlResult" style="margin-top:10px;font-size:12.5px;"></div>
-      <div class="actions" style="margin-top:12px;">
-        <button id="piDlGo">
+      <div class="actions" style="margin-top:12px;flex-wrap:wrap;">
+        <button id="piDlPick" class="secondary" style="flex:0 0 auto;">Choose folder &amp; save</button>
+        <button id="piDlGo" style="flex:0 0 auto;">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16" stroke-linecap="round" stroke-linejoin="round"/></svg>
           ALL PI Download
         </button>
@@ -3006,6 +3209,7 @@ function openPiDownloadModal() {
   const input = wrap.querySelector('#piDlInput');
   const echo = wrap.querySelector('#piDlEcho');
   const goBtn = wrap.querySelector('#piDlGo');
+  const pickBtn = wrap.querySelector('#piDlPick');
   const cancelBtn = wrap.querySelector('#piDlCancel');
   const progWrap = wrap.querySelector('#piDlProgWrap');
   const bar = wrap.querySelector('#piDlBar');
@@ -3022,7 +3226,7 @@ function openPiDownloadModal() {
   }
   function onKey(e) {
     if (e.key === 'Escape') { e.preventDefault(); close(); }
-    else if (e.key === 'Enter' && document.activeElement === input && !running) { e.preventDefault(); run(); }
+    else if (e.key === 'Enter' && document.activeElement === input && !running) { e.preventDefault(); run(false); }
   }
   document.addEventListener('keydown', onKey);
   wrap.querySelector('#piDlClose').onclick = close;
@@ -3040,7 +3244,7 @@ function openPiDownloadModal() {
   });
   setTimeout(() => input.focus(), 40);
 
-  async function run() {
+  async function run(usePicker) {
     if (running) return;
     const { nums, errors } = parsePiRequest(input.value);
     if (!nums.length) { result.innerHTML = `<span style="color:var(--bad);">${escHtml(errors.join(' ') || 'Type some PI numbers first.')}</span>`; return; }
@@ -3048,8 +3252,33 @@ function openPiDownloadModal() {
       result.innerHTML = `<span style="color:var(--bad);">No folder is connected yet. Connect your Olisa Group folder at the top of this tab first.</span>`;
       return;
     }
+    // THE DESTINATION IS TAKEN FIRST, WHILE THE TAP IS STILL LIVE. showSaveFilePicker() requires
+    // the user gesture that opened it, and a gesture does not survive the seconds it takes to
+    // fetch and pack the invoices — asking afterwards is what produced "the browser blocked the
+    // share sheet". Folder now, download second, exactly as it should read.
+    let pickedFileHandle = null;
+    if (usePicker) {
+      if (!canPickSaveLocation()) {
+        result.innerHTML = `<span style="color:var(--bad);">This browser can't open a folder picker.</span>`
+          + `<div class="sub-note" style="margin-top:5px;">Phone browsers don't offer one. Use <b>ALL PI Download</b> \u2014 it goes to your Downloads folder.</div>`;
+        return;
+      }
+      const provisional = olisaFileName(nums.length === 1
+        ? `PI-${nums[0]}.zip`
+        : `PI-${nums[0]}-to-${nums[nums.length - 1]}_${nums.length}PIs.zip`);
+      try {
+        pickedFileHandle = await window.showSaveFilePicker({
+          suggestedName: provisional,
+          types: [{ description: 'Zip archive', accept: { 'application/zip': ['.zip'] } }]
+        });
+      } catch (e) {
+        if (e && e.name === 'AbortError') { result.innerHTML = `<span class="sub-note">Cancelled \u2014 nothing was downloaded.</span>`; return; }
+        result.innerHTML = `<span style="color:var(--bad);">Couldn't open the folder picker: ${escHtml(e.message)}</span>`;
+        return;
+      }
+    }
     running = true; stopped = false;
-    goBtn.disabled = true;
+    goBtn.disabled = true; pickBtn.disabled = true;
     cancelBtn.classList.remove('hidden'); cancelBtn.disabled = false; cancelBtn.textContent = 'Stop';
     progWrap.classList.remove('hidden');
     result.innerHTML = '';
@@ -3149,86 +3378,35 @@ function openPiDownloadModal() {
       const label = nums.length === 1 ? `PI-${nums[0]}` : `PI-${nums[0]}-to-${nums[nums.length - 1]}_${filesAdded}PIs`;
       lastZipBlob = blob;
       lastZipName = olisaFileName(`${label}.zip`);
+      lastZipNameGlobal = lastZipName;
       bar.style.width = '100%';
-      progText.textContent = 'Ready.';
 
       const notes = [];
       if (hitLimit) notes.push(`<b>Size limit reached</b> at about 3.6 GB \u2014 the rest were left out. Split the range into smaller batches.`);
       if (missing.length) notes.push(`No Proforma Invoice found for PI ${escHtml(missing.join(', '))}.`);
       if (failed.length) notes.push(`${failed.length} couldn't be downloaded: ${escHtml(failed.slice(0, 5).join('; '))}${failed.length > 5 ? '\u2026' : ''}`);
 
-      // NOTHING is written until you say where. The old version downloaded first and offered the
-      // folder afterwards, which is backwards — by then the file was already sitting somewhere you
-      // hadn't chosen, and if the phone showed no notification you had no idea where that was.
+      let where;
+      if (pickedFileHandle) {
+        // The folder was chosen BEFORE the download started, so writing goes straight there.
+        const w = await pickedFileHandle.createWritable();
+        await w.write(blob);
+        await w.close();
+        where = `Saved to the folder you chose.`;
+      } else {
+        saveBlobAs(blob, lastZipName);
+        where = `Saved to your <b>Downloads</b> folder.`;
+      }
+      progText.textContent = 'Done.';
+      if (typeof notifyDownload === 'function') notifyDownload(lastZipName);
       result.innerHTML =
-        `<div style="font-weight:700;color:var(--ink);">${escHtml(lastZipName)}</div>`
-        + `<div class="sub-note" style="margin-top:3px;">${filesAdded} Proforma Invoice(s), ${(blob.size / 1048576).toFixed(1)} MB. Choose where to put it:</div>`
-        + `<div id="piDlSaveRow" class="actions" style="margin-top:10px;flex-wrap:wrap;"></div>`
+        `<div style="color:var(--good);font-weight:700;">${escHtml(lastZipName)}</div>`
+        + `<div class="sub-note" style="margin-top:3px;">${filesAdded} Proforma Invoice(s), ${(blob.size / 1048576).toFixed(1)} MB. ${where}</div>`
         + `<div id="piDlSaveMsg" class="sub-note" style="margin-top:7px;"></div>`
         + (notes.length ? `<div class="sub-note" style="margin-top:7px;">${notes.join('<br>')}</div>` : '');
-      const saveRow = result.querySelector('#piDlSaveRow');
-      const saveMsg = result.querySelector('#piDlSaveMsg');
-      const mkBtn = (text, primary) => {
-        const b = document.createElement('button');
-        if (!primary) b.className = 'secondary';
-        b.textContent = text;
-        b.style.flex = '0 0 auto';
-        saveRow.appendChild(b);
-        return b;
-      };
+      if (!pickedFileHandle) offerPhoneFallback(result.querySelector('#piDlSaveMsg'), blob);
 
-      // 1. Desktop Chrome/Edge: a real folder picker.
-      if (canPickSaveLocation()) {
-        const pb = mkBtn('Choose folder & save', true);
-        pb.onclick = async () => {
-          saveMsg.textContent = '';
-          const r = await saveBlobTo(blob, lastZipName, 'application/zip');
-          if (r.how === 'picked') { saveMsg.innerHTML = `<span style="color:var(--good);font-weight:700;">Saved to the folder you chose.</span>`; if (typeof notifyDownload === 'function') notifyDownload(r.name); }
-          else if (r.how === 'cancelled') saveMsg.textContent = 'Cancelled \u2014 nothing was written.';
-          else { saveMsg.innerHTML = `Saved to your <b>Downloads</b> folder.`; if (typeof notifyDownload === 'function') notifyDownload(r.name); }
-        };
-      }
-
-      // 2. Phone: the share sheet. "Save to Files" from there reaches any folder, including one
-      //    you create yourself. Offered whenever the browser has navigator.share at all — whether
-      //    it will accept THIS file is only knowable at the moment of the tap, and if it refuses,
-      //    it now says so plainly instead of pretending you cancelled.
-      if (navigator.share) {
-        const sb = mkBtn('Save to a folder\u2026', !canPickSaveLocation());
-        sb.onclick = async () => {
-          saveMsg.textContent = '';
-          const r = await shareBlob(blob, lastZipName, 'application/zip');   // nothing awaited before this
-          if (r.ok) {
-            saveMsg.innerHTML = `<span style="color:var(--good);font-weight:700;">Sent to the app you picked.</span>`;
-            if (typeof notifyDownload === 'function') notifyDownload(lastZipName);
-          } else {
-            saveMsg.innerHTML = `<span style="color:${r.why === 'dismissed' ? 'var(--sub)' : 'var(--bad)'};">${escHtml(r.detail)}</span>`;
-          }
-        };
-      }
-
-      // 3. Always available: the ordinary download. This is the guaranteed route.
-      const db = mkBtn('Download', !canPickSaveLocation() && !navigator.share);
-      db.onclick = () => {
-        saveMsg.textContent = '';
-        saveBlobAs(blob, lastZipName);
-        if (typeof notifyDownload === 'function') notifyDownload(lastZipName);
-        saveMsg.innerHTML = `Sent to your <b>Downloads</b> folder as <b>${escHtml(lastZipName)}</b>.`
-          + `<br>No notification on your phone? Open your <b>Files</b> app \u2192 <b>Downloads</b>, or search it for <b>Olisa Tools</b>. `
-          + `If it isn't there either, tap <b>Open in browser</b> below.`;
-        if (!document.getElementById('piDlTabBtn')) {
-          const tb = mkBtn('Open in browser', false);
-          tb.id = 'piDlTabBtn';
-          tb.onclick = () => {
-            const opened = openBlobInTab(blob, lastZipName);
-            saveMsg.innerHTML = opened
-              ? `Opened in a browser tab \u2014 the download starts there, which is what makes your phone show its own notification.`
-              : `<span style="color:var(--bad);">Your browser blocked the new tab. Allow pop-ups for this site and try again.</span>`;
-          };
-        }
-      };
-
-      addBubble(`Built <b>${escHtml(lastZipName)}</b> \u2014 ${filesAdded} Proforma Invoice PDF(s) out of ${nums.length} requested PI(s), ${(blob.size / 1048576).toFixed(1)} MB. Choose where to save it in the ALL PI DOWNLOAD window.`
+      addBubble(`Downloaded <b>${escHtml(lastZipName)}</b> \u2014 ${filesAdded} Proforma Invoice PDF(s) out of ${nums.length} requested PI(s), ${(blob.size / 1048576).toFixed(1)} MB.`
         + (notes.length ? `<br><span class="sub-note">${notes.join('<br>')}</span>` : ''), 'askA');
     } catch (err) {
       if (err && err.message === '__stopped') {
@@ -3244,7 +3422,8 @@ function openPiDownloadModal() {
       cancelBtn.classList.add('hidden');
     }
   }
-  goBtn.onclick = run;
+  goBtn.onclick = () => run(false);      // straight to the Downloads folder, as usual
+  pickBtn.onclick = () => run(true);     // ask where first, then write there
 }
 document.getElementById('piDownloadBtn').addEventListener('click', openPiDownloadModal);
 
