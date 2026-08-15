@@ -3147,48 +3147,88 @@ function openPiDownloadModal() {
       await uiTick();
       const blob = new Blob(zip.finish(), { type: 'application/zip' });
       const label = nums.length === 1 ? `PI-${nums[0]}` : `PI-${nums[0]}-to-${nums[nums.length - 1]}_${filesAdded}PIs`;
-      const name = `${label}.zip`;
-      const saved = await saveBlobTo(blob, name, 'application/zip');
-      if (saved.how === 'cancelled') { progText.textContent = 'Save cancelled.'; result.innerHTML = '<span class="sub-note">Save cancelled \u2014 nothing was written.</span>'; return; }
-      lastZipBlob = blob; lastZipName = saved.name;
+      lastZipBlob = blob;
+      lastZipName = olisaFileName(`${label}.zip`);
       bar.style.width = '100%';
-      progText.textContent = 'Done.';
-      if (typeof notifyDownload === 'function') notifyDownload(saved.name);
+      progText.textContent = 'Ready.';
 
       const notes = [];
       if (hitLimit) notes.push(`<b>Size limit reached</b> at about 3.6 GB \u2014 the rest were left out. Split the range into smaller batches.`);
       if (missing.length) notes.push(`No Proforma Invoice found for PI ${escHtml(missing.join(', '))}.`);
       if (failed.length) notes.push(`${failed.length} couldn't be downloaded: ${escHtml(failed.slice(0, 5).join('; '))}${failed.length > 5 ? '\u2026' : ''}`);
-      const whereLine = saved.how === 'picked'
-        ? `Saved to the folder you chose.`
-        : `Saved to your <b>Downloads</b> folder. Your phone's notification bar shows it \u2014 tap that notification to open the file.`;
-      result.innerHTML = `<div style="color:var(--good);font-weight:700;">${escHtml(saved.name)}</div>`
-        + `<div class="sub-note" style="margin-top:4px;">${filesAdded} Proforma Invoice(s), ${(blob.size / 1048576).toFixed(1)} MB. ${whereLine}</div>`
-        + `<div id="piDlShareRow" class="actions" style="margin-top:9px;"></div>`
-        + (notes.length ? `<div class="sub-note" style="margin-top:6px;">${notes.join('<br>')}</div>` : '');
-      // On a phone the share sheet is the ONLY way to put this file in a folder of your choosing:
-      // it lists Files, Drive, WhatsApp and the rest, and "Save to Files" lets you pick or create
-      // any folder — including one called Olisa Tools.
-      const shareRow = result.querySelector('#piDlShareRow');
-      const probe = new File([new Blob(['x'])], 'x.zip', { type: 'application/zip' });
-      if (canShareFile(probe)) {
-        const sb = document.createElement('button');
-        sb.className = 'secondary';
-        sb.textContent = 'Save to a folder\u2026';
-        sb.onclick = async () => {
-          sb.disabled = true; sb.textContent = 'Opening\u2026';
-          const ok = await shareBlob(lastZipBlob, lastZipName, 'application/zip');
-          sb.disabled = false;
-          sb.textContent = ok ? 'Save to a folder\u2026' : 'Save to a folder\u2026 (cancelled)';
+
+      // NOTHING is written until you say where. The old version downloaded first and offered the
+      // folder afterwards, which is backwards — by then the file was already sitting somewhere you
+      // hadn't chosen, and if the phone showed no notification you had no idea where that was.
+      result.innerHTML =
+        `<div style="font-weight:700;color:var(--ink);">${escHtml(lastZipName)}</div>`
+        + `<div class="sub-note" style="margin-top:3px;">${filesAdded} Proforma Invoice(s), ${(blob.size / 1048576).toFixed(1)} MB. Choose where to put it:</div>`
+        + `<div id="piDlSaveRow" class="actions" style="margin-top:10px;flex-wrap:wrap;"></div>`
+        + `<div id="piDlSaveMsg" class="sub-note" style="margin-top:7px;"></div>`
+        + (notes.length ? `<div class="sub-note" style="margin-top:7px;">${notes.join('<br>')}</div>` : '');
+      const saveRow = result.querySelector('#piDlSaveRow');
+      const saveMsg = result.querySelector('#piDlSaveMsg');
+      const mkBtn = (text, primary) => {
+        const b = document.createElement('button');
+        if (!primary) b.className = 'secondary';
+        b.textContent = text;
+        b.style.flex = '0 0 auto';
+        saveRow.appendChild(b);
+        return b;
+      };
+
+      // 1. Desktop Chrome/Edge: a real folder picker.
+      if (canPickSaveLocation()) {
+        const pb = mkBtn('Choose folder & save', true);
+        pb.onclick = async () => {
+          saveMsg.textContent = '';
+          const r = await saveBlobTo(blob, lastZipName, 'application/zip');
+          if (r.how === 'picked') { saveMsg.innerHTML = `<span style="color:var(--good);font-weight:700;">Saved to the folder you chose.</span>`; if (typeof notifyDownload === 'function') notifyDownload(r.name); }
+          else if (r.how === 'cancelled') saveMsg.textContent = 'Cancelled \u2014 nothing was written.';
+          else { saveMsg.innerHTML = `Saved to your <b>Downloads</b> folder.`; if (typeof notifyDownload === 'function') notifyDownload(r.name); }
         };
-        shareRow.appendChild(sb);
-        const tip = document.createElement('span');
-        tip.className = 'sub-note';
-        tip.style.cssText = 'align-self:center;margin-left:8px;';
-        tip.innerHTML = 'Pick <b>Files</b> to choose or create any folder.';
-        shareRow.appendChild(tip);
       }
-      addBubble(`Downloaded <b>${escHtml(saved.name)}</b> \u2014 ${filesAdded} Proforma Invoice PDF(s) out of ${nums.length} requested PI(s), ${(blob.size / 1048576).toFixed(1)} MB.`
+
+      // 2. Phone: the share sheet. "Save to Files" from there reaches any folder, including one
+      //    you create yourself. Offered whenever the browser has navigator.share at all — whether
+      //    it will accept THIS file is only knowable at the moment of the tap, and if it refuses,
+      //    it now says so plainly instead of pretending you cancelled.
+      if (navigator.share) {
+        const sb = mkBtn('Save to a folder\u2026', !canPickSaveLocation());
+        sb.onclick = async () => {
+          saveMsg.textContent = '';
+          const r = await shareBlob(blob, lastZipName, 'application/zip');   // nothing awaited before this
+          if (r.ok) {
+            saveMsg.innerHTML = `<span style="color:var(--good);font-weight:700;">Sent to the app you picked.</span>`;
+            if (typeof notifyDownload === 'function') notifyDownload(lastZipName);
+          } else {
+            saveMsg.innerHTML = `<span style="color:${r.why === 'dismissed' ? 'var(--sub)' : 'var(--bad)'};">${escHtml(r.detail)}</span>`;
+          }
+        };
+      }
+
+      // 3. Always available: the ordinary download. This is the guaranteed route.
+      const db = mkBtn('Download', !canPickSaveLocation() && !navigator.share);
+      db.onclick = () => {
+        saveMsg.textContent = '';
+        saveBlobAs(blob, lastZipName);
+        if (typeof notifyDownload === 'function') notifyDownload(lastZipName);
+        saveMsg.innerHTML = `Sent to your <b>Downloads</b> folder as <b>${escHtml(lastZipName)}</b>.`
+          + `<br>No notification on your phone? Open your <b>Files</b> app \u2192 <b>Downloads</b>, or search it for <b>Olisa Tools</b>. `
+          + `If it isn't there either, tap <b>Open in browser</b> below.`;
+        if (!document.getElementById('piDlTabBtn')) {
+          const tb = mkBtn('Open in browser', false);
+          tb.id = 'piDlTabBtn';
+          tb.onclick = () => {
+            const opened = openBlobInTab(blob, lastZipName);
+            saveMsg.innerHTML = opened
+              ? `Opened in a browser tab \u2014 the download starts there, which is what makes your phone show its own notification.`
+              : `<span style="color:var(--bad);">Your browser blocked the new tab. Allow pop-ups for this site and try again.</span>`;
+          };
+        }
+      };
+
+      addBubble(`Built <b>${escHtml(lastZipName)}</b> \u2014 ${filesAdded} Proforma Invoice PDF(s) out of ${nums.length} requested PI(s), ${(blob.size / 1048576).toFixed(1)} MB. Choose where to save it in the ALL PI DOWNLOAD window.`
         + (notes.length ? `<br><span class="sub-note">${notes.join('<br>')}</span>` : ''), 'askA');
     } catch (err) {
       if (err && err.message === '__stopped') {
@@ -3772,9 +3812,10 @@ function saveBlobAs(blob, name) {
 }
 // Can this browser let the user choose where the file goes?
 function canPickSaveLocation() { return typeof window.showSaveFilePicker === 'function'; }
-function canShareFile(file) {
-  try { return !!(navigator.canShare && navigator.canShare({ files: [file] })); } catch (e) { return false; }
-}
+// NOTE: there is deliberately no "can this browser share?" probe helper here any more. The old one
+// was called with a stand-in file, Chrome said yes to the 1-byte sample, and the real multi-megabyte
+// archive was then refused at share time — reported to you as "(cancelled)". The only meaningful
+// check is navigator.canShare against the actual file, which shareBlob() does itself.
 // The full save path: picker where it exists (desktop Chrome/Edge — you choose the folder and it
 // is remembered), otherwise a plain download. Returns what actually happened so the caller can say
 // something truthful about where the file went.
@@ -3801,11 +3842,48 @@ async function saveBlobTo(blob, name, mime) {
 // Android's share sheet is the only route to an arbitrary folder on a phone: it lists Files,
 // Drive, WhatsApp and everything else, and "Save to Files" lets you put the archive wherever you
 // want, including a folder you made yourself.
+//
+// This returns a REASON, never a bare false. The previous version collapsed "the browser refused
+// this file", "you closed the sheet" and "it threw" all into one silent false, which surfaced as
+// "(cancelled)" no matter what actually happened — unusable when the thing you need to know is
+// WHY. navigator.share must also be reached with the click's activation still live, so nothing is
+// awaited before it.
 async function shareBlob(blob, name, mime) {
-  const file = new File([blob], olisaFileName(name), { type: mime || 'application/octet-stream' });
-  if (!canShareFile(file)) return false;
-  try { await navigator.share({ files: [file], title: file.name }); return true; }
-  catch (e) { return false; }   // user dismissed the sheet, or the target refused
+  const fileName = olisaFileName(name);
+  if (!navigator.share) {
+    return { ok: false, why: 'unsupported', detail: 'This browser has no share sheet. Use Download instead.' };
+  }
+  let file;
+  try {
+    file = new File([blob], fileName, { type: mime || 'application/octet-stream' });
+  } catch (e) {
+    return { ok: false, why: 'error', detail: 'Could not prepare the file: ' + e.message };
+  }
+  // Check the ACTUAL file, not a stand-in. Chrome will happily say yes to a 1-byte sample and then
+  // refuse the real archive, which is precisely how the old check passed and the share then failed.
+  if (navigator.canShare && !navigator.canShare({ files: [file] })) {
+    return {
+      ok: false, why: 'refused',
+      detail: `Your browser won't share a ${(blob.size / 1048576).toFixed(1)} MB .zip \u2014 usually a size limit on sharing. Use Download instead, or ask for fewer PIs at a time.`
+    };
+  }
+  try {
+    await navigator.share({ files: [file], title: fileName });
+    return { ok: true };
+  } catch (e) {
+    if (e && e.name === 'AbortError') return { ok: false, why: 'dismissed', detail: 'Share sheet closed \u2014 nothing was saved.' };
+    if (e && e.name === 'NotAllowedError') return { ok: false, why: 'blocked', detail: 'The browser blocked the share sheet. Tap the button again without waiting.' };
+    return { ok: false, why: 'error', detail: `${e.name || 'Error'}: ${e.message}` };
+  }
+}
+// Last-resort route for a phone that refuses both the share sheet and an in-page download: hand
+// the blob to a normal browsing context, which puts it through the browser's ordinary download
+// pipeline and its notification.
+function openBlobInTab(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const w = window.open(url, '_blank');
+  setTimeout(() => URL.revokeObjectURL(url), 120000);
+  return !!w;
 }
 // Version counter, kept locally so file names read v1, v2, v3 in order.
 let backupVersion = 0;
