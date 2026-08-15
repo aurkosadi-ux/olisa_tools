@@ -1577,7 +1577,7 @@ async function downloadXlsx() {
   // date used to land on identical names and quietly overwrite each other in Downloads.
   const _t = new Date();
   const _p = n => String(n).padStart(2, '0');
-  a.download = `Olisa_PO_Summary_${_p(_t.getDate())}_${_p(_t.getMonth() + 1)}_${_t.getFullYear()}.xlsx`;
+  a.download = `Olisa Tools - PO Summary ${_p(_t.getDate())}-${_p(_t.getMonth() + 1)}-${_t.getFullYear()}.xlsx`;
   if (typeof notifyDownload === 'function') notifyDownload(a.download);
   document.body.appendChild(a);
   a.click();
@@ -1918,7 +1918,7 @@ async function downloadXlsx() {
   const dateSlug = dateInput.value.replace(/[^\w]+/g, '_');
   const _objUrl = URL.createObjectURL(blob);
   a.href = _objUrl;
-  a.download = `Undelivered_Report_${dateSlug}.xlsx`;
+  a.download = `Olisa Tools - Undelivered Report ${dateSlug}.xlsx`;
   if (typeof notifyDownload === 'function') notifyDownload(a.download);
   document.body.appendChild(a);
   a.click();
@@ -3012,6 +3012,8 @@ function openPiDownloadModal() {
   const progText = wrap.querySelector('#piDlProgText');
   const result = wrap.querySelector('#piDlResult');
   let running = false, stopped = false;
+  // Kept so "Save to a folder…" can re-offer the SAME archive without rebuilding it.
+  let lastZipBlob = null, lastZipName = '';
 
   function close() {
     if (running) { stopped = true; return; }   // a run in progress must be stopped, not orphaned
@@ -3145,22 +3147,48 @@ function openPiDownloadModal() {
       await uiTick();
       const blob = new Blob(zip.finish(), { type: 'application/zip' });
       const label = nums.length === 1 ? `PI-${nums[0]}` : `PI-${nums[0]}-to-${nums[nums.length - 1]}_${filesAdded}PIs`;
-      const name = `Olisa_${label}.zip`;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = name; a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 8000);
+      const name = `${label}.zip`;
+      const saved = await saveBlobTo(blob, name, 'application/zip');
+      if (saved.how === 'cancelled') { progText.textContent = 'Save cancelled.'; result.innerHTML = '<span class="sub-note">Save cancelled \u2014 nothing was written.</span>'; return; }
+      lastZipBlob = blob; lastZipName = saved.name;
       bar.style.width = '100%';
       progText.textContent = 'Done.';
-      if (typeof notifyDownload === 'function') notifyDownload(name);
+      if (typeof notifyDownload === 'function') notifyDownload(saved.name);
 
       const notes = [];
       if (hitLimit) notes.push(`<b>Size limit reached</b> at about 3.6 GB \u2014 the rest were left out. Split the range into smaller batches.`);
       if (missing.length) notes.push(`No Proforma Invoice found for PI ${escHtml(missing.join(', '))}.`);
       if (failed.length) notes.push(`${failed.length} couldn't be downloaded: ${escHtml(failed.slice(0, 5).join('; '))}${failed.length > 5 ? '\u2026' : ''}`);
-      result.innerHTML = `<div style="color:var(--good);font-weight:700;">Downloaded ${escHtml(name)} \u2014 ${filesAdded} Proforma Invoice(s), ${(blob.size / 1048576).toFixed(1)} MB.</div>`
+      const whereLine = saved.how === 'picked'
+        ? `Saved to the folder you chose.`
+        : `Saved to your <b>Downloads</b> folder. Your phone's notification bar shows it \u2014 tap that notification to open the file.`;
+      result.innerHTML = `<div style="color:var(--good);font-weight:700;">${escHtml(saved.name)}</div>`
+        + `<div class="sub-note" style="margin-top:4px;">${filesAdded} Proforma Invoice(s), ${(blob.size / 1048576).toFixed(1)} MB. ${whereLine}</div>`
+        + `<div id="piDlShareRow" class="actions" style="margin-top:9px;"></div>`
         + (notes.length ? `<div class="sub-note" style="margin-top:6px;">${notes.join('<br>')}</div>` : '');
-      addBubble(`Downloaded <b>${escHtml(name)}</b> \u2014 ${filesAdded} Proforma Invoice PDF(s) out of ${nums.length} requested PI(s), ${(blob.size / 1048576).toFixed(1)} MB.`
+      // On a phone the share sheet is the ONLY way to put this file in a folder of your choosing:
+      // it lists Files, Drive, WhatsApp and the rest, and "Save to Files" lets you pick or create
+      // any folder — including one called Olisa Tools.
+      const shareRow = result.querySelector('#piDlShareRow');
+      const probe = new File([new Blob(['x'])], 'x.zip', { type: 'application/zip' });
+      if (canShareFile(probe)) {
+        const sb = document.createElement('button');
+        sb.className = 'secondary';
+        sb.textContent = 'Save to a folder\u2026';
+        sb.onclick = async () => {
+          sb.disabled = true; sb.textContent = 'Opening\u2026';
+          const ok = await shareBlob(lastZipBlob, lastZipName, 'application/zip');
+          sb.disabled = false;
+          sb.textContent = ok ? 'Save to a folder\u2026' : 'Save to a folder\u2026 (cancelled)';
+        };
+        shareRow.appendChild(sb);
+        const tip = document.createElement('span');
+        tip.className = 'sub-note';
+        tip.style.cssText = 'align-self:center;margin-left:8px;';
+        tip.innerHTML = 'Pick <b>Files</b> to choose or create any folder.';
+        shareRow.appendChild(tip);
+      }
+      addBubble(`Downloaded <b>${escHtml(saved.name)}</b> \u2014 ${filesAdded} Proforma Invoice PDF(s) out of ${nums.length} requested PI(s), ${(blob.size / 1048576).toFixed(1)} MB.`
         + (notes.length ? `<br><span class="sub-note">${notes.join('<br>')}</span>` : ''), 'askA');
     } catch (err) {
       if (err && err.message === '__stopped') {
@@ -3626,11 +3654,7 @@ async function backupMasterToDriveInner(silent) {
     const { blob, patched } = await buildUpdatedMasterBlob();
     if (!(savedRootHandle && savedRootHandle.isDrive)) {
       // Local mode (office PC): Drive isn't connected, so hand over the file instead of failing.
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = backupFileName(nextBackupVersion());
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      saveBlobAs(blob, backupFileName(nextBackupVersion()));
       bumpBackupVersion();
       notify('download', `Saved an updated Master File copy (${patched} remark(s) written in). Drive isn't connected here, so it went to your downloads.`);
       return;
@@ -3712,12 +3736,76 @@ async function downloadLatestMasterFile() {
     notify('error', `Could not download the Master File: ${e.message}`);
   }
 }
+// ==================== HANDING A FILE TO THE PHONE ====================
+// Every download in this tool goes through here. It used to be done ad hoc in nine different
+// places, and four of those built the <a>, set .download and called .click() WITHOUT ever putting
+// the element in the document. Desktop Chrome tolerates a detached anchor; Android does not — the
+// click goes nowhere near the download manager, so no file lands in Downloads and, crucially, no
+// system notification appears in the notification shade. That is exactly the "the bell icon says
+// downloaded but my phone knows nothing about it" symptom. Attached, clicked, removed.
+//
+// About putting files in an "Olisa Tools" folder: a web page genuinely cannot do that. The
+// download attribute only proposes a FILE NAME — every browser strips "/" and "\" out of it on
+// purpose, so a page can never write outside the browser's own download directory. Two honest
+// substitutes are wired up instead, and between them they cover what the folder was for:
+//   * every file is named "Olisa Tools - ..." so they sort together in Downloads and are one
+//     search away in any file manager;
+//   * saveBlobTo() below offers the real destination pickers where the browser has them.
+const OLISA_FILE_PREFIX = 'Olisa Tools - ';
+function olisaFileName(name) {
+  const n = String(name || 'file');
+  return n.indexOf(OLISA_FILE_PREFIX) === 0 ? n : OLISA_FILE_PREFIX + n.replace(/^Olisa[_\s-]*/i, '');
+}
 function saveBlobAs(blob, name) {
+  const fileName = olisaFileName(name);
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url; a.download = name;
-  document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 60000);
+  a.href = url; a.download = fileName;
+  a.style.display = 'none';
+  document.body.appendChild(a);       // MUST be in the document for Android to see the click
+  a.click();
+  setTimeout(() => { a.remove(); }, 0);
+  // A long revoke window: Android queues the write, and pulling the blob out from under a queued
+  // download is what produces a 0-byte file in Downloads.
+  setTimeout(() => URL.revokeObjectURL(url), 120000);
+  return fileName;
+}
+// Can this browser let the user choose where the file goes?
+function canPickSaveLocation() { return typeof window.showSaveFilePicker === 'function'; }
+function canShareFile(file) {
+  try { return !!(navigator.canShare && navigator.canShare({ files: [file] })); } catch (e) { return false; }
+}
+// The full save path: picker where it exists (desktop Chrome/Edge — you choose the folder and it
+// is remembered), otherwise a plain download. Returns what actually happened so the caller can say
+// something truthful about where the file went.
+async function saveBlobTo(blob, name, mime) {
+  const fileName = olisaFileName(name);
+  if (canPickSaveLocation()) {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: fileName,
+        types: [{ description: 'File', accept: { [mime || 'application/octet-stream']: ['.' + (fileName.split('.').pop() || 'bin')] } }]
+      });
+      const w = await handle.createWritable();
+      await w.write(blob);
+      await w.close();
+      return { how: 'picked', name: fileName };
+    } catch (e) {
+      if (e && e.name === 'AbortError') return { how: 'cancelled', name: fileName };
+      // Picker failed for some other reason — fall through to the ordinary download.
+    }
+  }
+  saveBlobAs(blob, fileName);
+  return { how: 'downloaded', name: fileName };
+}
+// Android's share sheet is the only route to an arbitrary folder on a phone: it lists Files,
+// Drive, WhatsApp and everything else, and "Save to Files" lets you put the archive wherever you
+// want, including a folder you made yourself.
+async function shareBlob(blob, name, mime) {
+  const file = new File([blob], olisaFileName(name), { type: mime || 'application/octet-stream' });
+  if (!canShareFile(file)) return false;
+  try { await navigator.share({ files: [file], title: file.name }); return true; }
+  catch (e) { return false; }   // user dismissed the sheet, or the target refused
 }
 // Version counter, kept locally so file names read v1, v2, v3 in order.
 let backupVersion = 0;
@@ -4119,11 +4207,8 @@ async function saveIndexFile() {
   const gz = await gzipBytes(json);
   const blob = gz || new Blob([json], { type: 'application/json' });
   const name = gz ? INDEX_FILE_GZ : INDEX_FILE_NAME;
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = name; a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 4000);
-  notifyDownload(name);
+  const savedName = saveBlobAs(blob, name);
+  notifyDownload(savedName);
   const savedKb = (blob.size / 1024).toFixed(0), rawKb = (json.length / 1024).toFixed(0);
   addBubble(`Saved <b>${name}</b> (${savedKb} KB${gz ? ` compressed from ${rawKb} KB` : ''}). Put this file in your OLISA GROUP folder on Google Drive \u2014 your phone loads it automatically on connect, so you never build the index there.`, 'askA');
 }
@@ -4318,11 +4403,7 @@ async function openFilePreview(fileHandle) {
   modal.addEventListener('click', ev => { if (ev.target === modal) closePreview(); });
   modal.querySelector('#pvX').onclick = closePreview;
   modal.querySelector('#pvDl').onclick = () => {
-    const url = URL.createObjectURL(new Blob([buf]));
-    const a = document.createElement('a');
-    a.href = url; a.download = file.name; a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 4000);
-    notifyDownload(file.name);
+    notifyDownload(saveBlobAs(new Blob([buf]), file.name));
   };
   const shareBtn = modal.querySelector('#pvShare');
   const shareFile = new File([buf], file.name, { type: isPdf ? 'application/pdf' : 'application/octet-stream' });
@@ -6411,7 +6492,7 @@ async function downloadMatches(matches, code, opts) {
   const a = document.createElement('a');
   const _objUrl = URL.createObjectURL(blob);
   a.href = _objUrl;
-  a.download = `Olisa_Query_${code.replace(/[^\w-]+/g,'_')}.xlsx`;
+  a.download = `Olisa Tools - Query ${code.replace(/[^\w-]+/g,'_')}.xlsx`;
   if (typeof notifyDownload === 'function') notifyDownload(a.download);
   document.body.appendChild(a);
   a.click();
@@ -7686,7 +7767,7 @@ async function uqDownloadXlsx() {
   const _objUrl = URL.createObjectURL(blob);
   a.href = _objUrl;
   const baseName = uqSelectedFile ? uqSelectedFile.name.replace(/\.[^.]+$/, '') : 'Request';
-  a.download = `Olisa_Checked_${baseName.replace(/[^\w-]+/g, '_')}.xlsx`;
+  a.download = `Olisa Tools - Checked ${baseName.replace(/[^\w-]+/g, '_')}.xlsx`;
   document.body.appendChild(a);
   a.click();
   a.remove();
