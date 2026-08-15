@@ -974,6 +974,10 @@ document.addEventListener('click', function (e) {
       </select>
       <input type="text" id="askPiFrom" placeholder="PI from" title="Only show PI numbers &ge; this">
       <input type="text" id="askPiTo" placeholder="PI to" title="Only show PI numbers &le; this">
+      <button id="piDownloadBtn" class="secondary" style="flex:0 0 auto;padding:6px 11px;" title="Download every file from a set of PI folders as one compressed .zip">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        PI Download
+      </button>
       <span class="filterhint" id="askFilterHint"></span>
     </div>
     <div class="askChat" id="askChat"></div>
@@ -2320,31 +2324,47 @@ let connectAvgMs = 9000, connectAvgSamples = 0;
 })();
 function startConnectProgress() {
   if (!connectProgressWrap) return () => {};
-  const t0 = performance.now();
+  // Counts ON-SCREEN time only. performance.now() keeps running while the app is in the
+  // background, but the Drive requests do not — so the bar used to race ahead to 92% during a
+  // pause and then sit there, and worse, the average it learned afterwards included all that dead
+  // time. That is how a 9-second scan taught itself it takes 80 seconds. Only visible time is
+  // measured now, and only visible time is fed back into the average.
+  let activeMs = 0;
+  let since = (document.visibilityState === 'hidden') ? 0 : Date.now();
+  const onVis = () => {
+    if (document.visibilityState === 'hidden') { if (since) { activeMs += Date.now() - since; since = 0; } }
+    else if (!since) { since = Date.now(); }
+  };
+  document.addEventListener('visibilitychange', onVis);
+  const elapsedActive = () => activeMs + (since ? Date.now() - since : 0);
   let timer = null;
   connectProgressWrap.classList.remove('hidden');
   connectProgressBar.style.width = '0%';
   const tick = () => {
-    const elapsed = performance.now() - t0;
+    const elapsed = elapsedActive();
     const pct = Math.min(92, Math.round((elapsed / connectAvgMs) * 100));
     connectProgressBar.style.width = pct + '%';
     const remainMs = Math.max(0, connectAvgMs - elapsed);
     const s = Math.max(1, Math.round(remainMs / 1000));
+    if (document.visibilityState === 'hidden') return; // nobody is looking; don't burn work on text
     connectProgressText.textContent = connectAvgSamples
-      ? `About ${s}s remaining\u2026`
+      ? `About ${s}s remaining\u2026 (keeps running if you switch tabs or leave the app)`
       : `First scan on this device \u2014 estimating\u2026 (about ${s}s, based on a rough guess)`;
   };
   tick();
   timer = setInterval(tick, 250);
   return function stop() {
     if (timer) clearInterval(timer);
-    const elapsed = performance.now() - t0;
+    document.removeEventListener('visibilitychange', onVis);
+    const elapsed = elapsedActive();
     connectProgressBar.style.width = '100%';
     // Exponential moving average: recent scans matter more than the very first one, but a single
     // unusually slow or fast run (a cold Drive API, a big new PI batch) can't swing the estimate wildly.
-    connectAvgMs = connectAvgSamples ? Math.round(connectAvgMs * 0.7 + elapsed * 0.3) : elapsed;
-    connectAvgSamples++;
-    idbSet('connectScanAvg', { avgMs: connectAvgMs, samples: connectAvgSamples }).catch(() => {});
+    if (elapsed > 250) {   // a warm resume takes no real time and must not drag the estimate to zero
+      connectAvgMs = connectAvgSamples ? Math.round(connectAvgMs * 0.7 + elapsed * 0.3) : elapsed;
+      connectAvgSamples++;
+      idbSet('connectScanAvg', { avgMs: connectAvgMs, samples: connectAvgSamples }).catch(() => {});
+    }
     setTimeout(() => connectProgressWrap.classList.add('hidden'), 500);
   };
 }
@@ -2455,7 +2475,52 @@ async function loadWarmSession(handle) {
 }
 function warmMinutesLeft(w) { return Math.max(0, Math.ceil((WARM_MS - (Date.now() - w.at)) / 60000)); }
 
-async function connectFolder(existingHandle, forceNew) {
+// ==================== ONE CONNECT AT A TIME, AND IT KEEPS GOING ====================
+// Three different things can ask for a connect: the auto-resume on launch, the Connect Google
+// Drive button, and (new, below) the return-to-foreground retry. Nothing stopped them from
+// overlapping, so a second connect could start on top of a running one and reset the progress bar
+// to the beginning — a restart you can SEE, even though the first was still working fine.
+//
+// Now the first caller owns the run and every later caller simply awaits the same promise. Nothing
+// restarts, nothing double-scans, and a connect started before you tapped PO Summary is still the
+// one running when you tap back. The screen wake lock is held for the duration for the same reason
+// index builds hold one: a phone that sleeps mid-connect gets its page frozen and then evicted,
+// and that IS a genuine loss of work.
+let connectInFlight = null;
+let connectWakeLock = null;
+async function acquireConnectWakeLock() {
+  try {
+    if (!navigator.wakeLock || connectWakeLock) return;
+    connectWakeLock = await navigator.wakeLock.request('screen');
+    connectWakeLock.addEventListener('release', () => { connectWakeLock = null; });
+  } catch (e) { /* unsupported, or refused because the page was already hidden — not fatal */ }
+}
+function releaseConnectWakeLock() {
+  try { if (connectWakeLock) { connectWakeLock.release(); connectWakeLock = null; } } catch (e) { /* already gone */ }
+}
+function connectFolder(existingHandle, forceNew) {
+  // "Change folder" is a deliberate override — it must never be folded into a run already going.
+  if (connectInFlight && !forceNew) return connectInFlight;
+  const p = (async () => {
+    await acquireConnectWakeLock();
+    try { return await connectFolderInner(existingHandle, forceNew); }
+    finally { releaseConnectWakeLock(); }
+  })();
+  connectInFlight = p;
+  p.then(() => { if (connectInFlight === p) connectInFlight = null; },
+         () => { if (connectInFlight === p) connectInFlight = null; });
+  return p;
+}
+window.__olisaConnecting = function () { return !!connectInFlight; };
+// Re-take the wake lock on the way back to the foreground: the browser always drops it while the
+// page is hidden, and without this a long connect loses its protection the first time you look away.
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && connectInFlight) acquireConnectWakeLock();
+  });
+}
+
+async function connectFolderInner(existingHandle, forceNew) {
   let stopConnectProgress = null;
   try {
     const dirHandle = (existingHandle && !forceNew) ? existingHandle : await window.showDirectoryPicker();
@@ -2533,10 +2598,20 @@ async function connectFolder(existingHandle, forceNew) {
         }).catch(() => {});
       }
     }
-    // A shared index file in the folder means another device already did the work.
-    const adoptedShared = await tryLoadIndexFromFolder(dirHandle);
-    // No shared file, but this device may hold a cached index — say whether it is still current.
-    if (!adoptedShared && Object.keys(piIndex).length) await reportIndexFreshness(false);
+    // ORDER MATTERS ON A PHONE. This block — reading a shared index file and then listing all
+    // ~104 PI folders to see whether the cached index is stale — used to run BEFORE the Master
+    // File was fetched, so the one thing that actually makes the Ask box work arrived last, after
+    // the slowest step. Backgrounding the app during that walk killed the connect with nothing to
+    // show for it. It now runs AFTER the Master File is loaded, and it is deliberately NOT awaited:
+    // it is advisory ("rebuild recommended"), never a prerequisite, so the connect finishes and the
+    // app becomes usable in a couple of seconds while this carries on quietly behind it.
+    void (async () => {
+      try {
+        const adoptedShared = await tryLoadIndexFromFolder(dirHandle);
+        if (!adoptedShared && Object.keys(piIndex).length) await reportIndexFreshness(false);
+      } catch (e) { /* advisory only — never allowed to fail a connect */ }
+      if (typeof renderHealth === 'function') renderHealth();
+    })();
 
     const bits = [];
     if (masterSearch.handle) {
@@ -2544,6 +2619,10 @@ async function connectFolder(existingHandle, forceNew) {
       if (/\.(xlsx|xls)$/i.test(file.name)) {
         try { masterFileBytes = await file.arrayBuffer(); masterFileName = file.name; } catch (e) { masterFileBytes = null; }
         await loadFile(file);
+        // Bank it RIGHT HERE, not at the end. Snapshotting only on full success meant a connect
+        // that died at 90% left nothing behind and the next launch re-downloaded everything again.
+        // Written now, the very next launch resumes instantly even if all that follows fails.
+        if (masterFileBytes) await saveWarmSession(dirHandle, masterFileName, masterFileBytes);
         bits.push(`Master File loaded ("${file.name}")`);
       } else {
         bits.push(`Found "${file.name}" (matches "master") but it isn't an Excel file, so it wasn't loaded`);
@@ -2647,6 +2726,316 @@ async function findPiSubfolder(rootHandle, piRef, maxDepth = 3) {
   }
   return (await walk(rootHandle, 0, '')) || fallback;
 }
+
+// ==================== PI DOWNLOAD (bulk folder grab as one .zip) ====================
+// Pulls every file out of a set of PI folders and hands back a single archive. The box accepts
+// however the numbers happen to get typed — see parsePiRequest — because nobody should have to
+// remember a syntax to fetch PI 124 to 159.
+
+// --- The fuzzy box. "124-159", "PI-124-159", "124, 125, 139", "PI124,PI129,PI90,PI-158",
+// --- "pi 124 to 130", "124..127", "159-124" (backwards is still a range) all mean what they look
+// --- like. Anything unreadable is reported rather than silently dropped.
+function parsePiRequest(text) {
+  const raw = String(text == null ? '' : text);
+  const errors = [];
+  const nums = [];
+  let s = raw
+    .replace(/[\u2010-\u2015\u2212]/g, '-')      // en/em dash, minus sign -> plain hyphen
+    .replace(/[\uFF0C\u060C\u0964]/g, ',')       // full-width / Arabic / Bengali comma -> comma
+    .replace(/[\r\n;|/]+/g, ',')
+    .replace(/\s*\.\.+\s*/g, '-')                // 124..159
+    .replace(/\s*~\s*/g, '-')                    // 124~159
+    .replace(/\bthrough\b|\bto\b|\btill\b|\buntil\b/gi, '-')
+    .replace(/\band\b|&/gi, ',')
+    .replace(/\bnos?\b|\bnumbers?\b/gi, ' ')
+    .toUpperCase();
+  // Strip every "PI" marker and whatever separator is glued to it. This one line is what makes
+  // "PI-124-159", "PI124", "P.I. 90" and "pi no 158" all collapse to bare numbers.
+  s = s.replace(/P\s*\.?\s*I\s*\.?\s*(?:REF)?\s*[-:#]?\s*/g, ' ');
+  const tokens = s.split(',').map(t => t.trim()).filter(Boolean);
+  if (!tokens.length) return { nums: [], errors: ['Nothing to read \u2014 type some PI numbers.'] };
+  for (const tok of tokens) {
+    const range = tok.match(/^(\d{1,5})\s*-\s*(\d{1,5})$/);
+    if (range) {
+      let a = parseInt(range[1], 10), b = parseInt(range[2], 10);
+      if (a > b) { const t = a; a = b; b = t; }   // "159-124" is the same range, said backwards
+      if (b - a > 400) { errors.push(`Range ${a}-${b} covers ${b - a + 1} PIs \u2014 that is too many in one go.`); continue; }
+      for (let i = a; i <= b; i++) nums.push(i);
+      continue;
+    }
+    const singles = tok.match(/\d{1,5}/g);
+    if (!singles) { errors.push(`Couldn't read "${tok}".`); continue; }
+    singles.forEach(n => nums.push(parseInt(n, 10)));   // "124 125 139" with spaces is three PIs
+  }
+  const seen = new Set(), out = [];
+  nums.forEach(n => { if (n > 0 && !seen.has(n)) { seen.add(n); out.push(n); } });
+  out.sort((a, b) => a - b);
+  return { nums: out, errors };
+}
+
+// --- Minimal store-mode ZIP writer. PDFs, .xlsx and .doc are already compressed, so deflating
+// --- them a second time saves almost nothing and would mean pulling in another CDN library that
+// --- has to be online. This is a few dozen lines, works offline, and produces an archive Windows
+// --- Explorer, macOS, Android and 7-Zip all open natively.
+const ZIP_CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function zipCrc32(bytes) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) c = ZIP_CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+function zipW16(a, o, v) { a[o] = v & 0xFF; a[o + 1] = (v >>> 8) & 0xFF; }
+function zipW32(a, o, v) { a[o] = v & 0xFF; a[o + 1] = (v >>> 8) & 0xFF; a[o + 2] = (v >>> 16) & 0xFF; a[o + 3] = (v >>> 24) & 0xFF; }
+function makeZipBuilder() {
+  const parts = [], entries = [];
+  let offset = 0;
+  const enc = new TextEncoder();
+  return {
+    add(path, bytes, when) {
+      const nameBytes = enc.encode(path);
+      const crc = zipCrc32(bytes);
+      const d = (when instanceof Date && !isNaN(when)) ? when : new Date();
+      const y = Math.max(1980, d.getFullYear());
+      const time = ((d.getHours() & 31) << 11) | ((d.getMinutes() & 63) << 5) | ((Math.floor(d.getSeconds() / 2)) & 31);
+      const date = (((y - 1980) & 127) << 9) | (((d.getMonth() + 1) & 15) << 5) | (d.getDate() & 31);
+      const local = new Uint8Array(30 + nameBytes.length);
+      zipW32(local, 0, 0x04034b50);
+      zipW16(local, 4, 20);
+      zipW16(local, 6, 0x0800);          // UTF-8 name flag, so Chinese file names survive
+      zipW16(local, 8, 0);               // method 0 = stored
+      zipW16(local, 10, time); zipW16(local, 12, date);
+      zipW32(local, 14, crc);
+      zipW32(local, 18, bytes.length);
+      zipW32(local, 22, bytes.length);
+      zipW16(local, 26, nameBytes.length);
+      zipW16(local, 28, 0);
+      local.set(nameBytes, 30);
+      entries.push({ nameBytes, crc, size: bytes.length, offset, time, date });
+      parts.push(local, bytes);
+      offset += local.length + bytes.length;
+    },
+    finish() {
+      const cd = [];
+      let cdSize = 0;
+      for (const e of entries) {
+        const c = new Uint8Array(46 + e.nameBytes.length);
+        zipW32(c, 0, 0x02014b50);
+        zipW16(c, 4, 20); zipW16(c, 6, 20);
+        zipW16(c, 8, 0x0800);
+        zipW16(c, 10, 0);
+        zipW16(c, 12, e.time); zipW16(c, 14, e.date);
+        zipW32(c, 16, e.crc);
+        zipW32(c, 20, e.size); zipW32(c, 24, e.size);
+        zipW16(c, 28, e.nameBytes.length);
+        zipW16(c, 30, 0); zipW16(c, 32, 0); zipW16(c, 34, 0); zipW16(c, 36, 0);
+        zipW32(c, 38, 0);
+        zipW32(c, 42, e.offset);
+        c.set(e.nameBytes, 46);
+        cd.push(c); cdSize += c.length;
+      }
+      const end = new Uint8Array(22);
+      zipW32(end, 0, 0x06054b50);
+      zipW16(end, 4, 0); zipW16(end, 6, 0);
+      zipW16(end, 8, entries.length); zipW16(end, 10, entries.length);
+      zipW32(end, 12, cdSize);
+      zipW32(end, 16, offset);
+      zipW16(end, 20, 0);
+      return parts.concat(cd, [end]);
+    },
+    count() { return entries.length; },
+    bytes() { return offset; }
+  };
+}
+// The classic ZIP header keeps sizes and offsets in 32 bits. Past 4 GB an archive needs the ZIP64
+// extension, which this writer does not emit — so it stops and says so rather than handing over a
+// file that looks fine and unpacks to garbage.
+const ZIP_LIMIT_BYTES = 3.6 * 1024 * 1024 * 1024;
+function zipSafeName(s) {
+  return String(s == null ? '' : s).replace(/[\\/:*?"<>|]+/g, '_').replace(/^\.+/, '_').trim() || 'unnamed';
+}
+// Every file under one PI folder, with its path relative to that folder.
+async function collectFolderFiles(dir, prefix, depth, out) {
+  if (depth > 6) return;
+  const subs = [];
+  try {
+    for await (const [name, handle] of dir.entries()) {
+      if (handle.kind === 'file') out.push({ path: prefix + zipSafeName(name), handle });
+      else if (handle.kind === 'directory') subs.push({ name, handle });
+    }
+  } catch (e) { /* unreadable folder — take what the rest of the tree gives */ }
+  for (const s of subs) await collectFolderFiles(s.handle, prefix + zipSafeName(s.name) + '/', depth + 1, out);
+}
+
+function openPiDownloadModal() {
+  if (document.getElementById('piDlWrap')) return;
+  const wrap = document.createElement('div');
+  wrap.id = 'piDlWrap';
+  wrap.style.cssText = 'position:fixed;inset:0;background:rgba(15,37,64,.5);z-index:9970;display:flex;align-items:center;justify-content:center;padding:14px;';
+  wrap.innerHTML = `
+    <div id="piDlBox" style="background:#fff;border-radius:16px;max-width:520px;width:100%;max-height:88vh;overflow:auto;box-shadow:0 20px 60px rgba(0,0,0,.3);padding:18px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+        <h3 style="margin:0;font-size:16px;color:var(--ink);">PI Download</h3>
+        <button id="piDlClose" class="secondary" style="flex:0 0 auto;padding:4px 10px;font-size:16px;line-height:1;">&times;</button>
+      </div>
+      <div class="hint" style="margin-top:8px;">
+        Type the PIs you want. Any of these work, and you can mix them:<br>
+        <code>124-159</code> &middot; <code>PI-124-159</code> &middot; <code>124, 125, 139, 159, 120, 90</code> &middot;
+        <code>PI124,PI129,PI90,PI-158</code> &middot; <code>pi 124 to 130</code>
+      </div>
+      <input type="text" id="piDlInput" placeholder="e.g. 124-159" autocomplete="off"
+        style="width:100%;margin-top:10px;padding:11px 12px;border:1.5px solid #CBD9E8;border-radius:10px;font:600 15px Outfit,Arial,sans-serif;">
+      <div id="piDlEcho" class="sub-note" style="margin-top:6px;min-height:17px;"></div>
+      <div class="hidden" id="piDlProgWrap" style="margin-top:10px;">
+        <div style="height:7px;background:#E3ECF5;border-radius:5px;overflow:hidden;">
+          <div id="piDlBar" style="height:100%;width:0%;background:linear-gradient(90deg,#14B8A6,#0EA5E9,#6366F1);transition:width .25s;"></div>
+        </div>
+        <div id="piDlProgText" style="font-size:11.5px;color:var(--sub);margin-top:5px;"></div>
+      </div>
+      <div id="piDlResult" style="margin-top:10px;font-size:12.5px;"></div>
+      <div class="actions" style="margin-top:12px;">
+        <button id="piDlGo">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          PI Download
+        </button>
+        <button id="piDlCancel" class="secondary hidden">Stop</button>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  const input = wrap.querySelector('#piDlInput');
+  const echo = wrap.querySelector('#piDlEcho');
+  const goBtn = wrap.querySelector('#piDlGo');
+  const cancelBtn = wrap.querySelector('#piDlCancel');
+  const progWrap = wrap.querySelector('#piDlProgWrap');
+  const bar = wrap.querySelector('#piDlBar');
+  const progText = wrap.querySelector('#piDlProgText');
+  const result = wrap.querySelector('#piDlResult');
+  let running = false, stopped = false;
+
+  function close() {
+    if (running) { stopped = true; return; }   // a run in progress must be stopped, not orphaned
+    wrap.remove();
+    document.removeEventListener('keydown', onKey);
+  }
+  function onKey(e) {
+    if (e.key === 'Escape') { e.preventDefault(); close(); }
+    else if (e.key === 'Enter' && document.activeElement === input && !running) { e.preventDefault(); run(); }
+  }
+  document.addEventListener('keydown', onKey);
+  wrap.querySelector('#piDlClose').onclick = close;
+  wrap.addEventListener('click', e => { if (e.target === wrap) close(); });
+  cancelBtn.onclick = () => { stopped = true; cancelBtn.disabled = true; cancelBtn.textContent = 'Stopping\u2026'; };
+
+  // Live read-back, so it's obvious the box understood before anything is downloaded.
+  input.addEventListener('input', () => {
+    const { nums, errors } = parsePiRequest(input.value);
+    if (!input.value.trim()) { echo.textContent = ''; return; }
+    const list = nums.length > 12 ? `${nums.slice(0, 6).join(', ')} \u2026 ${nums.slice(-3).join(', ')}` : nums.join(', ');
+    echo.innerHTML = nums.length
+      ? `Reads as <b>${nums.length} PI(s)</b>: ${escHtml(list)}${errors.length ? ` <span style="color:var(--bad);">\u2014 ${escHtml(errors.join(' '))}</span>` : ''}`
+      : `<span style="color:var(--bad);">${escHtml(errors.join(' ') || 'No PI numbers found in that.')}</span>`;
+  });
+  setTimeout(() => input.focus(), 40);
+
+  async function run() {
+    if (running) return;
+    const { nums, errors } = parsePiRequest(input.value);
+    if (!nums.length) { result.innerHTML = `<span style="color:var(--bad);">${escHtml(errors.join(' ') || 'Type some PI numbers first.')}</span>`; return; }
+    if (!piRootHandle) {
+      result.innerHTML = `<span style="color:var(--bad);">No Work Orders folder is connected yet. Connect your Olisa Group folder at the top of this tab first.</span>`;
+      return;
+    }
+    running = true; stopped = false;
+    goBtn.disabled = true;
+    cancelBtn.classList.remove('hidden'); cancelBtn.disabled = false; cancelBtn.textContent = 'Stop';
+    progWrap.classList.remove('hidden');
+    result.innerHTML = '';
+    // Same reason index builds hold one: a phone that sleeps mid-download freezes the page and
+    // the whole archive is lost.
+    acquireBuildWakeLock();
+    const clock = newEtaClock();
+    const zip = makeZipBuilder();
+    const missing = [], empty = [], failed = [];
+    let filesAdded = 0, piDone = 0, hitLimit = false;
+    try {
+      for (const n of nums) {
+        if (stopped) break;
+        piDone++;
+        const pct = Math.round((piDone / nums.length) * 100);
+        bar.style.width = pct + '%';
+        progText.textContent = `PI ${n} \u2014 ${piDone} of ${nums.length} folder(s), ${filesAdded} file(s), ${(zip.bytes() / 1048576).toFixed(1)} MB${etaText(clock, piDone, nums.length)}`;
+        await uiTick();
+        let found = null;
+        try { found = await findPiSubfolder(piRootHandle, String(n)); }
+        catch (e) { failed.push(`PI ${n} (${e.message})`); continue; }
+        if (!found || !found.handle) { missing.push(n); continue; }
+        const files = [];
+        await collectFolderFiles(found.handle, '', 0, files);
+        if (!files.length) { empty.push(n); continue; }
+        const folderLabel = zipSafeName(found.path.split('/').pop() || ('PI-' + n));
+        for (const f of files) {
+          if (stopped) break;
+          if (zip.bytes() > ZIP_LIMIT_BYTES) { hitLimit = true; break; }
+          try {
+            const file = await f.handle.getFile();
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            zip.add(`${folderLabel}/${f.path}`, bytes, file.lastModified ? new Date(file.lastModified) : new Date());
+            filesAdded++;
+            if (filesAdded % 4 === 0) {
+              progText.textContent = `PI ${n} \u2014 ${piDone} of ${nums.length} folder(s), ${filesAdded} file(s), ${(zip.bytes() / 1048576).toFixed(1)} MB${etaText(clock, piDone, nums.length)}`;
+              await uiTick();
+            }
+          } catch (e) { failed.push(`${folderLabel}/${f.path} (${e.message})`); }
+        }
+        if (hitLimit) break;
+      }
+
+      if (!filesAdded) {
+        result.innerHTML = `<span style="color:var(--bad);">Nothing was downloaded.</span> ${missing.length ? `No folder found for PI ${escHtml(missing.join(', '))}.` : ''} ${empty.length ? `PI ${escHtml(empty.join(', '))} had no files in them.` : ''}`;
+        return;
+      }
+      progText.textContent = `Packing ${filesAdded} file(s) into the archive\u2026`;
+      await uiTick();
+      const blob = new Blob(zip.finish(), { type: 'application/zip' });
+      const label = nums.length === 1 ? `PI-${nums[0]}` : `PI-${nums[0]}-to-${nums[nums.length - 1]}_${nums.length}PIs`;
+      const name = `Olisa_${label}.zip`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = name; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 8000);
+      bar.style.width = '100%';
+      progText.textContent = 'Done.';
+      if (typeof notifyDownload === 'function') notifyDownload(name);
+
+      const notes = [];
+      if (stopped) notes.push(`<b>Stopped early</b> \u2014 only the PIs processed so far are in the file.`);
+      if (hitLimit) notes.push(`<b>Size limit reached</b> at about 3.6 GB \u2014 the rest were left out. Split the range into smaller batches.`);
+      if (missing.length) notes.push(`No folder found for PI ${escHtml(missing.join(', '))}.`);
+      if (empty.length) notes.push(`PI ${escHtml(empty.join(', '))} contained no files.`);
+      if (failed.length) notes.push(`${failed.length} file(s) couldn't be read: ${escHtml(failed.slice(0, 5).join('; '))}${failed.length > 5 ? '\u2026' : ''}`);
+      result.innerHTML = `<div style="color:var(--good);font-weight:700;">Downloaded ${escHtml(name)} \u2014 ${filesAdded} file(s) from ${piDone - missing.length - empty.length} PI folder(s), ${(blob.size / 1048576).toFixed(1)} MB.</div>`
+        + (notes.length ? `<div class="sub-note" style="margin-top:6px;">${notes.join('<br>')}</div>` : '');
+      addBubble(`Downloaded <b>${escHtml(name)}</b> \u2014 ${filesAdded} file(s) from ${nums.length} requested PI(s), ${(blob.size / 1048576).toFixed(1)} MB.`
+        + (notes.length ? `<br><span class="sub-note">${notes.join('<br>')}</span>` : ''), 'askA');
+    } catch (err) {
+      result.innerHTML = `<span style="color:var(--bad);">PI Download failed: ${escHtml(err.message)}</span>`;
+      console.error('PI Download error:', err);
+    } finally {
+      running = false; stopped = false;
+      releaseBuildWakeLock();
+      goBtn.disabled = false;
+      cancelBtn.classList.add('hidden');
+    }
+  }
+  goBtn.onclick = run;
+}
+document.getElementById('piDownloadBtn').addEventListener('click', openPiDownloadModal);
 
 function extractStyleTokens(text) {
   const out = new Set();
@@ -3785,51 +4174,18 @@ async function openFilePreview(fileHandle) {
   document.addEventListener('keydown', onKey, true);
   modal.addEventListener('click', ev => { if (ev.target === modal) closePreview(); });
   modal.querySelector('#pvX').onclick = closePreview;
-  // A correct MIME type matters for sharing: Android's share sheet filters targets by type, and
-  // "application/octet-stream" offers WhatsApp and Gmail almost nothing to do with the file.
-  const mimeOf = nm => {
-    const e = String(nm).toLowerCase().split('.').pop();
-    return e === 'pdf' ? 'application/pdf'
-      : e === 'doc' ? 'application/msword'
-      : e === 'rtf' ? 'application/rtf'
-      : e === 'docx' ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-      : e === 'xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-      : e === 'xls' ? 'application/vnd.ms-excel'
-      : 'application/octet-stream';
-  };
-  const doDownload = () => {
-    const url = URL.createObjectURL(new Blob([buf], { type: mimeOf(file.name) }));
+  modal.querySelector('#pvDl').onclick = () => {
+    const url = URL.createObjectURL(new Blob([buf]));
     const a = document.createElement('a');
-    a.href = url; a.download = file.name;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 8000);
+    a.href = url; a.download = file.name; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
     notifyDownload(file.name);
   };
-  modal.querySelector('#pvDl').onclick = doDownload;
   const shareBtn = modal.querySelector('#pvShare');
-  const shareFile = new File([buf], file.name, { type: mimeOf(file.name) });
-  // Share used to be wired with `.catch(() => {})` \u2014 every failure swallowed in silence, so on a
-  // desktop with no share target the button simply did nothing and looked broken. It now always
-  // does something: share where the browser really supports it, download otherwise, and say which.
-  // The button is never hidden, because a Share that quietly falls back to a download is more use
-  // than a Share that is not there.
-  shareBtn.onclick = async () => {
-    try {
-      if (!(navigator.canShare && navigator.canShare({ files: [shareFile] }))) {
-        throw Object.assign(new Error('unsupported'), { name: 'UnsupportedError' });
-      }
-      await navigator.share({ files: [shareFile], title: file.name });
-    } catch (err) {
-      // Closing the share sheet is a normal choice, not a failure \u2014 stay quiet for that one.
-      if (err && (err.name === 'AbortError' || err.name === 'NotAllowedError' && /abort/i.test(err.message || ''))) return;
-      if (typeof notify === 'function') {
-        notify('info', err && err.name === 'UnsupportedError'
-          ? `This browser can't share files directly \u2014 downloading "${file.name}" instead so you can attach it.`
-          : `Sharing wasn't available (${err && err.name ? err.name : 'error'}) \u2014 downloading "${file.name}" instead.`);
-      }
-      doDownload();
-    }
-  };
+  const shareFile = new File([buf], file.name, { type: isPdf ? 'application/pdf' : 'application/octet-stream' });
+  if (navigator.canShare && navigator.canShare({ files: [shareFile] })) {
+    shareBtn.onclick = () => navigator.share({ files: [shareFile], title: file.name }).catch(() => {});
+  } else shareBtn.style.display = 'none';
   const pages = modal.querySelector('#pvPages');
   try {
     if (isPdf) {
@@ -4058,6 +4414,68 @@ async function loadFile(file) {
 
 // ---------- Manual Challan reconciliation & display helpers ----------
 function measNorm(desc) { return extractMeasurement(desc).replace(/\s+/g, '').toUpperCase(); }
+// ==================== WHAT COUNTS AS "THE SAME PHYSICAL ITEM" ====================
+// Reconciliation used to decide this with measNorm(), i.e. by comparing the Item Description
+// TEXT. That is wrong in both directions, and both errors were live in the Master File:
+//
+//  * TOO STRICT. extractMeasurement() only recognises the "L__ x W__ x H__ cm" wording. Every
+//    other spelling falls through and returns the WHOLE description, so two lines describing
+//    the identical carton never matched if one of them was typed differently. Real case:
+//    M82032B7 was 16 pcs short on PI 102 ("Master Carton, 5 Ply, L51.5 x W40 x H26.5cm"), and
+//    manual challan 313977982 re-delivered exactly those 16 pcs — but its description reads
+//    "CARTON 6PRS 51.5*40*26.5CM (13-1#)". Same carton, same 51.5 x 40 x 26.5, and the tool
+//    reported "No style was matched with previous information" and left the short open.
+//
+//  * TOO LOOSE. When the descriptions DID match word for word, nothing else was checked — so a
+//    "CARTON 混 8PRS" excess could pay off a "CARTON 混 7PRS" short, and a 单 (single-size) line
+//    could pay off a 混 (mixed) one, purely because both cartons happen to measure
+//    L63 x W49 x H28.8cm. That is netting across different items, which is exactly what must
+//    never happen.
+//
+// So identity is now the three things that actually define the item, read from the Item and Item
+// Description columns together: the DIMENSIONS, the PACK COUNT (6PRS / 12PRS), and the MIX MARKER
+// (混 mixed vs 单 single). Dimensions must match. Pack count and mix marker must match whenever
+// BOTH lines state one — a hand-typed manual challan often omits them, and an omission is not a
+// contradiction. With no readable dimensions anywhere the old text comparison still applies, so
+// nothing that matched before on descriptions without measurements stops matching now.
+function cartonDims(r) {
+  const s = String(r && r.itemDesc != null ? r.itemDesc : '') + ' ~ ' + String(r && r.item != null ? r.item : '');
+  const lwh = s.match(/L\s*(\d+(?:\.\d+)?)\s*[x×*]\s*W\s*(\d+(?:\.\d+)?)\s*[x×*]\s*H\s*(\d+(?:\.\d+)?)/i);
+  // Bare triples like "51.5*40*26.5CM". The leading (^|[^\d.]) guard stands in for a lookbehind,
+  // which older iOS Safari still cannot parse — and a syntax error in this file kills every script.
+  const bare = lwh ? null : s.match(/(?:^|[^\d.])(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)/);
+  const t = lwh || bare;
+  if (!t) return '';
+  const n = v => { const f = parseFloat(v); return isFinite(f) ? String(Math.round(f * 10) / 10) : String(v); };
+  return `${n(t[1])}X${n(t[2])}X${n(t[3])}`;
+}
+function cartonPack(r) {
+  const s = String(r && r.item != null ? r.item : '') + ' ' + String(r && r.itemDesc != null ? r.itemDesc : '');
+  const m = s.match(/(\d+)\s*PRS/i);
+  return m ? m[1] + 'PRS' : '';
+}
+function cartonMix(r) {
+  const s = String(r && r.item != null ? r.item : '') + ' ' + String(r && r.itemDesc != null ? r.itemDesc : '');
+  const mixed = s.indexOf('\u6df7') !== -1;   // 混 = mixed sizes
+  const single = s.indexOf('\u5355') !== -1;  // 单 = single size
+  if (mixed && !single) return 'MIX';
+  if (single && !mixed) return 'SINGLE';
+  return '';
+}
+function sameCartonItem(a, b) {
+  const da = cartonDims(a), db = cartonDims(b);
+  if (da && db) {
+    if (da !== db) return false;
+    const pa = cartonPack(a), pb = cartonPack(b);
+    if (pa && pb && pa !== pb) return false;
+    const ma = cartonMix(a), mb = cartonMix(b);
+    if (ma && mb && ma !== mb) return false;
+    return true;
+  }
+  // One or both lines carry no readable dimensions — fall back to the original text comparison
+  // rather than guessing, so behaviour there is exactly what it always was.
+  return measNorm(a && a.itemDesc) === measNorm(b && b.itemDesc);
+}
 function parseDMY(s) {
   const str = String(s || '').trim();
   // ISO first: 2026-06-13
@@ -4187,7 +4605,6 @@ function rtfToText(bytes) {
 let challanIndex = {};          // "32021081" -> { path, pages:[4,5], date, piRef, driveId?, fp }
 let challanIndexBuiltAt = null;
 let challanIndexBuilding = false;
-let challanFileLog = [];   // one row per document the last build met — see fileLog in buildChallanIndex
 const CHALLAN_CACHE_VERSION = 1;
 // Challan numbers arrive from the Master File as numbers, as text, and occasionally with stray
 // spaces or a trailing ".0" from Excel. One key format, or the click never finds its own copy.
@@ -4326,41 +4743,29 @@ async function buildChallanIndex(onProgress) {
   let done = 0, challans = 0, failed = 0;
   const skipped = [];     // opened fine, but no challan header inside — reported, never silent
   const binaryDoc = [];   // genuinely unreadable in a browser; needs re-saving, so name the files
-  // Every document the walk met, and what came of it. Without this a miss can only say "not in the
-  // index", which is a dead end: it cannot say whether the file was never seen, was seen and
-  // unreadable, or was read fine but prints no challan number anywhere.
-  const fileLog = [];
   for (const f of pdfs) {
     let file = null, fp = '';
     try {
       file = await f.handle.getFile();
       fp = `${f.path}|${file.size}|${file.lastModified}`;
-    } catch (e) { failed++; done++; fileLog.push({ path: f.path, count: 0, status: 'unopenable' }); continue; }
+    } catch (e) { failed++; done++; continue; }
     // Unchanged file: reuse what was read last time instead of parsing every page again. This is
     // what keeps a rebuild after one new challan to seconds rather than minutes.
     const reused = Object.values(challanIndex).filter(e => e && e.fp === fp);
     if (reused.length) {
       reused.forEach(e => { next[normChallanKey(e.no)] = e; challans++; });
-      fileLog.push({ path: f.path, count: reused.length, status: 'ok' });
     } else {
       try {
         const found = await scanChallanDoc(file, f.path, f.handle.meta && f.handle.meta.id);
         found.forEach(c => { next[c.no] = { ...c, fp }; challans++; });
         if (!found.length) skipped.push(f.path);
-        fileLog.push({ path: f.path, count: found.length, status: found.length ? 'ok' : 'no-challan-number' });
-      } catch (e) {
-        failed++;
-        const binary = /binary Word/.test(e.message);
-        if (binary) binaryDoc.push(f.path);
-        fileLog.push({ path: f.path, count: 0, status: binary ? 'old-binary-word' : 'unreadable', reason: e.message });
-      }
+      } catch (e) { failed++; if (/binary Word/.test(e.message)) binaryDoc.push(f.path); }
     }
     done++;
     await checkpointChallanIndex(next);
     if (onProgress) onProgress(done, pdfs.length, challans, etaText(clock, done, pdfs.length));
   }
   challanIndex = next;
-  challanFileLog = fileLog;
   challanIndexBuiltAt = Date.now();
   await checkpointChallanIndex(next, true);
   return { files: pdfs.length, challans, failed, skipped, binaryDoc, folder: root.name };
@@ -4370,14 +4775,13 @@ async function checkpointChallanIndex(data, force) {
   const now = Date.now();
   if (!force && now - lastChallanCheckpoint < CHECKPOINT_MS) return;
   lastChallanCheckpoint = now;
-  try { await idbSet('challanIndex', { data, files: challanFileLog, builtAt: now, version: CHALLAN_CACHE_VERSION, partial: !force }); } catch (e) { /* quota */ }
+  try { await idbSet('challanIndex', { data, builtAt: now, version: CHALLAN_CACHE_VERSION, partial: !force }); } catch (e) { /* quota */ }
 }
 (async function initChallanIndex() {
   try {
     const cached = await idbGet('challanIndex');
     if (!cached || !cached.data || cached.version !== CHALLAN_CACHE_VERSION) return;
     challanIndex = cached.data;
-    challanFileLog = cached.files || [];
     challanIndexBuiltAt = cached.builtAt || null;
   } catch (e) { /* no cached challan index yet */ }
 })();
@@ -4419,7 +4823,15 @@ async function extractChallanPdf(entry) {
 async function openChallanCopy(challanNo) {
   const key = normChallanKey(challanNo);
   const entry = challanIndex[key];
-  if (!entry) { showChallanMiss(key, challanNo); return; }
+  if (!entry) {
+    const n = Object.keys(challanIndex).length;
+    const reason = n
+      ? `Challan <b>${escHtml(String(challanNo))}</b> is not in the challan index (${n} challan(s) indexed${challanIndexBuiltAt ? `, read ${dmyFromMs(challanIndexBuiltAt)}` : ''}). If its PDF was added since, rebuild below.`
+      : `The challan copies have not been read yet. This is a one-off scan of every PDF in your Challans folder; after it, opening a challan is instant.`;
+    const b = addBubble(`${reason}<br><button class="secondary chBuildBtn" style="margin-top:8px;padding:7px 12px;font-size:12.5px;">${n ? 'Rebuild challan index' : 'Read my challan copies now'}</button>`, 'askA');
+    b.querySelectorAll('.chBuildBtn').forEach(btn => btn.addEventListener('click', () => runChallanIndexBuild(key)));
+    return;
+  }
   const label = `Challan ${key}${entry.piRef ? ` (PI ${entry.piRef})` : ''}`;
   // A text challan (the hand challans, written in Word and saved as RTF) has no page range to cut:
   // one file holds exactly one challan, so the file itself is already the single-challan copy.
@@ -4446,48 +4858,6 @@ async function openChallanCopy(challanNo) {
   } catch (e) {
     note.innerHTML = `Couldn't open challan <b>${escHtml(key)}</b> \\u2014 ${escHtml(e.message)}`;
   }
-}
-// "Not in the index" on its own is a dead end: it cannot tell you whether the document was never
-// seen, was seen but unreadable, or was read perfectly and simply does not print that number
-// anywhere. A hand challan numbered "114" in the Master File is very often filed under a name that
-// says 114 while the page itself prints the system number — so the file name is searched too, and
-// any near miss is offered as something to open right now rather than a message to puzzle over.
-function showChallanMiss(key, raw) {
-  const n = Object.keys(challanIndex).length;
-  if (!n) {
-    const b0 = addBubble(`The challan copies have not been read yet. Press <b>Build style index</b> \u2014 it now reads your challan copies in the same run \u2014 or read just the challans here.` +
-      `<br><button class="secondary chBuildBtn" style="margin-top:8px;padding:7px 12px;font-size:12.5px;">Read my challan copies now</button>`, 'askA');
-    b0.querySelectorAll('.chBuildBtn').forEach(btn => btn.addEventListener('click', () => runChallanIndexBuild(key)));
-    return;
-  }
-  const log = challanFileLog || [];
-  // Word-boundary match so "114" does not also drag in "31142057" or "2114".
-  const numRe = new RegExp(`(^|[^0-9])0*${key}([^0-9]|$)`);
-  const nameHits = log.filter(f => numRe.test(String(f.path)));
-  const problems = log.filter(f => f.status && f.status !== 'ok');
-  let html = `<div class="summary-line">Challan ${escHtml(String(raw))} \u2014 no document prints this number</div>`;
-  html += `<div class="sub-note">${n} challan(s) were read from ${log.length || '?'} document(s)${challanIndexBuiltAt ? `, ${agoText(challanIndexBuiltAt)}` : ''}. Every document is searched by its printed &ldquo;Challan No&rdquo; line, never by its file name \u2014 so a hand challan whose page shows a different number will not be found by its Master File number.</div>`;
-  if (nameHits.length) {
-    html += `<div style="margin-top:9px;font-weight:700;">${nameHits.length} document(s) have &ldquo;${escHtml(key)}&rdquo; in the file name \u2014 open one:</div>`;
-    html += nameHits.slice(0, 8).map(f => `<div style="margin-top:5px;"><a href="#" class="ch-file" data-p="${escHtml(f.path)}" style="color:var(--accent-dark);font-weight:600;text-decoration:none;">&#128196; ${escHtml(f.path)}</a> <span class="sub-note">(${f.count} challan(s) read from it)</span></div>`).join('');
-  }
-  if (problems.length) {
-    html += `<details style="margin-top:9px;"><summary style="cursor:pointer;color:var(--accent-dark);">${problems.length} document(s) the scan could not take a challan number from \u2014 tap to see and open them</summary>`;
-    html += `<div class="sub-note" style="margin-top:5px;">A scanned photo, an old binary Word file, or a page with no &ldquo;Challan No&rdquo; line will land here. Opening one shows whether it is the challan you are after.</div>`;
-    html += problems.slice(0, 40).map(f => `<div style="margin-top:4px;"><a href="#" class="ch-file" data-p="${escHtml(f.path)}" style="color:var(--accent-dark);text-decoration:none;">&#128196; ${escHtml(f.path)}</a> <span class="sub-note">\u2014 ${escHtml(f.status)}</span></div>`).join('');
-    html += `</details>`;
-  }
-  if (!nameHits.length && !problems.length) {
-    html += `<div class="sub-note" style="margin-top:8px;">Every document read cleanly and none of them carries this number, so the copy is not in the Challans folder yet \u2014 or it is filed somewhere else under your connected folder.</div>`;
-  }
-  html += `<div style="margin-top:9px;"><button class="secondary chBuildBtn" style="padding:7px 12px;font-size:12.5px;">Rebuild challan index</button></div>`;
-  const b = addBubble(html, 'askA');
-  b.querySelectorAll('.chBuildBtn').forEach(btn => btn.addEventListener('click', () => runChallanIndexBuild(key)));
-  b.querySelectorAll('.ch-file').forEach(a2 => a2.addEventListener('click', async e => {
-    e.preventDefault();
-    try { await openFilePreview(await challanFileHandle({ path: a2.dataset.p })); }
-    catch (err) { addBubble(`Couldn't open <code>${escHtml(a2.dataset.p)}</code> \u2014 ${escHtml(err.message)}`, 'askA'); }
-  }));
 }
 async function runChallanIndexBuild(retryChallan) {
   if (challanIndexBuilding) { addBubble('The challan index is already being read \\u2014 one moment.', 'askA'); return; }
@@ -4738,7 +5108,7 @@ function reconcileManualChallans() {
       // they still counted as open shortages and quietly ate manual-challan quantity that
       // belonged to a genuinely outstanding short, starving the real one.
       if (r.accepted) return false;
-      if (r.styleNorm !== m.styleNorm || measNorm(r.itemDesc) !== measNorm(m.itemDesc)) return false;
+      if (r.styleNorm !== m.styleNorm || !sameCartonItem(r, m)) return false;
       if (r.manualCh && manualTime(r) >= mTime) return false;   // only EARLIER manual challans
       const rTime = parseDMY(r.invDate) || parseDMY(r.challanDate) || 0;
       if (!mTime) return false;          // undated manual challan — cannot be ordered, so no claim
@@ -4822,7 +5192,7 @@ function reconcileExcessAgainstShorts() {
       if (r === x) return false;
       if ((r.short || 0) >= 0) return false;
       if (r.accepted) return false; // waived by agreement — nothing left to re-deliver against it
-      if (r.styleNorm !== x.styleNorm || measNorm(r.itemDesc) !== measNorm(x.itemDesc)) return false;
+      if (r.styleNorm !== x.styleNorm || !sameCartonItem(r, x)) return false;
       if (Math.abs(r.short || 0) - (r._covered || 0) <= 0) return false; // already fully covered
       return (manualTime(r) || 0) <= xTime;   // only shorts that happened BEFORE this delivery
     }).sort((a, b) => {
@@ -7299,11 +7669,46 @@ function requestDriveTokenInner(interactive) {
 // retry) and rate limiting (429, or 403 userRateLimitExceeded when many requests land at once →
 // exponential backoff: 0.8s, 1.6s, 3.2s, 6.4s). A 155-folder index build fires hundreds of calls;
 // without backoff a single burst of 429s used to surface as fake "sign in again" errors.
+// ==================== SURVIVING A BACKGROUNDED PHONE ====================
+// Android freezes a hidden page and cuts its in-flight requests. Those come back as a thrown
+// TypeError ("Failed to fetch"), NOT as an HTTP status — so the status-code ladder below never
+// saw them. One tap on PO Summary, or a glance at WhatsApp, and the whole connect died on the
+// spot; the next launch then had to start the 100-folder walk over from zero, which is exactly
+// the "it goes back to 80 seconds" behaviour. Now a network-level failure waits for the app to be
+// on screen again and retries the SAME request, so backgrounding costs time and nothing else.
+function waitForVisible(maxMs) {
+  if (typeof document === 'undefined' || document.visibilityState !== 'hidden') return Promise.resolve();
+  return new Promise(resolve => {
+    let done = false;
+    const finish = () => {
+      if (done) return; done = true;
+      document.removeEventListener('visibilitychange', onVis);
+      clearTimeout(cap);
+      resolve();
+    };
+    const onVis = () => { if (document.visibilityState === 'visible') finish(); };
+    document.addEventListener('visibilitychange', onVis);
+    const cap = setTimeout(finish, maxMs || 120000); // never wait forever — try again regardless
+  });
+}
 async function driveFetch(url, asBlob) {
   if (!driveToken) await requestDriveToken(false);
   let refreshed = false;
+  let netFails = 0;
   for (let attempt = 0; attempt < 6; attempt++) {
-    const r = await fetch(url, { headers: { Authorization: 'Bearer ' + driveToken } });
+    let r;
+    try {
+      r = await fetch(url, { headers: { Authorization: 'Bearer ' + driveToken } });
+    } catch (netErr) {
+      // Killed by the freeze, or a genuine drop. Either way: come back when the page is visible
+      // and try the same call again. Five attempts, then report it honestly.
+      netFails++;
+      if (netFails >= 5) throw new Error(`Lost connection to Google Drive (${netErr.message}). Check the internet and try again.`);
+      await waitForVisible(120000);
+      await sleep(500 * netFails);
+      attempt--;                      // a suspended request is not a rate-limit strike
+      continue;
+    }
     if (r.ok) return asBlob ? r.blob() : r.json();
     if (r.status === 401 && !refreshed) {
       refreshed = true;
@@ -7427,7 +7832,9 @@ document.getElementById('askDriveBtn').addEventListener('click', connectDrive);
 // closes the "asks me to reconnect and rebuild every time I reopen the app" gap: the cached PI
 // index (restored separately, above) is useless without piRootHandle pointing at a live folder
 // again, so this reconnects that folder quietly whenever the browser allows it.
-(async () => {
+let autoResumeDone = false;
+async function autoResumeDrive() {
+  if (autoResumeDone || connectInFlight) return;
   try {
     const remembered = await idbGet('driveRoot');
     if (!remembered || !remembered.name) return;
@@ -7440,12 +7847,26 @@ document.getElementById('askDriveBtn').addEventListener('click', connectDrive);
     const rootHandle = new DriveDirHandle(remembered.id, remembered.name);
     document.getElementById('askDriveBtnText').textContent = `Drive: "${remembered.name}"`;
     await connectFolder(rootHandle, false);
+    autoResumeDone = true;
     // A warm resume is a non-event — it did nothing over the network and the folder never
     // changed. Announcing it every time you switched tabs was just inflating the unread count.
     if (!lastConnectWasWarm && typeof notify === 'function') notify('drive', `Reconnected to Drive folder "${remembered.name}" automatically.`);
     if (typeof renderHealth === 'function') renderHealth();
   } catch (e) { /* stays in the tap-to-reconnect state — no error is worth surfacing here */ }
-})();
+}
+autoResumeDrive();
+// If the very first attempt was refused — usually because the app was launched straight into the
+// background, or the phone had no signal for those first few seconds — try again when it next
+// comes to the foreground, instead of sitting in "not connected" until something is tapped.
+// It cannot restart a healthy connect: connectFolder() hands back the run already in progress.
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    if (autoResumeDone || connectInFlight) return;
+    if (typeof indexBuilding !== 'undefined' && indexBuilding) return;
+    autoResumeDrive();
+  });
+}
 // ==================== END GOOGLE DRIVE MODE ====================
 
 })();
