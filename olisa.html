@@ -2452,29 +2452,64 @@ function newerMaster(a, b) {   // is a newer than b?
 // been adopted as THE Master File. So the winner must prove its ancestry: walk parent ids upward
 // until the connected root appears, or give up after a sane depth. Results are cached per session
 // because the same parent chain gets asked about repeatedly.
-const _ancestryCache = new Map();   // folderId -> parent folderId | null
+const _ancestryCache = new Map();   // folderId -> parent folderId[] | null
+// The folder picker hands back the literal string 'root' when you choose My Drive itself, but real
+// files never list 'root' as a parent — they list My Drive's actual id. So the comparison below
+// could never match, EVERY candidate was rejected, and the code fell through to a full recursive
+// walk of the entire Drive. That is the twenty seconds, and the reason the Master File then showed
+// as not loaded. Resolve the alias once and remember it.
+let _myDriveId = null;
+async function resolveMyDriveId() {
+  if (_myDriveId !== null) return _myDriveId;
+  try {
+    const j = await driveFetch('https://www.googleapis.com/drive/v3/files/root?fields=id');
+    _myDriveId = (j && j.id) || '';
+  } catch (e) { _myDriveId = ''; }
+  return _myDriveId;
+}
 async function isUnderDriveFolder(startParents, rootId) {
   if (!rootId) return true;
+  // Connected to My Drive itself: everything in the account is under it by definition, so there is
+  // nothing to verify and not a single request to make.
+  if (rootId === 'root') return true;
+  const myDrive = await resolveMyDriveId();
+  if (myDrive && rootId === myDrive) return true;
+
+  const targets = new Set([rootId]);
   let frontier = (startParents || []).slice(0, 4);
-  for (let depth = 0; depth < 10 && frontier.length; depth++) {
-    if (frontier.includes(rootId)) return true;
+  const seen = new Set(frontier);
+  const deadline = Date.now() + 4000;
+  let conclusive = true;   // did the walk actually reach the top of the tree?
+  for (let depth = 0; depth < 8; depth++) {
+    if (!frontier.length) break;                       // reached the top: a definitive answer
+    if (frontier.some(id => targets.has(id))) return true;
+    if (Date.now() > deadline) { conclusive = false; break; }
+    if (depth === 7) conclusive = false;               // hit the depth cap, not the top
+    const unknown = frontier.filter(id => !_ancestryCache.has(id));
+    // Fetched together rather than one after another. Sequentially this was up to eight round
+    // trips per level, per candidate, and it dominated the whole connect.
+    if (unknown.length) {
+      await Promise.all(unknown.map(async id => {
+        try {
+          const j = await driveFetch(`https://www.googleapis.com/drive/v3/files/${id}?fields=parents&supportsAllDrives=true`);
+          _ancestryCache.set(id, (j && j.parents) || []);
+        } catch (e) { _ancestryCache.set(id, null); conclusive = false; }
+      }));
+    }
     const next = [];
     for (const id of frontier) {
-      if (_ancestryCache.has(id)) {
-        const p = _ancestryCache.get(id);
-        if (p) next.push(...p);
-        continue;
-      }
-      try {
-        const j = await driveFetch(`https://www.googleapis.com/drive/v3/files/${id}?fields=parents&supportsAllDrives=true`);
-        const ps = (j && j.parents) || [];
-        _ancestryCache.set(id, ps);
-        next.push(...ps);
-      } catch (e) { _ancestryCache.set(id, null); }
+      const ps = _ancestryCache.get(id);
+      if (!ps) continue;
+      for (const p of ps) if (!seen.has(p)) { seen.add(p); next.push(p); }
     }
     frontier = next.slice(0, 8);
   }
-  return false;
+  // A walk that reached the top of the tree without meeting the connected folder is a real NO, and
+  // is honoured. An inconclusive one — timed out, depth-capped, or a metadata call failed — is
+  // treated as a YES, because rejecting cascades into a full-Drive folder walk: minutes of work
+  // ending with no Master File at all, which is far worse than occasionally accepting a
+  // correctly-named file whose ancestry could not be proven in time.
+  return !conclusive;
 }
 // Returns { handle, name, modifiedMs, id } for the newest master, or null.
 // ==================== INPUT vs OUTPUT: THE TWO LINEAGES ====================
@@ -2503,6 +2538,7 @@ async function isUnderDriveFolder(startParents, rootId) {
 // update note lives in the tool's own storage (remarkOverrides) and is written afresh into each
 // backup — the versioned copy is the source data plus those notes, never a separate truth.
 let _backupFolderIdCache = null;
+let _masterSearchCache = null;   // { key, files, at } — one connect's worth, nothing longer
 async function backupFolderId() {
   if (_backupFolderIdCache !== null) return _backupFolderIdCache;
   if (!(savedRootHandle && savedRootHandle.isDrive)) return (_backupFolderIdCache = '');
@@ -2520,16 +2556,24 @@ async function findNewestMaster(dirHandle, onProgress, includeBackups) {
     if (onProgress) onProgress('Checking Drive for the latest Master File\u2026');
     const sheetTypes = "(mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' or mimeType='application/vnd.ms-excel')";
     let files = [];
-    try { files = await driveSearchFiles(`name contains 'Master' and trashed=false and ${sheetTypes}`); }
-    catch (e) { /* fall through to the walk below */ }
-    if (includeBackups) {
-      // Tool copies no longer carry the word "Master", so the fallback pass has to ask for them by
-      // their own name or it would come back empty.
-      try {
-        const extra = await driveSearchFiles(`name contains '${TOOL_COPY_PREFIX}' and trashed=false and ${sheetTypes}`);
-        const seen = new Set(files.map(f => f.id));
-        extra.forEach(f => { if (!seen.has(f.id)) files.push(f); });
-      } catch (e) { /* the primary list still stands */ }
+    // The fallback pass re-enters this function, and without a cache it re-ran the same searches
+    // and the same ancestry walk a second time — doubling an already slow connect for nothing.
+    const cacheKey = includeBackups ? 'all' : 'src';
+    if (_masterSearchCache && _masterSearchCache.key === cacheKey && Date.now() - _masterSearchCache.at < 20000) {
+      files = _masterSearchCache.files;
+    } else {
+      try { files = await driveSearchFiles(`name contains 'Master' and trashed=false and ${sheetTypes}`); }
+      catch (e) { /* fall through to the walk below */ }
+      if (includeBackups) {
+        // Tool copies no longer carry the word "Master", so the fallback pass has to ask for them by
+        // their own name or it would come back empty.
+        try {
+          const extra = await driveSearchFiles(`name contains '${TOOL_COPY_PREFIX}' and trashed=false and ${sheetTypes}`);
+          const seen = new Set(files.map(f => f.id));
+          extra.forEach(f => { if (!seen.has(f.id)) files.push(f); });
+        } catch (e) { /* the primary list still stands */ }
+      }
+      _masterSearchCache = { key: cacheKey, files, at: Date.now() };
     }
     const skipFolder = includeBackups ? '' : await backupFolderId();
     const nameOk = includeBackups ? isMasterOrToolCopyName : isMasterFileName;
@@ -2807,6 +2851,8 @@ async function connectFolderInner(existingHandle, forceNew) {
     if (forceNew || (savedRootHandle && warmIdOf(savedRootHandle) !== warmIdOf(dirHandle))) {
       piInvoiceCatalog = null;
       rootPdfCatalog = null;
+      _backupFolderIdCache = null;   // the backup folder lives INSIDE the connected folder
+      _masterSearchCache = null;
       driveListCache.clear();
     }
     savedRootHandle = dirHandle;
