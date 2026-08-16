@@ -2412,8 +2412,24 @@ async function idbSet(key, value) {
 // So the master is now RE-FOUND on every connect and the newest one wins. On Drive that is a
 // single search call — no folder walk, so this costs a fraction of a second, not minutes.
 const MASTER_NAME_RE = /master/i;
+const TOOL_COPY_PREFIX = 'Olisa Tools Copy';
+// A usable spreadsheet: not Excel's ~$ lock artifact, not a half-written .tmp.
+function isSpreadsheetName(name) {
+  return /\.(xlsx|xls)$/i.test(name) && !/^~\$/.test(String(name)) && !/\.tmp$/i.test(name);
+}
+// Anything THIS tool wrote. Tested by name as well as by folder, so a copy that gets moved,
+// re-uploaded, or downloaded and put back still cannot be mistaken for Olisa's file.
+function isToolCopyName(name) {
+  return /^\s*olisa\s*tools\s*copy\b/i.test(String(name));
+}
+// A SOURCE Master File: Olisa's, never ours.
 function isMasterFileName(name) {
-  return MASTER_NAME_RE.test(name) && /\.(xlsx|xls)$/i.test(name) && !/^~\$/.test(name) && !/\.tmp$/i.test(name);
+  return isSpreadsheetName(name) && MASTER_NAME_RE.test(name) && !isToolCopyName(name);
+}
+// Last-resort pass only: a folder holding nothing but tool output must still open rather than
+// dead-end, so that pass accepts our own copies too.
+function isMasterOrToolCopyName(name) {
+  return isSpreadsheetName(name) && (MASTER_NAME_RE.test(name) || isToolCopyName(name));
 }
 // "Olisa Master Inventory — 09-08-2026, 04-28 pm — v9.xlsx" -> version 9. Used only to break a tie
 // between two files modified within a couple of minutes of each other, which is what a sync burst
@@ -2431,30 +2447,114 @@ function newerMaster(a, b) {   // is a newer than b?
   if (ra.v !== rb.v) return ra.v > rb.v;                     // same sync burst: higher v wins
   return ra.t > rb.t;
 }
+// Drive search is ACCOUNT-WIDE — it cannot be told "only under this folder". Left unchecked, any
+// spreadsheet in the whole account (or shared into it) whose name contains "master" could have
+// been adopted as THE Master File. So the winner must prove its ancestry: walk parent ids upward
+// until the connected root appears, or give up after a sane depth. Results are cached per session
+// because the same parent chain gets asked about repeatedly.
+const _ancestryCache = new Map();   // folderId -> parent folderId | null
+async function isUnderDriveFolder(startParents, rootId) {
+  if (!rootId) return true;
+  let frontier = (startParents || []).slice(0, 4);
+  for (let depth = 0; depth < 10 && frontier.length; depth++) {
+    if (frontier.includes(rootId)) return true;
+    const next = [];
+    for (const id of frontier) {
+      if (_ancestryCache.has(id)) {
+        const p = _ancestryCache.get(id);
+        if (p) next.push(...p);
+        continue;
+      }
+      try {
+        const j = await driveFetch(`https://www.googleapis.com/drive/v3/files/${id}?fields=parents&supportsAllDrives=true`);
+        const ps = (j && j.parents) || [];
+        _ancestryCache.set(id, ps);
+        next.push(...ps);
+      } catch (e) { _ancestryCache.set(id, null); }
+    }
+    frontier = next.slice(0, 8);
+  }
+  return false;
+}
 // Returns { handle, name, modifiedMs, id } for the newest master, or null.
-async function findNewestMaster(dirHandle, onProgress) {
+// ==================== INPUT vs OUTPUT: THE TWO LINEAGES ====================
+// There are two kinds of "Master Inventory" file in the Drive and they must never be confused:
+//
+//   SOURCE  — Olisa's file, the one edited on the laptop and synced up by Drive Desktop. This is
+//             the only real INPUT. It is what the tool must read.
+//   BACKUP  — what THIS tool writes into "Latest Master Inventory Files" after an edit, built from
+//             the source bytes with the Update column filled in. Pure OUTPUT.
+//
+// backupFileName() USED to produce "Olisa Master Inventory — 16-08-2026, 01-39 pm — v11.xlsx",
+// character-for-character the same shape as the source file's name. A name-based search could not
+// tell them apart, and since a backup is written ~10s after every edit it was almost always the
+// newest file in the account — so the tool kept adopting its OWN output as its input. Copies are
+// now named "Olisa Tools Copy — ... — vN.xlsx" (see backupFileName), which fixes it by name; the
+// folder rule below stays as the primary guard, because copies written before the rename still
+// carry the old ambiguous name and can only be recognised by where they live.
+//
+// That is not merely circular, it LOSES DATA. Suppose the laptop syncs an updated source at 13:04
+// and an edit in the tool triggers a backup at 13:05. The backup was built from the 13:00 bytes,
+// so it does not contain the 13:04 changes — yet it is newer, so it wins forever and the 13:04
+// laptop edit is never loaded. Silent, permanent, and exactly the confusion being reported.
+//
+// The fix is to decide by LOCATION rather than by name: anything inside the backup folder is
+// output and is ignored when looking for a source. Nothing is lost by ignoring it, because every
+// update note lives in the tool's own storage (remarkOverrides) and is written afresh into each
+// backup — the versioned copy is the source data plus those notes, never a separate truth.
+let _backupFolderIdCache = null;
+async function backupFolderId() {
+  if (_backupFolderIdCache !== null) return _backupFolderIdCache;
+  if (!(savedRootHandle && savedRootHandle.isDrive)) return (_backupFolderIdCache = '');
+  try {
+    const q = encodeURIComponent(`name='${BACKUP_FOLDER_NAME}' and '${savedRootHandle.id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+    const r = await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)&supportsAllDrives=true`);
+    _backupFolderIdCache = (r.files && r.files[0] && r.files[0].id) || '';
+  } catch (e) { _backupFolderIdCache = ''; }   // not created yet — nothing to exclude
+  return _backupFolderIdCache;
+}
+async function findNewestMaster(dirHandle, onProgress, includeBackups) {
   let best = null;
   const consider = c => { if (c && (!best || newerMaster(c, best))) best = c; };
   if (dirHandle && dirHandle.isDrive) {
     if (onProgress) onProgress('Checking Drive for the latest Master File\u2026');
-    // One search across the account. Drive has no "search under this folder recursively", but the
-    // name is distinctive enough that this is precise, and it is vastly cheaper than any walk.
-    const q = "name contains 'Master' and trashed=false and (mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' or mimeType='application/vnd.ms-excel')";
+    const sheetTypes = "(mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' or mimeType='application/vnd.ms-excel')";
     let files = [];
-    try { files = await driveSearchFiles(q); } catch (e) { /* fall through to the walk below */ }
-    for (const f of files) {
-      if (!isMasterFileName(f.name)) continue;
-      consider({
-        handle: new DriveFileHandle(f), name: f.name, id: f.id,
-        modifiedMs: f.modifiedTime ? Date.parse(f.modifiedTime) : 0
-      });
+    try { files = await driveSearchFiles(`name contains 'Master' and trashed=false and ${sheetTypes}`); }
+    catch (e) { /* fall through to the walk below */ }
+    if (includeBackups) {
+      // Tool copies no longer carry the word "Master", so the fallback pass has to ask for them by
+      // their own name or it would come back empty.
+      try {
+        const extra = await driveSearchFiles(`name contains '${TOOL_COPY_PREFIX}' and trashed=false and ${sheetTypes}`);
+        const seen = new Set(files.map(f => f.id));
+        extra.forEach(f => { if (!seen.has(f.id)) files.push(f); });
+      } catch (e) { /* the primary list still stands */ }
     }
-    if (best) return best;
+    const skipFolder = includeBackups ? '' : await backupFolderId();
+    const nameOk = includeBackups ? isMasterOrToolCopyName : isMasterFileName;
+    const cands = files
+      .filter(f => nameOk(f.name))
+      .filter(f => !skipFolder || !(f.parents || []).includes(skipFolder))
+      .map(f => ({
+        handle: new DriveFileHandle(f), name: f.name, id: f.id, parents: f.parents,
+        modifiedMs: f.modifiedTime ? Date.parse(f.modifiedTime) : 0
+      }))
+      .sort((a, b) => (newerMaster(a, b) ? -1 : 1));
+    // Newest first, but only a file that provably lives under the connected folder is accepted.
+    for (const c of cands) {
+      if (await isUnderDriveFolder(c.parents, dirHandle.id)) return c;
+    }
+    // No SOURCE anywhere? Then a backup is better than nothing — a folder holding only tool output
+    // (or a first run before Olisa's file is in place) must still open rather than dead-end.
+    if (!includeBackups && skipFolder) return findNewestMaster(dirHandle, onProgress, true);
+    // Nothing under the root matched by search — fall through to the folder walk, which is
+    // scoped to the root by construction.
   }
   // Local folder mode, or Drive search unavailable: walk, but collect EVERY match and compare,
   // instead of stopping at the first one the way the old code did.
   const all = [];
-  await collectMasterCandidates(dirHandle, 6, 0, all);
+  await collectMasterCandidates(dirHandle, 6, 0, all, null, includeBackups);
   for (const c of all) {
     let ms = c.modifiedMs;
     if (ms === undefined) {
@@ -2462,15 +2562,16 @@ async function findNewestMaster(dirHandle, onProgress) {
     }
     consider({ handle: c.handle, name: c.name, id: c.id || null, modifiedMs: ms });
   }
+  if (!best && !includeBackups) return findNewestMaster(dirHandle, onProgress, true);
   return best;
 }
-async function collectMasterCandidates(dir, maxDepth, depth, out, diag) {
+async function collectMasterCandidates(dir, maxDepth, depth, out, diag, includeBackups) {
   if (!dir) return;
   try {
     for await (const [name, handle] of dir.entries()) {
       if (handle.kind === 'file') {
         if (diag && /\.(xlsx|xls)$/i.test(name)) diag.xlsxSeen.push(name);
-        if (isMasterFileName(name)) {
+        if (includeBackups ? isMasterOrToolCopyName(name) : isMasterFileName(name)) {
           out.push({
             name, handle,
             id: handle.meta && handle.meta.id,
@@ -2478,7 +2579,9 @@ async function collectMasterCandidates(dir, maxDepth, depth, out, diag) {
           });
         }
       } else if (handle.kind === 'directory' && depth < maxDepth) {
-        await collectMasterCandidates(handle, maxDepth, depth + 1, out, diag);
+        // Same rule locally: the tool's own output folder is not a source of truth.
+        if (!includeBackups && name === BACKUP_FOLDER_NAME) continue;
+        await collectMasterCandidates(handle, maxDepth, depth + 1, out, diag, includeBackups);
       }
     }
   } catch (e) { if (diag) diag.errors.push(`${dir.name}: ${e.message}`); }
@@ -2578,14 +2681,28 @@ let currentMasterMeta = null;
 const MASTER_POLL_MS = 120000;
 let masterPollTimer = null;
 let masterPollBusy = false;
+// Identity of the last file THIS tool uploaded, so the watcher can tell its own writes apart from
+// a genuine update synced in from the laptop.
+let lastSelfUpload = null;
 async function checkForNewerMaster(announce) {
   if (masterPollBusy || !savedRootHandle || !currentMasterMeta) return false;
   if (typeof indexBuilding !== 'undefined' && indexBuilding) return false;   // never fight a build
   if (connectInFlight) return false;
+  // An edit is being saved right now, or is about to be (the 10s timer is pending). Reloading the
+  // master in that window would re-parse everything out from under the save. Wait for the next
+  // poll — the save itself updates currentMasterMeta when it lands.
+  if (typeof backupInFlight !== 'undefined' && backupInFlight) return false;
+  if (typeof backupTimer !== 'undefined' && backupTimer) return false;
   masterPollBusy = true;
   try {
     const newest = await findNewestMaster(savedRootHandle);
     if (!newest) return false;
+    // The tool's own save: the app built that file from what is already in memory, so there is
+    // nothing to load — just make sure the bookkeeping agrees and stay quiet.
+    if (lastSelfUpload && newest.id && newest.id === lastSelfUpload.id) {
+      currentMasterMeta = { id: newest.id, name: newest.name, modifiedMs: newest.modifiedMs };
+      return false;
+    }
     const changed = (newest.id && currentMasterMeta.id && newest.id !== currentMasterMeta.id)
       || newest.name !== currentMasterMeta.name
       || (newest.modifiedMs && currentMasterMeta.modifiedMs && newest.modifiedMs > currentMasterMeta.modifiedMs);
@@ -2596,10 +2713,17 @@ async function checkForNewerMaster(announce) {
     await loadFile(file);
     currentMasterMeta = { id: newest.id, name: newest.name, modifiedMs: newest.modifiedMs };
     if (masterFileBytes) await saveWarmSession(savedRootHandle, masterFileName, masterFileBytes);
+    // Edits made in the tool (remarks, settled-by-agreement, manual challan statuses) live in the
+    // tool's own storage, NOT only in the uploaded copy — so loading Olisa's fresh file loses none
+    // of them. Re-saving now writes them straight onto the new file, which keeps the copy in
+    // "Latest Master Inventory Files" complete: newest data plus every update note.
+    const editCount = (typeof remarkOverrides === 'object' && remarkOverrides) ? Object.keys(remarkOverrides).length : 0;
+    if (editCount && typeof scheduleMasterBackup === 'function') scheduleMasterBackup();
     if (announce !== false) {
       loadStatus.textContent = `Master File updated to "${file.name}" \u2014 loaded automatically just now.`;
       loadStatus.className = 'status ok';
-      if (typeof notify === 'function') notify('drive', `A newer Master File appeared in Drive ("${file.name}") and was loaded automatically.`);
+      if (typeof notify === 'function') notify('drive', `A newer Master File appeared in Drive ("${file.name}") and was loaded automatically.`
+        + (editCount ? ` Your ${editCount} update note(s) are kept and will be written into the next saved copy.` : ''));
       if (typeof toast === 'function') toast('Master File updated to the latest version', 4000);
     }
     if (typeof renderHealth === 'function') renderHealth();
@@ -3061,7 +3185,7 @@ async function driveSearchFiles(query) {
   let pageToken = '';
   do {
     const q = encodeURIComponent(query);
-    const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=nextPageToken,files(id,name,mimeType,size,modifiedTime)&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true${pageToken ? '&pageToken=' + pageToken : ''}`;
+    const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=nextPageToken,files(id,name,mimeType,size,modifiedTime,parents)&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true${pageToken ? '&pageToken=' + pageToken : ''}`;
     const j = await driveFetch(url);
     (j.files || []).forEach(f => out.push(f));
     pageToken = j.nextPageToken || '';
@@ -3153,6 +3277,38 @@ async function findInvoiceByPiSearch(ref) {
 // swallowing it — a standalone PWA does not always hand blob downloads to the browser's download
 // manager. Handing the archive to an ordinary browser tab does go through that manager, and that
 // is what makes the notification appear. Offered only when it's needed, not as a standing button.
+// A browser gives a page no way to know what its own download manager did with a file, and on a
+// desktop the little shelf notification is easy to miss entirely. So the tool says so itself: one
+// clear confirmation naming the file, the count and where it went. Auto-dismisses, click to close.
+function showDownloadComplete(fileName, count, bytes, toChosenFolder) {
+  const old = document.getElementById('dlDoneToast');
+  if (old) old.remove();
+  const el = document.createElement('div');
+  el.id = 'dlDoneToast';
+  el.style.cssText = 'position:fixed;left:50%;top:22px;transform:translateX(-50%) translateY(-14px);'
+    + 'background:#fff;border:1.5px solid #10B981;border-left:6px solid #10B981;border-radius:13px;'
+    + 'box-shadow:0 14px 44px rgba(15,37,64,.22);padding:13px 17px;z-index:9995;max-width:min(440px,92vw);'
+    + 'font:500 13px Outfit,Arial,sans-serif;color:var(--ink);opacity:0;transition:opacity .18s,transform .18s;cursor:pointer;';
+  el.innerHTML =
+    `<div style="display:flex;gap:11px;align-items:flex-start;">`
+    + `<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="#10B981" stroke-width="2.4" style="flex:0 0 auto;margin-top:1px;"><circle cx="12" cy="12" r="10"/><path d="M8 12.5l2.6 2.6L16 9.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`
+    + `<div style="min-width:0;">`
+    + `<div style="font-weight:800;font-size:14.5px;">Download Complete!</div>`
+    + `<div style="margin-top:3px;word-break:break-word;">${escHtml(fileName)}</div>`
+    + `<div style="margin-top:3px;color:var(--sub);font-size:12px;">`
+    + `${count} Proforma Invoice(s) \u00b7 ${(bytes / 1048576).toFixed(1)} MB \u00b7 `
+    + (toChosenFolder ? 'saved to the folder you chose' : 'saved to your Downloads folder')
+    + `</div></div></div>`;
+  document.body.appendChild(el);
+  requestAnimationFrame(() => { el.style.opacity = '1'; el.style.transform = 'translateX(-50%) translateY(0)'; });
+  const kill = () => {
+    el.style.opacity = '0'; el.style.transform = 'translateX(-50%) translateY(-14px)';
+    setTimeout(() => el.remove(), 220);
+  };
+  el.onclick = kill;
+  setTimeout(kill, 7000);
+}
+
 function offerPhoneFallback(msgEl, blob) {
   if (!msgEl) return;
   const isStandalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches)
@@ -3399,6 +3555,7 @@ function openPiDownloadModal() {
       }
       progText.textContent = 'Done.';
       if (typeof notifyDownload === 'function') notifyDownload(lastZipName);
+      showDownloadComplete(lastZipName, filesAdded, blob.size, !!pickedFileHandle);
       result.innerHTML =
         `<div style="color:var(--good);font-weight:700;">${escHtml(lastZipName)}</div>`
         + `<div class="sub-note" style="margin-top:3px;">${filesAdded} Proforma Invoice(s), ${(blob.size / 1048576).toFixed(1)} MB. ${where}</div>`
@@ -3832,12 +3989,17 @@ async function buildUpdatedMasterBlob() {
   const out = await wb.xlsx.writeBuffer();
   return { blob: new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), patched };
 }
+// The tool's output is named so that neither you nor the code can mistake it for Olisa's file. It
+// used to be "Olisa Master Inventory - <date> - vN.xlsx", the exact same shape as the source, which
+// is what let the tool adopt its own output as its input. Folder location already separates them;
+// this makes it obvious at a glance too, and keeps working if a copy is ever moved out of that
+// folder. The trailing "- vN.xlsx" is unchanged, so the running version count carries over.
 function backupFileName(version) {
   const d = new Date();
   const pad = n => String(n).padStart(2, '0');
   const h12 = d.getHours() % 12 || 12;
   const ap = d.getHours() < 12 ? 'am' : 'pm';
-  return `Olisa Master Inventory \u2014 ${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d.getFullYear()}, ${pad(h12)}-${pad(d.getMinutes())} ${ap} \u2014 v${version}.xlsx`;
+  return `${TOOL_COPY_PREFIX} \u2014 ${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d.getFullYear()}, ${pad(h12)}-${pad(d.getMinutes())} ${ap} \u2014 v${version}.xlsx`;
 }
 // Everything currently sitting in the backup folder, newest first.
 async function listBackupFiles(folderId) {
@@ -3890,7 +4052,7 @@ async function backupMasterToDriveInner(silent) {
     form.append('metadata', new Blob([JSON.stringify(meta)], { type: 'application/json' }));
     form.append('file', blob);
     if (!driveToken) await requestDriveToken(false);
-    const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name&supportsAllDrives=true', {
+    const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,modifiedTime&supportsAllDrives=true', {
       method: 'POST', headers: { Authorization: 'Bearer ' + driveToken }, body: form
     });
     if (!res.ok) {
@@ -3906,6 +4068,17 @@ async function backupMasterToDriveInner(silent) {
     // version number in the name is what carries the history forward.
     const fresh = await res.json().catch(() => null);
     const keepId = fresh && fresh.id;
+    // This upload IS the current master now — it was built from the in-memory data, so the file
+    // and the app already agree. Recording that here is what stops the freshness watcher from
+    // "discovering" the tool's own save two minutes later, re-downloading it and announcing
+    // "Master File updated automatically" for a change YOU just made — which is precisely the
+    // confusing message this used to produce.
+    if (keepId) {
+      // Record it as OUR OWN OUTPUT only. currentMasterMeta must keep pointing at the SOURCE file
+      // this copy was built from — repointing it at the backup made the watcher see "loaded id
+      // differs from newest source id" on every single poll and reload the source over and over.
+      lastSelfUpload = { id: keepId, name: (fresh && fresh.name) || name, at: Date.now() };
+    }
     let removed = 0;
     for (const f of existing) {
       if (keepId && f.id === keepId) continue;
@@ -3942,14 +4115,14 @@ async function downloadLatestMasterFile() {
         const pick = files.slice().sort((a, b) => versionInName(b.name) - versionInName(a.name) ||
           Date.parse(b.modifiedTime || 0) - Date.parse(a.modifiedTime || 0))[0];
         const blob = await driveFetch(`https://www.googleapis.com/drive/v3/files/${pick.id}?alt=media&supportsAllDrives=true`, true);
-        saveBlobAs(blob, OUT_NAME);
+        saveBlobAs(blob, OUT_NAME, true);   // exact name — the instructions tell you to put this back as-is
         notify('download', `Downloaded "${OUT_NAME}" (from "${BACKUP_FOLDER_NAME}/${pick.name}"). Edit it, then put it back in the Olisa folder under the same name.`);
         return;
       }
     }
     // Local mode, or nothing on Drive yet: build it from what is loaded right now.
     const { blob, patched } = await buildUpdatedMasterBlob();
-    saveBlobAs(blob, OUT_NAME);
+    saveBlobAs(blob, OUT_NAME, true);   // exact name — the instructions tell you to put this back as-is
     notify('download', `Downloaded "${OUT_NAME}" (${patched} line(s) written in, built from the copy loaded here).`);
   } catch (e) {
     notify('error', `Could not download the Master File: ${e.message}`);
@@ -3972,11 +4145,19 @@ async function downloadLatestMasterFile() {
 //   * saveBlobTo() below offers the real destination pickers where the browser has them.
 const OLISA_FILE_PREFIX = 'Olisa Tools - ';
 function olisaFileName(name) {
-  const n = String(name || 'file');
-  return n.indexOf(OLISA_FILE_PREFIX) === 0 ? n : OLISA_FILE_PREFIX + n.replace(/^Olisa[_\s-]*/i, '');
+  const n = String(name || 'file').trim();
+  if (n.indexOf(OLISA_FILE_PREFIX) === 0) return n;
+  // "Olisa Tools Copy - ..." is already unmistakable; prefixing it again produced the nonsense
+  // "Olisa Tools - Tools Copy - ...".
+  if (/^olisa\s*tools\b/i.test(n)) return n;
+  return OLISA_FILE_PREFIX + n.replace(/^Olisa[_\s-]*/i, '');
 }
-function saveBlobAs(blob, name) {
-  const fileName = olisaFileName(name);
+function saveBlobAs(blob, name, exact) {
+  // exact=true keeps the name untouched. "Olisa Inventory Master File.xlsx" is the name the tool
+  // tells you to put back in the Olisa folder, so renaming it to "Olisa Tools - Inventory Master
+  // File.xlsx" would have made those instructions wrong — and the renamed file would then have
+  // been read straight back in as a SOURCE.
+  const fileName = exact ? String(name) : olisaFileName(name);
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url; a.download = fileName;
@@ -8212,7 +8393,7 @@ async function driveListChildren(folderId) {
   let pageToken = '';
   do {
     const q = encodeURIComponent(`'${folderId}' in parents and trashed=false`);
-    const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=nextPageToken,files(id,name,mimeType,size,modifiedTime)&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true${pageToken ? '&pageToken=' + pageToken : ''}`;
+    const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=nextPageToken,files(id,name,mimeType,size,modifiedTime,parents)&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true${pageToken ? '&pageToken=' + pageToken : ''}`;
     const j = await driveFetch(url);
     (j.files || []).forEach(f => out.push(f));
     pageToken = j.nextPageToken || '';
