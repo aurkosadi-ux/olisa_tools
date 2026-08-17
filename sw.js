@@ -4,7 +4,7 @@
 /* Bump this on EVERY release. The name is the only thing that evicts the old cache: the activate
    handler deletes every cache whose key isn't this one. It sat on v24 through three releases,
    which left anyone opening the app offline on a stale build. */
-const CACHE = 'olisa-tools-v36';
+const CACHE = 'olisa-tools-v39';
 const SHELL = ['./', './index.html', './olisa.html', './calculator.html', './manifest.json', './icon-192.png', './icon-512.png', './calc-icon-512.png', './apple-touch-icon.png'];
 
 self.addEventListener('install', e => {
@@ -36,7 +36,7 @@ self.addEventListener('fetch', e => {
   if (url.hostname.includes('cdnjs.cloudflare.com') || url.hostname.includes('fonts.g')) {
     // libraries/fonts: cache-first (they're versioned URLs)
     e.respondWith(caches.open(CACHE).then(async c =>
-      (await c.match(e.request)) || fetch(e.request).then(r => { if (r.ok) c.put(e.request, r.clone()); return r; })
+      (await c.match(e.request)) || fetch(e.request).then(r => { if (r.status === 200) c.put(e.request, r.clone()); return r; })
     ));
     return;
   }
@@ -47,7 +47,10 @@ self.addEventListener('fetch', e => {
     e.respondWith(
       fetch(e.request)
         .then(r => {
-          if (r.ok && r.type === 'basic') {
+          // r.ok spans 200-299, which includes 206 Partial Content. Caching a partial body under
+          // the full URL hands back a truncated file on the next load, and a range request is the
+          // one case where that can happen — so require a plain 200 and no Range header.
+          if (r.status === 200 && r.type === 'basic' && !e.request.headers.has('range')) {
             const copy = r.clone();
             e.waitUntil(caches.open(CACHE).then(c => c.put(e.request, copy)).catch(() => {}));
           }

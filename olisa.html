@@ -452,7 +452,7 @@
      notice that Drive reads will fail. Reverts the instant the connection returns. */
   body.is-offline { background: #2A1214 !important; }
   body.is-offline::before { content:''; position:fixed; inset:0; background:rgba(225,77,77,.13); pointer-events:none; z-index:8000; }
-  body.is-offline .card, body.is-offline .tabsbar, body.is-offline .panel { border-color:#E14D4D !important; }
+  body.is-offline .card, body.is-offline .tabbar, body.is-offline .panel { border-color:#E14D4D !important; }
   body.is-offline .offbanner { display:flex; }
   .offbanner { display:none; position:fixed; left:0; right:0; top:0; z-index:9600; background:#E14D4D; color:#fff;
     font-weight:800; font-size:13px; padding:9px 14px; align-items:center; justify-content:center; gap:8px; letter-spacing:.2px; }
@@ -2504,13 +2504,15 @@ async function isUnderDriveFolder(startParents, rootId) {
     }
     frontier = next.slice(0, 8);
   }
-  // A walk that reached the top of the tree without meeting the connected folder is a real NO, and
-  // is honoured. An inconclusive one — timed out, depth-capped, or a metadata call failed — is
-  // treated as a YES, because rejecting cascades into a full-Drive folder walk: minutes of work
-  // ending with no Master File at all, which is far worse than occasionally accepting a
-  // correctly-named file whose ancestry could not be proven in time.
-  return !conclusive;
+  // Three answers, not two. A walk that reached the top of the tree without meeting the connected
+  // folder is a real NO and is honoured. One that ran out of time, depth or network says so
+  // explicitly, and the caller decides — it prefers any proven candidate and only falls back to an
+  // unproven one when there is no alternative, naming it on screen when it does.
+  return conclusive ? false : 'unproven';
 }
+// Set when a Master File was loaded without proving it sits under the connected folder. Surfaced
+// in the status line so an unexpected file can never be adopted quietly.
+let masterOriginWarning = null;
 // Returns { handle, name, modifiedMs, id } for the newest master, or null.
 // ==================== INPUT vs OUTPUT: THE TWO LINEAGES ====================
 // There are two kinds of "Master Inventory" file in the Drive and they must never be confused:
@@ -2550,6 +2552,7 @@ async function backupFolderId() {
   return _backupFolderIdCache;
 }
 async function findNewestMaster(dirHandle, onProgress, includeBackups) {
+  if (!includeBackups) masterOriginWarning = null;   // a fresh verdict each time it is asked
   let best = null;
   const consider = c => { if (c && (!best || newerMaster(c, best))) best = c; };
   if (dirHandle && dirHandle.isDrive) {
@@ -2585,9 +2588,21 @@ async function findNewestMaster(dirHandle, onProgress, includeBackups) {
         modifiedMs: f.modifiedTime ? Date.parse(f.modifiedTime) : 0
       }))
       .sort((a, b) => (newerMaster(a, b) ? -1 : 1));
-    // Newest first, but only a file that provably lives under the connected folder is accepted.
+    // Newest first. A file PROVEN to live under the connected folder always wins. One whose
+    // ancestry could not be established — timed out, depth-capped, or a metadata call failed — is
+    // held back and only used if nothing proven exists at all, and it is named in the status line
+    // when that happens. Rejecting outright is what used to cascade into a full-Drive walk (twenty
+    // seconds, ending in no Master File); accepting freely is what could adopt a stranger's
+    // spreadsheet. Neither is necessary: prefer proven, fall back to unproven, and say so.
+    let unproven = null;
     for (const c of cands) {
-      if (await isUnderDriveFolder(c.parents, dirHandle.id)) return c;
+      const verdict = await isUnderDriveFolder(c.parents, dirHandle.id);
+      if (verdict === true) return c;
+      if (verdict === 'unproven' && !unproven) unproven = c;
+    }
+    if (unproven) {
+      masterOriginWarning = unproven.name;
+      return unproven;
     }
     // No SOURCE anywhere? Then a backup is better than nothing — a folder holding only tool output
     // (or a first run before Olisa's file is in place) must still open rather than dead-end.
@@ -2976,6 +2991,9 @@ async function connectFolderInner(existingHandle, forceNew) {
         const mAge = currentMasterMeta && currentMasterMeta.modifiedMs
           ? ` \u2014 updated ${stampText(currentMasterMeta.modifiedMs)}, ${agoText(currentMasterMeta.modifiedMs)}` : '';
         bits.push(`Master File loaded ("${file.name}"${mAge})`);
+        if (masterOriginWarning === file.name) {
+          bits.push(`\u26a0 could not confirm this file sits inside "${dirHandle.name}" \u2014 check it is the right one`);
+        }
       } else {
         bits.push(`Found "${file.name}" (matches "master") but it isn't an Excel file, so it wasn't loaded`);
       }
@@ -3326,6 +3344,79 @@ async function findInvoiceByPiSearch(ref) {
 // A browser gives a page no way to know what its own download manager did with a file, and on a
 // desktop the little shelf notification is easy to miss entirely. So the tool says so itself: one
 // clear confirmation naming the file, the count and where it went. Auto-dismisses, click to close.
+// Which device is this? It decides zip vs separate PDFs, so it has to be conservative: a
+// Windows laptop must never be mistaken for a phone. Three signals have to agree that this is a
+// phone or tablet — a mobile user-agent, no fine pointer (no mouse), and a touch screen. A desktop
+// with a touchscreen still has a mouse, so it correctly stays on the archive path. Anything
+// uncertain falls back to the computer behaviour, because a zip on a laptop is merely tidy-or-not,
+// whereas a hundred separate downloads on a laptop is a mess.
+function isPhoneDevice() {
+  const ua = String(navigator.userAgent || '');
+  const uaMobile = /Android|iPhone|iPod|iPad|Windows Phone|BlackBerry|Opera Mini|IEMobile/i.test(ua)
+    // iPadOS reports itself as a Mac; the touch points give it away.
+    || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+  if (!uaMobile) return false;
+  const coarse = !window.matchMedia || window.matchMedia('(any-pointer: coarse)').matches;
+  const noMouse = !window.matchMedia || !window.matchMedia('(any-pointer: fine)').matches;
+  const touch = (navigator.maxTouchPoints || 0) > 0 || 'ontouchstart' in window;
+  return coarse && noMouse && touch;
+}
+
+// ==================== DOCUMENT-DERIVED HTML IS NOT TRUSTED ====================
+// Mammoth turns a .docx into HTML and SheetJS turns a sheet into a <table>. Both outputs come from
+// a file, and a file can carry markup that was never meant to run here. Assigning either straight
+// to innerHTML puts that markup on this origin — the same origin holding the Drive session — so
+// everything is stripped to the small set of tags a preview actually needs. Scripts, iframes,
+// objects, event handlers and javascript: URLs cannot survive this.
+const PREVIEW_ALLOWED_TAGS = new Set([
+  'DIV', 'SPAN', 'P', 'BR', 'HR', 'B', 'STRONG', 'I', 'EM', 'U', 'S', 'SUP', 'SUB', 'SMALL',
+  'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'UL', 'OL', 'LI', 'BLOCKQUOTE', 'PRE', 'CODE',
+  'TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'TD', 'TH', 'CAPTION', 'COLGROUP', 'COL', 'A'
+]);
+const PREVIEW_ALLOWED_ATTRS = new Set(['colspan', 'rowspan', 'align', 'valign', 'class']);
+function sanitizeDocHtml(dirty) {
+  // Parsed in an inert document: no scripts run, no images fetch, nothing loads while we inspect it.
+  const doc = new DOMParser().parseFromString(String(dirty || ''), 'text/html');
+  const walk = node => {
+    // Walked as a live list, not a snapshot. When a disallowed wrapper is unwrapped its children
+    // move up into this level — and with a snapshot those children sat BEFORE the cursor and were
+    // never examined, so a <button formaction> inside a stripped <form> came through untouched.
+    let child = node.firstChild;
+    while (child) {
+      const after = child.nextSibling;
+      if (child.nodeType === 3) { child = after; continue; }              // text is fine
+      if (child.nodeType !== 1) { child.remove(); child = after; continue; } // comments, CDATA, etc.
+      if (!PREVIEW_ALLOWED_TAGS.has(child.tagName)) {
+        // Keep what the element WRAPPED, drop the element itself — so an unknown wrapper loses its
+        // powers without silently deleting the document's text. Resume at the first lifted node so
+        // everything that just moved up gets the same scrutiny.
+        const resume = child.firstChild || after;
+        const parent = child.parentNode;
+        while (child.firstChild) parent.insertBefore(child.firstChild, child);
+        child.remove();
+        child = resume;
+        continue;
+      }
+      for (const attr of Array.from(child.attributes)) {
+        const name = attr.name.toLowerCase();
+        if (name === 'href' && child.tagName === 'A') {
+          // Only plain, non-executable links survive.
+          if (!/^(https?:|mailto:)/i.test(attr.value.trim())) child.removeAttribute(attr.name);
+          else { child.setAttribute('target', '_blank'); child.setAttribute('rel', 'noopener noreferrer'); }
+          continue;
+        }
+        if (!PREVIEW_ALLOWED_ATTRS.has(name)) child.removeAttribute(attr.name);  // on*, style, src, srcset…
+      }
+      walk(child);
+      child = after;
+    }
+  };
+  walk(doc.body);
+  return doc.body.innerHTML;
+}
+
+// A browser gives a page no way to know what its own download manager did with a file, so the tool
+// says so itself: one clear confirmation naming the file, the count and where it went.
 function showDownloadComplete(fileName, count, bytes, toChosenFolder) {
   const old = document.getElementById('dlDoneToast');
   if (old) old.remove();
@@ -3418,8 +3509,7 @@ function openPiDownloadModal() {
   const progText = wrap.querySelector('#piDlProgText');
   const result = wrap.querySelector('#piDlResult');
   let running = false, stopped = false;
-  // Kept so "Save to a folder…" can re-offer the SAME archive without rebuilding it.
-  let lastZipBlob = null, lastZipName = '';
+
 
   function close() {
     if (running) { stopped = true; return; }   // a run in progress must be stopped, not orphaned
@@ -3445,6 +3535,14 @@ function openPiDownloadModal() {
       : `<span style="color:var(--bad);">${escHtml(errors.join(' ') || 'No PI numbers found in that.')}</span>`;
   });
   setTimeout(() => input.focus(), 40);
+  // Say plainly what this device will do, so there is never a question of which behaviour applies.
+  if (isPhoneDevice()) {
+    pickBtn.textContent = 'Choose folder & save';
+    pickBtn.title = 'Pick a folder — each PI is saved into it as its own PDF';
+  } else {
+    pickBtn.textContent = 'Choose folder & save';
+    pickBtn.title = 'Pick where to save — all the invoices arrive as one .zip archive';
+  }
 
   async function run(usePicker) {
     if (running) return;
@@ -3458,25 +3556,46 @@ function openPiDownloadModal() {
     // the user gesture that opened it, and a gesture does not survive the seconds it takes to
     // fetch and pack the invoices — asking afterwards is what produced "the browser blocked the
     // share sheet". Folder now, download second, exactly as it should read.
-    let pickedFileHandle = null;
+    // ONE ARCHIVE ON A COMPUTER, SEPARATE PDFs ON A PHONE.
+    // A laptop handles a .zip fine and a single file is far tidier than a hundred downloads. A
+    // phone is the opposite: the zip either can't be opened where it lands or isn't visible at all,
+    // which is what went wrong before. So the device decides, not the button.
+    const phone = isPhoneDevice();
+    let pickedFileHandle = null;   // desktop: the .zip to write
+    let pickedDirHandle = null;    // phone: the folder to drop each PDF into
     if (usePicker) {
-      if (!canPickSaveLocation()) {
-        result.innerHTML = `<span style="color:var(--bad);">This browser can't open a folder picker.</span>`
-          + `<div class="sub-note" style="margin-top:5px;">Phone browsers don't offer one. Use <b>ALL PI Download</b> \u2014 it goes to your Downloads folder.</div>`;
-        return;
-      }
-      const provisional = olisaFileName(nums.length === 1
-        ? `PI-${nums[0]}.zip`
-        : `PI-${nums[0]}-to-${nums[nums.length - 1]}_${nums.length}PIs.zip`);
-      try {
-        pickedFileHandle = await window.showSaveFilePicker({
-          suggestedName: provisional,
-          types: [{ description: 'Zip archive', accept: { 'application/zip': ['.zip'] } }]
-        });
-      } catch (e) {
-        if (e && e.name === 'AbortError') { result.innerHTML = `<span class="sub-note">Cancelled \u2014 nothing was downloaded.</span>`; return; }
-        result.innerHTML = `<span style="color:var(--bad);">Couldn't open the folder picker: ${escHtml(e.message)}</span>`;
-        return;
+      if (!phone) {
+        if (typeof window.showSaveFilePicker !== 'function') {
+          result.innerHTML = `<span style="color:var(--bad);">This browser can't open a save dialog.</span>`
+            + `<div class="sub-note" style="margin-top:5px;">Use <b>ALL PI Download</b> \u2014 the archive goes to your Downloads folder.</div>`;
+          return;
+        }
+        const provisional = olisaFileName(nums.length === 1
+          ? `PI-${nums[0]}.zip`
+          : `PI-${nums[0]}-to-${nums[nums.length - 1]}_${nums.length}PIs.zip`);
+        try {
+          pickedFileHandle = await window.showSaveFilePicker({
+            suggestedName: provisional,
+            types: [{ description: 'Zip archive', accept: { 'application/zip': ['.zip'] } }]
+          });
+        } catch (e) {
+          if (e && e.name === 'AbortError') { result.innerHTML = `<span class="sub-note">Cancelled \u2014 nothing was downloaded.</span>`; return; }
+          result.innerHTML = `<span style="color:var(--bad);">Couldn't open the save dialog: ${escHtml(e.message)}</span>`;
+          return;
+        }
+      } else {
+        if (typeof window.showDirectoryPicker !== 'function') {
+          result.innerHTML = `<span style="color:var(--bad);">This browser can't open a folder picker.</span>`
+            + `<div class="sub-note" style="margin-top:5px;">Use <b>ALL PI Download</b> \u2014 the PDFs go to your Downloads folder, one file each.</div>`;
+          return;
+        }
+        try {
+          pickedDirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+        } catch (e) {
+          if (e && e.name === 'AbortError') { result.innerHTML = `<span class="sub-note">Cancelled \u2014 nothing was downloaded.</span>`; return; }
+          result.innerHTML = `<span style="color:var(--bad);">Couldn't open the folder picker: ${escHtml(e.message)}</span>`;
+          return;
+        }
       }
     }
     running = true; stopped = false;
@@ -3488,9 +3607,8 @@ function openPiDownloadModal() {
     // the whole archive is lost.
     acquireBuildWakeLock();
     const clock = newEtaClock();
-    const zip = makeZipBuilder();
     const missing = [], failed = [];
-    let filesAdded = 0, done = 0, hitLimit = false;
+    let filesAdded = 0, done = 0;
     try {
       bar.style.width = '2%';
       progText.textContent = 'Looking up the invoices\u2026';
@@ -3547,7 +3665,7 @@ function openPiDownloadModal() {
       // however the downloads happen to finish.
       const fetched = new Array(wanted.length);
       await runPool(wanted, 8, async (w, i) => {
-        if (stopped || hitLimit) return;
+        if (stopped) return;
         try {
           const file = await getFileWithRetry(w.hit.handle, 3);
           const bytes = new Uint8Array(await file.arrayBuffer());
@@ -3562,54 +3680,99 @@ function openPiDownloadModal() {
       });
       if (stopped) throw new Error('__stopped');
 
-      for (let i = 0; i < fetched.length; i++) {
-        const f = fetched[i];
-        if (!f) continue;
-        if (zip.bytes() + f.bytes.length > ZIP_LIMIT_BYTES) { hitLimit = true; break; }
-        zip.add(zipSafeName(f.name), f.bytes, f.when);
-        filesAdded++;
-      }
-
-      if (!filesAdded) {
+      if (!fetched.some(Boolean)) {
         result.innerHTML = `<span style="color:var(--bad);">Nothing downloaded.</span> ${failed.length ? escHtml(failed.slice(0, 4).join('; ')) : ''}`;
         return;
       }
-      progText.textContent = `Packing ${filesAdded} invoice(s)\u2026`;
+      progText.textContent = `Saving ${fetched.filter(Boolean).length} invoice(s)\u2026`;
       await uiTick();
-      const blob = new Blob(zip.finish(), { type: 'application/zip' });
-      const label = nums.length === 1 ? `PI-${nums[0]}` : `PI-${nums[0]}-to-${nums[nums.length - 1]}_${filesAdded}PIs`;
-      lastZipBlob = blob;
-      lastZipName = olisaFileName(`${label}.zip`);
-      lastZipNameGlobal = lastZipName;
+      const got = fetched.filter(Boolean);
+      const totalBytes = got.reduce((n, f) => n + f.bytes.length, 0);
+      let where, savedCount = 0, outName = '';
+
+      if (!phone) {
+        // ---- Computer: one archive, exactly as before. ----
+        progText.textContent = `Packing ${got.length} invoice(s)\u2026`;
+        await uiTick();
+        const zip = makeZipBuilder();
+        for (const f of got) {
+          if (zip.bytes() + f.bytes.length > ZIP_LIMIT_BYTES) break;
+          zip.add(zipSafeName(f.name), f.bytes, f.when);
+          savedCount++;
+        }
+        const blob = new Blob(zip.finish(), { type: 'application/zip' });
+        const label = nums.length === 1 ? `PI-${nums[0]}` : `PI-${nums[0]}-to-${nums[nums.length - 1]}_${savedCount}PIs`;
+        outName = olisaFileName(`${label}.zip`);
+        if (pickedFileHandle) {
+          const w = await pickedFileHandle.createWritable();
+          await w.write(blob);
+          await w.close();
+          where = `Saved to the folder you chose.`;
+        } else {
+          saveBlobAs(blob, outName);
+          where = `Saved to your <b>Downloads</b> folder.`;
+        }
+        if (typeof notifyDownload === 'function') notifyDownload(outName);
+        showDownloadComplete(outName, savedCount, blob.size, !!pickedFileHandle);
+        result.innerHTML =
+          `<div style="color:var(--good);font-weight:700;">${escHtml(outName)}</div>`
+          + `<div class="sub-note" style="margin-top:3px;">${savedCount} Proforma Invoice(s), ${(blob.size / 1048576).toFixed(1)} MB. ${where}</div>`;
+      } else {
+        // ---- Phone: separate PDFs. A .zip on a phone either lands somewhere it can't be opened
+        //      or doesn't show up at all, so each invoice is delivered as its own document. ----
+        progText.textContent = `Saving ${got.length} invoice(s)\u2026`;
+        await uiTick();
+        if (pickedDirHandle) {
+          for (const f of got) {
+            if (stopped) break;
+            try {
+              const fh = await pickedDirHandle.getFileHandle(zipSafeName(f.name), { create: true });
+              const w = await fh.createWritable();
+              await w.write(f.bytes);
+              await w.close();
+              savedCount++;
+              progText.textContent = `Saving\u2026 ${savedCount} of ${got.length}`;
+              if (savedCount % 3 === 0) await uiTick();
+            } catch (e) { failed.push(`${f.name} (${e.message})`); }
+          }
+          where = `Saved to the folder you chose, one PDF per PI.`;
+        } else {
+          // A small gap between them matters — fired back to back, mobile browsers drop most of
+          // the queue silently. The browser asks once whether to allow multiple downloads.
+          for (const f of got) {
+            if (stopped) break;
+            try {
+              saveBlobAs(new Blob([f.bytes], { type: 'application/pdf' }), f.name, true);
+              savedCount++;
+              progText.textContent = `Downloading\u2026 ${savedCount} of ${got.length}`;
+              await new Promise(r => setTimeout(r, 350));
+            } catch (e) { failed.push(`${f.name} (${e.message})`); }
+          }
+          where = `Sent to your <b>Downloads</b> folder as ${savedCount} separate PDF(s).`;
+        }
+        if (!savedCount) {
+          result.innerHTML = `<span style="color:var(--bad);">Nothing was saved.</span> ${failed.length ? escHtml(failed.slice(0, 4).join('; ')) : ''}`;
+          return;
+        }
+        if (typeof notifyDownload === 'function') notifyDownload(`${savedCount} Proforma Invoice PDF(s)`);
+        showDownloadComplete(`${savedCount} Proforma Invoice PDF(s)`, savedCount, totalBytes, !!pickedDirHandle);
+        result.innerHTML =
+          `<div style="color:var(--good);font-weight:700;">${savedCount} PDF(s) saved</div>`
+          + `<div class="sub-note" style="margin-top:3px;">${(totalBytes / 1048576).toFixed(1)} MB total. ${where}</div>`;
+      }
+      filesAdded = savedCount;
       bar.style.width = '100%';
+      progText.textContent = 'Done.';
 
       const notes = [];
-      if (hitLimit) notes.push(`<b>Size limit reached</b> at about 3.6 GB \u2014 the rest were left out. Split the range into smaller batches.`);
+      if (savedCount < got.length) notes.push(`<b>Size limit reached</b> \u2014 ${got.length - savedCount} left out of the archive. Ask for fewer PIs at a time.`);
       if (missing.length) notes.push(`No Proforma Invoice found for PI ${escHtml(missing.join(', '))}.`);
-      if (failed.length) notes.push(`${failed.length} couldn't be downloaded: ${escHtml(failed.slice(0, 5).join('; '))}${failed.length > 5 ? '\u2026' : ''}`);
-
-      let where;
-      if (pickedFileHandle) {
-        // The folder was chosen BEFORE the download started, so writing goes straight there.
-        const w = await pickedFileHandle.createWritable();
-        await w.write(blob);
-        await w.close();
-        where = `Saved to the folder you chose.`;
-      } else {
-        saveBlobAs(blob, lastZipName);
-        where = `Saved to your <b>Downloads</b> folder.`;
-      }
-      progText.textContent = 'Done.';
-      if (typeof notifyDownload === 'function') notifyDownload(lastZipName);
-      showDownloadComplete(lastZipName, filesAdded, blob.size, !!pickedFileHandle);
-      result.innerHTML =
-        `<div style="color:var(--good);font-weight:700;">${escHtml(lastZipName)}</div>`
-        + `<div class="sub-note" style="margin-top:3px;">${filesAdded} Proforma Invoice(s), ${(blob.size / 1048576).toFixed(1)} MB. ${where}</div>`
-        + `<div id="piDlSaveMsg" class="sub-note" style="margin-top:7px;"></div>`
+      if (failed.length) notes.push(`${failed.length} couldn't be saved: ${escHtml(failed.slice(0, 5).join('; '))}${failed.length > 5 ? '\u2026' : ''}`);
+      result.innerHTML += `<div id="piDlSaveMsg" class="sub-note" style="margin-top:7px;"></div>`
         + (notes.length ? `<div class="sub-note" style="margin-top:7px;">${notes.join('<br>')}</div>` : '');
-      if (!pickedFileHandle) offerPhoneFallback(result.querySelector('#piDlSaveMsg'), blob);
 
-      addBubble(`Downloaded <b>${escHtml(lastZipName)}</b> \u2014 ${filesAdded} Proforma Invoice PDF(s) out of ${nums.length} requested PI(s), ${(blob.size / 1048576).toFixed(1)} MB.`
+      addBubble(`Downloaded <b>${savedCount} Proforma Invoice PDF(s)</b> out of ${nums.length} requested PI(s), ${(totalBytes / 1048576).toFixed(1)} MB`
+        + (phone ? ', as separate files.' : `, as <b>${escHtml(outName)}</b>.`)
         + (notes.length ? `<br><span class="sub-note">${notes.join('<br>')}</span>` : ''), 'askA');
     } catch (err) {
       if (err && err.message === '__stopped') {
@@ -4912,11 +5075,11 @@ async function openFilePreview(fileHandle) {
       pdf.destroy();
     } else if (ext === 'xlsx' || ext === 'xls' || head4.startsWith('PK')) {
       const wb = XLSX.read(buf, { type: 'array' });
-      pages.innerHTML = wb.SheetNames.map(sn => `<h3 style="text-align:left;">${escHtml(sn)}</h3>` + XLSX.utils.sheet_to_html(wb.Sheets[sn])).join('');
+      pages.innerHTML = wb.SheetNames.map(sn => `<h3 style="text-align:left;">${escHtml(sn)}</h3>` + sanitizeDocHtml(XLSX.utils.sheet_to_html(wb.Sheets[sn]))).join('');
       pages.style.background = '#fff'; pages.style.textAlign = 'left';
     } else if (ext === 'docx' && window.mammoth) {
       const result = await mammoth.convertToHtml({ arrayBuffer: buf });
-      pages.innerHTML = `<div style="background:#fff;padding:18px;border-radius:8px;max-width:820px;margin:0 auto;text-align:left;">${result.value}</div>`;
+      pages.innerHTML = `<div style="background:#fff;padding:18px;border-radius:8px;max-width:820px;margin:0 auto;text-align:left;">${sanitizeDocHtml(result.value)}</div>`;
     } else if (head4.startsWith('{\\rt')) {
       // The hand challans. Named ".doc", actually Rich Text — which no browser renders, so this
       // used to fall through to "No preview for this file type" on the one document type that
@@ -5619,7 +5782,7 @@ function setRemark(r, text) {
   const k = acceptKey(r);
   const clean = String(text == null ? '' : text).slice(0, 500);
   if (!clean.trim() && remarkOverrides[k]) { delete remarkOverrides[k]; }
-  else remarkOverrides[k] = { text: clean, at: Date.now(), original: String(r.remarks ?? '') };
+  else remarkOverrides[k] = { text: clean, at: Date.now(), original: String(r.remarks ?? ''), fp: fingerprintOf(r) };
   persistRemarkOverrides();
   reconcileManualChallans();
   scheduleMasterBackup();
@@ -5654,41 +5817,162 @@ function dmyFromMs(ms) {
 function acceptKey(r) {
   return [String(r.challanNo ?? '').trim(), r.styleNorm, measNorm(r.itemDesc), String(r.short ?? '')].join('|');
 }
-// The part of the key that never changes: challan + style + measurement. A note whose exact key
-// no longer matches any row is looked up on this prefix.
+// The part of the key that never changes: challan + style + measurement.
 function stableKeyPart(k) { return String(k).split('|').slice(0, 3).join('|'); }
-// Re-attach notes orphaned by a changed Short quantity. If Olisa's Short&Exs formula recalculates
-// (a correction elsewhere in the sheet, a re-export), the exact key stops matching and the remark
-// silently disappears from its row. This finds those orphans and re-links them — but ONLY when the
-// stable part matches exactly ONE record, so a note can never be attached to the wrong line. An
-// ambiguous orphan is left alone rather than guessed at.
+// ==================== WHY A SETTLED LINE CAME BACK ====================
+// An acceptance is stored under acceptKey(r) = challan|style|measurement|short. Three of those
+// four fields move when Olisa re-saves the Master File, and the repair pass only ever tolerated a
+// changed Short — it matched orphans on challan|style|measurement, so any edit to the DESCRIPTION
+// broke the stable part too and the note was simply dropped. Measured against the real file:
+//
+//   Short&Exs recalculated by 1 ....... 2645 keys break, 534 unrecoverable
+//   description retyped with x for * ... 125 keys break, 125 unrecoverable
+//   bracket code (13-1#) -> (13-2#) ....  31 keys break,  31 unrecoverable
+//   a trailing space on a description ..  16 keys break,  16 unrecoverable
+//
+// Every unrecoverable one is a line you settled reappearing as undelivered on its own. The cause
+// is that measNorm() returns the WHOLE description for any wording it can't parse (166 rows here),
+// so every character of that text is load-bearing.
+//
+// Repair now walks a ladder from strongest to weakest and stops at the first tier that identifies
+// exactly ONE live line, so a note is never attached to a line it might not belong to. The
+// dimensions come from cartonDims(), which reads 51.5*40*26.5CM and L51.5 x W40 x H26.5cm as the
+// same carton — that is what makes it survive a retyped description.
+function keyDims(measPart) { return cartonDims({ itemDesc: measPart }); }
+// ---- Fingerprints ----
+// The key alone cannot separate genuinely identical-looking lines: measured on the real file,
+// 548 rows share challan+style+measurement with at least one other row, and only the sheet and row
+// number make every line unique. So each acceptance and remark now stores a fingerprint of the
+// line it belongs to, and repair matches on that instead of trying to reverse-engineer a string.
+// Fingerprints are backfilled automatically for anything already saved, the first time a version
+// of the Master File is loaded where the note is still correctly attached.
+function fpNorm(v) { return String(v == null ? '' : v).replace(/\s+/g, '').toUpperCase(); }
+function fingerprintOf(r) {
+  return {
+    pi: fpNorm(r.piRef), ch: String(r.challanNo ?? '').trim(), st: r.styleNorm,
+    dims: cartonDims(r), item: fpNorm(r.item), short: String(r.short ?? ''),
+    sheet: r.xlSheet || r.sheet || '', row: r.xlRow || 0
+  };
+}
+// Strongest identity first. Each tier drops whichever field is most likely to have been edited.
+function fpTiers(f) {
+  if (!f) return [];
+  const t = [];
+  if (f.dims) {
+    t.push(`A|${f.pi}|${f.ch}|${f.st}|${f.dims}|${f.item}|${f.short}`);
+    t.push(`B|${f.pi}|${f.ch}|${f.st}|${f.dims}|${f.item}`);         // Short recalculated
+    t.push(`C|${f.ch}|${f.st}|${f.dims}|${f.item}|${f.short}`);      // PI reference changed
+    t.push(`D|${f.pi}|${f.st}|${f.dims}|${f.item}|${f.short}`);      // challan number reformatted
+  }
+  t.push(`E|${f.pi}|${f.ch}|${f.st}|${f.item}|${f.short}`);          // nothing measurable in the text
+  return t;
+}
+function repairTiersForKey(k) {
+  const p = String(k).split('|');
+  const challan = p[0] || '', style = p[1] || '', meas = p[2] || '', short = p[3] || '';
+  const d = keyDims(meas);
+  const t = [];
+  if (d) {
+    t.push(`2|${challan}|${style}|${d}|${short}`);   // description edited, everything else intact
+    t.push(`3|${challan}|${style}|${d}`);            // ...and the Short recalculated too
+    // Deliberately no `style|dims|short` tier here: with no PI and no challan to anchor it, a
+    // file-wide Short recalculation makes it match the wrong line rather than none.
+  }
+  t.push(`5|${challan}|${style}|${short}`);          // nothing parseable: challan + style + short
+  return t;
+}
+function repairTiersForRecord(r) {
+  const challan = String(r.challanNo ?? '').trim(), style = r.styleNorm, short = String(r.short ?? '');
+  const d = cartonDims(r);
+  const t = [];
+  if (d) {
+    t.push(`2|${challan}|${style}|${d}|${short}`);
+    t.push(`3|${challan}|${style}|${d}`);
+    t.push(`4|${style}|${d}|${short}`);
+  }
+  t.push(`5|${challan}|${style}|${short}`);
+  return t;
+}
 function repairOverlayKeys() {
   if (!allRecords.length) return 0;
-  const liveKeys = new Set();
+  const liveKeys = new Map();        // exact key -> record
   const byStable = new Map();
+  const byTier = new Map();          // tier string -> [exact key]
+  const byPos = new Map();           // "sheet|row" -> record
   allRecords.forEach(r => {
     const k = acceptKey(r);
-    liveKeys.add(k);
+    if (!liveKeys.has(k)) liveKeys.set(k, r);
     const sp = stableKeyPart(k);
     if (!byStable.has(sp)) byStable.set(sp, []);
     byStable.get(sp).push(k);
+    fpTiers(fingerprintOf(r)).forEach(t => {
+      if (!byTier.has(t)) byTier.set(t, []);
+      byTier.get(t).push(k);
+    });
+    repairTiersForRecord(r).forEach(t => {
+      if (!byTier.has(t)) byTier.set(t, []);
+      byTier.get(t).push(k);
+    });
+    byPos.set(`${r.xlSheet || r.sheet || ''}|${r.xlRow || 0}`, r);
   });
-  let repaired = 0;
+  let repaired = 0, backfilled = 0;
   const fix = store => {
     Object.keys(store).forEach(k => {
-      if (liveKeys.has(k)) return;                      // still attached — nothing to do
-      const cands = byStable.get(stableKeyPart(k));
-      if (!cands || cands.length !== 1) return;         // missing or ambiguous — leave it alone
-      const target = cands[0];
-      if (store[target]) return;                        // the live row already has its own note
+      const live = liveKeys.get(k);
+      if (live) {
+        // Still correctly attached: take the chance to record what line this is, so the NEXT time
+        // the file changes it can be found even if every part of the key moves.
+        if (!store[k].fp) { store[k].fp = fingerprintOf(live); backfilled++; }
+        return;
+      }
+      let target = null;
+      const cands = byStable.get(stableKeyPart(k));     // tier 1: the original rule
+      if (cands && cands.length === 1) target = cands[0];
+      // Position is tried BEFORE any value-based tier, because when Olisa's Short&Exs formula
+      // recalculates it shifts EVERY row at once — so a note's old Short value now belongs to a
+      // different line, and matching on it walks the note onto that neighbour. The sheet and row
+      // don't move when a formula recalculates. Guarded by everything except Short (PI, challan,
+      // style, carton and item all have to agree), so an inserted row can't quietly capture it.
+      if (!target && store[k].fp && store[k].fp.row) {
+        const at = byPos.get(`${store[k].fp.sheet}|${store[k].fp.row}`);
+        const f = store[k].fp;
+        if (at && at.styleNorm === f.st && cartonDims(at) === f.dims && fpNorm(at.item) === f.item
+            && fpNorm(at.piRef) === f.pi && String(at.challanNo ?? '').trim() === f.ch) {
+          target = acceptKey(at);
+        }
+      }
+      if (!target) {
+        // A fingerprint knows the PI and the item; the key-derived tiers know neither, so they can
+        // match a line on a DIFFERENT PI whose Short happens to have shifted into the old value.
+        // Measured on the real file that mis-attached 39 settled lines. When a fingerprint exists
+        // it is used alone; the key-derived tiers are strictly a fallback for notes saved before
+        // fingerprints existed, and those get one backfilled on the first clean load anyway.
+        const tiers = store[k].fp ? fpTiers(store[k].fp) : repairTiersForKey(k);
+        for (const t of tiers) {
+          const c = byTier.get(t);
+          if (c && c.length === 1) { target = c[0]; break; }
+          if (c && c.length > 1) continue;              // ambiguous here — try the next tier
+        }
+      }
+      if (!target && store[k].fp && store[k].fp.row) {
+        // Same position, relaxed guard: style and carton only. Reached when the PI or challan on
+        // that line was itself edited, which the strict pass above deliberately refuses.
+        const at = byPos.get(`${store[k].fp.sheet}|${store[k].fp.row}`);
+        if (at && at.styleNorm === store[k].fp.st && cartonDims(at) === store[k].fp.dims
+            && fpNorm(at.item) === store[k].fp.item) target = acceptKey(at);
+      }
+      if (!target || store[target]) return;             // no confident match, or that line has its own
       store[target] = store[k];
-      delete store[k];
+      if (liveKeys.get(target)) store[target].fp = fingerprintOf(liveKeys.get(target));
+      // The orphan is KEPT, not deleted. Olisa's files move back and forth between versions, and a
+      // deleted note cannot come back when the old value returns — which is how a settled line
+      // could be lost permanently rather than merely detached.
       repaired++;
     });
   };
   fix(remarkOverrides);
   fix(acceptedShorts);
-  if (repaired) { persistRemarkOverrides(); persistAcceptedShorts(); }
+  if (repaired || backfilled) { persistRemarkOverrides(); persistAcceptedShorts(); }
   return repaired;
 }
 // Kept as an alias so callers read naturally; the overlay "migration" is now a repair pass.
@@ -5703,7 +5987,7 @@ async function persistAcceptedShorts() {
   try { await idbSet('acceptedShorts', { map: acceptedShorts, at: Date.now() }); } catch (e) { /* quota */ }
 }
 function setAccepted(r, reason) {
-  acceptedShorts[acceptKey(r)] = { reason: String(reason || '').slice(0, 200), at: Date.now() };
+  acceptedShorts[acceptKey(r)] = { reason: String(reason || '').slice(0, 200), at: Date.now(), fp: fingerprintOf(r) };
   persistAcceptedShorts();
   reconcileManualChallans();
   if (typeof scheduleMasterBackup === 'function') scheduleMasterBackup();
@@ -7898,8 +8182,9 @@ async function uqDetectFromDocx(file) {
   if (!window.mammoth) throw new Error("Word reader library didn't load — try again, or re-save the file as .xlsx/.pdf.");
   const buf = await file.arrayBuffer();
   const result = await mammoth.convertToHtml({ arrayBuffer: buf });
-  const container = document.createElement('div');
-  container.innerHTML = result.value;
+  // Parsed inert rather than built into a live element: a detached div still lets an <img onerror>
+  // attempt a load in Chrome, and this only ever needs the table structure anyway.
+  const container = new DOMParser().parseFromString(sanitizeDocHtml(result.value), 'text/html').body;
   const candidates = [];
   const tables = container.querySelectorAll('table');
   tables.forEach((table, ti) => {
