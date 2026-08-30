@@ -975,6 +975,12 @@ document.addEventListener('click', function (e) {
       <input type="file" id="undfileInput" accept=".xlsx" multiple>
     </div>
     <div class="filelist" id="undfileList"></div>
+    <div class="actions" id="undclearWrap" style="margin-top:10px;display:none;">
+      <button id="undclearBtn" class="secondary" type="button">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a1 1 0 011-1h6a1 1 0 011 1v2M19 6l-1 14a1 1 0 01-1 1H7a1 1 0 01-1-1L5 6" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 11v6M14 11v6" stroke-linecap="round"/></svg>
+        Remove file(s)
+      </button>
+    </div>
   </div>
 
   <div class="card">
@@ -994,6 +1000,10 @@ document.addEventListener('click', function (e) {
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16" stroke-linecap="round" stroke-linejoin="round"/></svg>
         Download .xlsx
       </button>
+      <button id="undpiwiseBtn" class="secondary hidden">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 2v4M16 2v4M3 10h18M5 4h14a2 2 0 012 2v14a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        PI Wise Priority Delivery Date
+      </button>
     </div>
     <div class="status" id="undstatus"></div>
   </div>
@@ -1003,9 +1013,10 @@ document.addEventListener('click', function (e) {
     <div class="previewbox"><table class="preview" id="undpreviewTable"></table></div>
     <div class="totals" id="undtotalsBox"></div>
     <div class="hint">
-      "Priority" and "Previous PI" are left blank &mdash; those are your manual carry-forward notes and can't be
-      derived from the raw export, same as before. Everything else (PI Ref, Buyer, Item, Style, Delivery Date,
-      Master Carton, Cross Divider) is generated automatically from the uploaded file(s).
+      Every column is taken straight from the raw export. <b>Master Carton (Punch)</b> is counted in its own
+      <b>Perforated Master Carton</b> column and named as itself in the Item column &mdash; it is no longer
+      folded in with plain Master Carton. <b>PI Wise Priority Delivery Date</b> downloads the separate
+      PI / DO Date / Priority Delivery Date sheet.
     </div>
   </div>
   </div>
@@ -2062,10 +2073,15 @@ const previewCard = document.getElementById('undpreviewCard');
 const previewTable = document.getElementById('undpreviewTable');
 const totalsBox = document.getElementById('undtotalsBox');
 const dateInput = document.getElementById('unddateInput');
+const clearWrap = document.getElementById('undclearWrap');
+const clearBtn = document.getElementById('undclearBtn');
+const piwiseBtn = document.getElementById('undpiwiseBtn');
 
 let selectedFiles = [];
 let generatedRows = null;
 let generatedTitle = null;
+let generatedPiRows = null;   // one line per PI for the PI Wise sheet
+let dateTouched = false;      // true once the box has been typed in by hand
 
 function defaultDateLabel() {
   const d = new Date();
@@ -2074,7 +2090,22 @@ function defaultDateLabel() {
   const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
   return `${day}${suffix} ${months[d.getMonth()]} ${d.getFullYear()}`;
 }
-dateInput.value = defaultDateLabel();
+
+// THE 12:20 AM BUG. This ran ONCE, when the page loaded, and never again. The installed app is not
+// closed at night — it is left open — so a report generated after midnight still carried the date
+// the app had been opened on, and went to Olisa dated yesterday. The date is refreshed now whenever
+// the tab comes back into view and again the moment Generate is pressed, so the only way to get a
+// stale date is to type one deliberately, which is then left alone.
+function refreshDefaultDate() {
+  if (dateTouched) return;
+  const fresh = defaultDateLabel();
+  if (dateInput.value !== fresh) dateInput.value = fresh;
+}
+refreshDefaultDate();
+dateInput.addEventListener('input', () => { dateTouched = true; });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') refreshDefaultDate();
+});
 
 drop.addEventListener('click', () => fileInput.click());
 ['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('drag'); }));
@@ -2086,14 +2117,55 @@ function handleFiles(fileListObj) {
   const files = Array.from(fileListObj).filter(f => f.name.toLowerCase().endsWith('.xlsx'));
   if (!files.length) return;
   selectedFiles = files;
-  fileListEl.innerHTML = files.map(f => `<div>${escHtml(f.name)}</div>`).join('');
-  dropText.textContent = `${files.length} file${files.length>1?'s':''} selected — click to change`;
-  genBtn.disabled = false;
+  renderFileList();
+}
+
+// Same rule as the PO Summary tab: whatever changes the selection redraws the list and clears the
+// results underneath it, so a preview from a previous export can never sit under a new one.
+function renderFileList() {
+  fileListEl.innerHTML = selectedFiles.map((f, i) =>
+    `<div style="display:flex;align-items:center;gap:8px;">`
+    + `<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;">${escHtml(f.name)}</span>`
+    + `<button type="button" class="undfileX" data-i="${i}" title="Remove this file" aria-label="Remove ${escHtml(f.name)}"`
+    + ` style="border:none;background:none;cursor:pointer;font-size:16px;line-height:1;padding:2px 6px;color:var(--sub);">&times;</button>`
+    + `</div>`).join('');
+  const n = selectedFiles.length;
+  dropText.textContent = n ? `${n} file${n > 1 ? 's' : ''} selected — click to change`
+                           : 'Click to choose file(s), or drag and drop the raw Undelivered .xlsx export(s) here';
+  clearWrap.style.display = n ? '' : 'none';
+  genBtn.disabled = !n;
+  clearResults();
+}
+
+function clearResults() {
+  generatedRows = null;
+  generatedPiRows = null;
   statusEl.textContent = '';
   statusEl.className = 'status';
   previewCard.classList.add('hidden');
   downloadBtn.classList.add('hidden');
+  piwiseBtn.classList.add('hidden');
+  previewTable.innerHTML = '';
+  totalsBox.innerHTML = '';
 }
+
+function resetUnd() {
+  selectedFiles = [];
+  fileInput.value = '';        // without this, re-picking the SAME file fires no change event
+  renderFileList();
+}
+
+clearBtn.addEventListener('click', resetUnd);
+fileListEl.addEventListener('click', e => {
+  const b = e.target.closest && e.target.closest('.undfileX');
+  if (!b) return;
+  const i = Number(b.dataset.i);
+  if (!Number.isInteger(i)) return;
+  selectedFiles.splice(i, 1);
+  if (!selectedFiles.length) { resetUnd(); return; }
+  fileInput.value = '';
+  renderFileList();
+});
 
 function isStyleCode(v) {
   if (!v) return false;
@@ -2191,6 +2263,10 @@ async function readWorkbookRows(file) {
     const previousPi = findPrevPiTag(candidates);
     records.push({
       piNo: String(piNo).trim(),
+      // PI_DATE is the DO date on the PI Wise sheet. It is read as OPTIONAL on purpose: it is not
+      // in the required-columns list, so an export without it still produces the main report and
+      // simply leaves that one cell blank instead of refusing the whole file.
+      piDate: colIdx.PI_DATE !== undefined ? formatDateValue(row[colIdx.PI_DATE]) : '',
       deliveryDate: formatDateValue(row[colIdx.PI_DLV_DATE]),
       buyer: normalizeBuyer(row[colIdx.BUYER_NAME]),
       itemDesc: String(row[colIdx.ITEM_DESCRIPTION] || '').trim(),
@@ -2202,56 +2278,73 @@ async function readWorkbookRows(file) {
   return records;
 }
 
+// "Master Carton (Punch)" was landing in the same bucket as plain "Master Carton", so a punch line
+// was reported as an ordinary carton and the two were added together — 180 of the 193 lines in a
+// real export are punch, so almost the whole report was mislabelled. Punch and perforated are the
+// same thing under two names, so both words are recognised. Tolerant matching throughout: a variant
+// like "Cross Divider (5 Ply)" used to fall through to the Master Carton side and silently inflate
+// it, which looks perfectly clean in the output and is wrong.
+function itemKind(desc) {
+  const d = String(desc || '');
+  if (/cross\s*divider/i.test(d)) return 'cross';
+  if (/punch|perforat/i.test(d)) return 'punch';
+  return 'master';
+}
+const KIND_LABEL = { master: 'Master Carton', punch: 'Master Carton (Punch)', cross: 'Cross Divider' };
+
 function buildGroups(allRecords) {
   const groups = new Map();
   for (const r of allRecords) {
     let g = groups.get(r.piNo);
     if (!g) {
-      g = { ref: extractPiRef(r.piNo), buyer: r.buyer, deliveryDate: r.deliveryDate, styles: new Map() };
+      g = { ref: extractPiRef(r.piNo), buyer: r.buyer, piDate: r.piDate,
+            deliveryDate: r.deliveryDate, styles: new Map() };
       groups.set(r.piNo, g);
     }
     if (!g.buyer && r.buyer) g.buyer = r.buyer;
+    if (!g.piDate && r.piDate) g.piDate = r.piDate;
     if (!g.deliveryDate && r.deliveryDate) g.deliveryDate = r.deliveryDate;
+    // The grouping key is UNCHANGED. The Priority column is gone from the output, but the previous-PI
+    // tag still separates lines exactly as before, so no line merges or splits differently than it
+    // did — the totals are identical, only the column that displayed the tag has been removed.
     const key = r.style + '||' + (r.previousPi || '');
-    let s = g.styles.get(key);
-    if (!s) { s = { master: 0, cross: 0, style: r.style, previousPi: r.previousPi }; g.styles.set(key, s); }
-    // Tolerant match, not exact equality. The report currently writes exactly "Cross Divider",
-    // but a variant like "Cross Divider (5 Ply)" would have fallen through to the Master Carton
-    // side and silently inflated it — a wrong split that looks perfectly clean in the output.
-    if (/cross\s*divider/i.test(r.itemDesc)) s.cross += r.uQty;
-    else s.master += r.uQty;
+    let sr = g.styles.get(key);
+    if (!sr) { sr = { master: 0, punch: 0, cross: 0, style: r.style, previousPi: r.previousPi }; g.styles.set(key, sr); }
+    sr[itemKind(r.itemDesc)] += r.uQty;
   }
   return groups;
 }
 
 function buildOutputRows(groups) {
   const rows = [];
-  let totalMaster = 0, totalCross = 0;
+  const piRows = [];
+  let totalMaster = 0, totalPunch = 0, totalCross = 0;
   for (const [, g] of groups) {
-    const entries = [...g.styles.entries()].filter(([, v]) => v.master > 0 || v.cross > 0);
+    const entries = [...g.styles.entries()].filter(([, v]) => v.master > 0 || v.punch > 0 || v.cross > 0);
     if (!entries.length) continue;
-    const hasMaster = entries.some(([, v]) => v.master > 0);
-    const hasCross = entries.some(([, v]) => v.cross > 0);
-    const itemLabel = hasMaster && hasCross ? 'Master Carton & Cross Divider' : hasMaster ? 'Master Carton' : 'Cross Divider';
+    // The Item label names every kind actually present on the PI, in a fixed order, so a PI that
+    // carries punch cartons says so instead of being labelled a plain Master Carton PI.
+    const kinds = ['master', 'punch', 'cross'].filter(k => entries.some(([, v]) => v[k] > 0));
+    const itemLabel = kinds.map(k => KIND_LABEL[k]).join(' & ');
     const groupStart = rows.length;
     entries.forEach(([, v], i) => {
       rows.push({
         piRef: i === 0 ? g.ref : null,
-        buyer: i === 0 ? g.buyer : null,
         item: i === 0 ? itemLabel : null,
         style: v.style,
         deliveryDate: i === 0 ? g.deliveryDate : null,
         master: v.master || null,
-        cross: v.cross || null,
-        priority: v.previousPi || null,
-        previousPi: null
+        punch: v.punch || null,
+        cross: v.cross || null
       });
       totalMaster += v.master;
+      totalPunch += v.punch;
       totalCross += v.cross;
     });
     if (entries.length > 1) rows[groupStart]._span = entries.length;
+    piRows.push({ ref: g.ref, doDate: g.piDate || '', deliveryDate: g.deliveryDate || '', status: 'Undelivered' });
   }
-  return { rows, totalMaster, totalCross };
+  return { rows, piRows, totalMaster, totalPunch, totalCross };
 }
 
 async function generate() {
@@ -2259,128 +2352,223 @@ async function generate() {
   statusEl.className = 'status';
   genBtn.disabled = true;
   try {
+    refreshDefaultDate();     // a report started after midnight is dated today, not yesterday
     let allRecords = [];
-    for (const f of selectedFiles) {
+    for (let i = 0; i < selectedFiles.length; i++) {
+      const f = selectedFiles[i];
+      statusEl.textContent = `Reading ${f.name}\u2026`;
+      await undYield();
       const recs = await readWorkbookRows(f);
       allRecords = allRecords.concat(recs);
     }
     if (!allRecords.length) throw new Error('No undelivered lines found (all quantities are zero, or the file format is unexpected).');
 
+    await undYield();
     const groups = buildGroups(allRecords);
-    const { rows, totalMaster, totalCross } = buildOutputRows(groups);
+    const { rows, piRows, totalMaster, totalPunch, totalCross } = buildOutputRows(groups);
     generatedRows = rows;
-    generatedTitle = `Olisa Undelivered Qty & Delivery Schedule (${dateInput.value})`;
+    generatedPiRows = piRows;
+    // Two lines inside ONE cell: the schedule name, then the date under it. Excel keeps the break
+    // where "\n" sits as long as the cell wraps, which is why the row is given a height below.
+    generatedTitle = `OLISA's Undelivered Qty & Delivery Schedule\n(${dateInput.value})`;
 
-    renderPreview(rows, totalMaster, totalCross);
+    await undYield();
+    renderPreview(rows, totalMaster, totalPunch, totalCross);
     statusEl.textContent = `Done — ${rows.length} line(s) across ${groups.size} PI number(s).`;
     statusEl.className = 'status ok';
     downloadBtn.classList.remove('hidden');
+    piwiseBtn.classList.remove('hidden');
     previewCard.classList.remove('hidden');
   } catch (err) {
     statusEl.textContent = err.message;
     statusEl.className = 'status err';
     previewCard.classList.add('hidden');
     downloadBtn.classList.add('hidden');
+    piwiseBtn.classList.add('hidden');
   } finally {
     genBtn.disabled = false;
   }
 }
 
-function renderPreview(rows, totalMaster, totalCross) {
-  const headers = ['PI Ref','Buyer','Item','Style Reference','Req. Delivery Dt.','Master Carton','Cross Divider','Priority','Previous PI'];
-  let html = '<tr>' + headers.map(h => `<th>${h}</th>`).join('') + '</tr>';
+function undYield() { return new Promise(r => setTimeout(r, 0)); }
+
+const UND_HEADERS = ['PI','Item','Style','Priority Delivery Date','Master Carton (qty)','Perforated Master Carton (qty)','Cross Divider (qty)'];
+
+function renderPreview(rows, totalMaster, totalPunch, totalCross) {
+  let html = '<tr>' + UND_HEADERS.map(h => `<th style="text-align:center;vertical-align:middle;">${escHtml(h)}</th>`).join('') + '</tr>';
   for (const r of rows) {
-    html += '<tr>' + [r.piRef, r.buyer, r.item, r.style, r.deliveryDate, r.master, r.cross, r.priority, r.previousPi]
-      .map(v => `<td>${v === null || v === undefined ? '' : v}</td>`).join('') + '</tr>';
+    html += '<tr>' + [r.piRef, r.item, r.style, r.deliveryDate, r.master, r.punch, r.cross]
+      .map(v => `<td style="text-align:center;vertical-align:middle;">${v === null || v === undefined ? '' : escHtml(v)}</td>`).join('') + '</tr>';
   }
-  html += `<tr style="font-weight:700;background:#f7f8fa"><td colspan="5">Total</td><td>${totalMaster}</td><td>${totalCross}</td><td></td><td></td></tr>`;
+  html += `<tr style="font-weight:700;background:#f7f8fa;text-align:center;"><td colspan="4">Total</td>`
+        + `<td>${totalMaster}</td><td>${totalPunch}</td><td>${totalCross}</td></tr>`;
   previewTable.innerHTML = html;
-  totalsBox.innerHTML = `<b>Total Master Carton:</b> ${totalMaster.toLocaleString()} &nbsp;&nbsp; <b>Total Cross Divider:</b> ${totalCross.toLocaleString()}`;
+  totalsBox.innerHTML = `<b>Master Carton:</b> ${totalMaster.toLocaleString()}`
+    + ` &nbsp;&nbsp; <b>Perforated Master Carton:</b> ${totalPunch.toLocaleString()}`
+    + ` &nbsp;&nbsp; <b>Cross Divider:</b> ${totalCross.toLocaleString()}`;
 }
+
+// Every cell in this workbook is centred and middle-aligned, header and body alike, so the sheet
+// reads as one block instead of numbers hugging the right edge and text the left.
+const UND_CENTER = { horizontal: 'center', vertical: 'middle', wrapText: true };
+const UND_BORDER = { top:{style:'thin'}, bottom:{style:'thin'}, left:{style:'thin'}, right:{style:'thin'} };
 
 async function downloadXlsx() {
   const rows = generatedRows;
+  if (!rows) { statusEl.textContent = 'Generate the report first.'; statusEl.className = 'status err'; return; }
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet('Undelivered Report');
+  const NCOL = UND_HEADERS.length;   // 7
   ws.columns = [
-    { width: 9 }, { width: 10 }, { width: 26 }, { width: 20 },
-    { width: 18 }, { width: 14 }, { width: 14 }, { width: 14 }, { width: 14 }
+    { width: 10 },   // PI
+    { width: 30 },   // Item
+    { width: 20 },   // Style
+    { width: 20 },   // Priority Delivery Date
+    { width: 18 },   // Master Carton (qty)
+    { width: 22 },   // Perforated Master Carton (qty)
+    { width: 18 }    // Cross Divider (qty)
   ];
 
-  ws.mergeCells(1, 1, 1, 9);
+  ws.mergeCells(1, 1, 1, NCOL);
   const titleCell = ws.getCell(1, 1);
-  titleCell.value = generatedTitle;
-  titleCell.font = { bold: true, size: 12, name: 'Arial' };
-  titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
+  titleCell.value = generatedTitle;                  // "…Schedule\n(31st August 2026)"
+  titleCell.font = { bold: true, size: 13, name: 'Arial' };
+  titleCell.alignment = UND_CENTER;                  // wrapText keeps the break inside the one cell
+  ws.getRow(1).height = 40;                          // room for both lines
 
-  const headers = ['PI Ref','Buyer','Item','Style Reference','Req. Olisa Delivery Dt.','Master Carton','Cross Divider','Priority','Previous PI'];
   const headerRow = ws.getRow(2);
-  headers.forEach((h, i) => { headerRow.getCell(i + 1).value = h; });
-  headerRow.eachCell(c => {
+  UND_HEADERS.forEach((h, i) => { headerRow.getCell(i + 1).value = h; });
+  headerRow.height = 34;                             // taller than a body row, as asked
+  headerRow.eachCell({ includeEmpty: true }, c => {
     c.font = { bold: true, name: 'Arial', size: 10 };
-    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8EAF0' } };
-    c.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
-    c.border = { top:{style:'thin'}, bottom:{style:'thin'}, left:{style:'thin'}, right:{style:'thin'} };
+    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFF00' } };   // yellow
+    c.alignment = UND_CENTER;
+    c.border = UND_BORDER;
   });
 
-  let totalMaster = 0, totalCross = 0;
+  let totalMaster = 0, totalPunch = 0, totalCross = 0;
   let r = 3;
   const merges = [];
   for (const row of rows) {
     const excelRow = ws.getRow(r);
     excelRow.getCell(1).value = row.piRef;
-    excelRow.getCell(2).value = row.buyer;
-    excelRow.getCell(3).value = row.item;
-    excelRow.getCell(4).value = row.style;
-    excelRow.getCell(5).value = row.deliveryDate;
-    excelRow.getCell(6).value = row.master;
+    excelRow.getCell(2).value = row.item;
+    excelRow.getCell(3).value = row.style;
+    excelRow.getCell(4).value = row.deliveryDate;
+    excelRow.getCell(5).value = row.master;
+    excelRow.getCell(6).value = row.punch;
     excelRow.getCell(7).value = row.cross;
-    excelRow.getCell(8).value = row.priority;
-    excelRow.getCell(9).value = row.previousPi;
     excelRow.eachCell({ includeEmpty: true }, c => {
       c.font = { name: 'Arial', size: 10 };
-      c.border = { top:{style:'thin'}, bottom:{style:'thin'}, left:{style:'thin'}, right:{style:'thin'} };
+      c.alignment = UND_CENTER;
+      c.border = UND_BORDER;
     });
     if (row.master) totalMaster += row.master;
+    if (row.punch) totalPunch += row.punch;
     if (row.cross) totalCross += row.cross;
-    if (row._span && row._span > 1) {
-      merges.push([r, r + row._span - 1]);
-    }
+    if (row._span && row._span > 1) merges.push([r, r + row._span - 1]);
     r++;
   }
-  merges.forEach(([start, end]) => {
-    ws.mergeCells(start, 1, end, 1);
-    ws.mergeCells(start, 2, end, 2);
-    ws.mergeCells(start, 3, end, 3);
-    ws.mergeCells(start, 5, end, 5);
+  // PI, Item and the delivery date are written once per PI and merged down its styles, exactly as
+  // before — only the column numbers moved, because Buyer is gone from between them.
+  merges.forEach(([st, en]) => {
+    ws.mergeCells(st, 1, en, 1);
+    ws.mergeCells(st, 2, en, 2);
+    ws.mergeCells(st, 4, en, 4);
   });
 
   const totalRow = ws.getRow(r);
   totalRow.getCell(1).value = 'Total';
-  totalRow.getCell(6).value = totalMaster;
+  totalRow.getCell(5).value = totalMaster;
+  totalRow.getCell(6).value = totalPunch;
   totalRow.getCell(7).value = totalCross;
-  ws.mergeCells(r, 1, r, 5);
+  ws.mergeCells(r, 1, r, 4);
   totalRow.eachCell({ includeEmpty: true }, c => {
     c.font = { bold: true, name: 'Arial', size: 10 };
-    c.border = { top:{style:'thin'}, bottom:{style:'thin'}, left:{style:'thin'}, right:{style:'thin'} };
+    c.alignment = UND_CENTER;
+    c.border = UND_BORDER;
   });
 
-  const buf = await wb.xlsx.writeBuffer();
-  const blob = new Blob([buf], { type: 'application/octet-stream' });
-  const a = document.createElement('a');
   const dateSlug = dateInput.value.replace(/[^\w]+/g, '_');
-  const _objUrl = URL.createObjectURL(blob);
-  a.href = _objUrl;
-  a.download = `Olisa Tools - Undelivered Report ${dateSlug}.xlsx`;
-  if (typeof notifyDownload === 'function') notifyDownload(a.download);
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(_objUrl), 60000); // free the blob memory once the download has started
+  const name = `Olisa Tools - Undelivered Report ${dateSlug}.xlsx`;
+  const buf = await wb.xlsx.writeBuffer();
+  const saved = saveBlobAs(new Blob([buf], { type: 'application/octet-stream' }), name, true);
+  if (typeof notifyDownload === 'function') notifyDownload(saved);
+  statusEl.textContent = `Downloaded ${saved}`;
+  statusEl.className = 'status ok';
+}
+
+// PI Wise Priority Delivery Date — one line per PI, no quantities. DO Date is PI_DATE and Priority
+// Delivery Date is PI_DLV_DATE, both copied through as text exactly as the raw export wrote them,
+// so a dd/mm date can never be re-read by Excel as mm/dd. Status is always "Undelivered": this is
+// built from the undelivered export, so nothing on it can be anything else.
+async function downloadPiWise() {
+  const piRows = generatedPiRows;
+  if (!piRows || !piRows.length) { statusEl.textContent = 'Generate the report first.'; statusEl.className = 'status err'; return; }
+  piwiseBtn.disabled = true;
+  try {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('PI Wise Priority Delivery Date');
+    ws.columns = [{ width: 12 }, { width: 20 }, { width: 26 }, { width: 16 }];
+
+    ws.mergeCells(1, 1, 1, 4);
+    const t1 = ws.getCell(1, 1);
+    t1.value = 'PI WISE PRIORITY DELIVERY DATE';
+    t1.font = { bold: true, size: 13, name: 'Arial' };
+    t1.alignment = UND_CENTER;
+    ws.getRow(1).height = 26;
+
+    ws.mergeCells(2, 1, 2, 4);
+    const t2 = ws.getCell(2, 1);
+    t2.value = `(${dateInput.value})`;
+    t2.font = { bold: true, size: 11, name: 'Arial' };
+    t2.alignment = UND_CENTER;
+    ws.getRow(2).height = 22;
+
+    const heads = ['PI', 'DO Date', 'Priority Delivery Date', 'Status'];
+    const hr = ws.getRow(3);
+    heads.forEach((h, i) => { hr.getCell(i + 1).value = h; });
+    hr.height = 30;
+    hr.eachCell({ includeEmpty: true }, c => {
+      c.font = { bold: true, name: 'Arial', size: 10 };
+      c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFF00' } };
+      c.alignment = UND_CENTER;
+      c.border = UND_BORDER;
+    });
+
+    let r = 4;
+    for (const p of piRows) {
+      const row = ws.getRow(r);
+      row.getCell(1).value = p.ref;
+      row.getCell(2).value = p.doDate;
+      row.getCell(3).value = p.deliveryDate;
+      row.getCell(4).value = p.status;
+      row.eachCell({ includeEmpty: true }, c => {
+        c.font = { name: 'Arial', size: 10 };
+        c.alignment = UND_CENTER;
+        c.border = UND_BORDER;
+      });
+      r++;
+    }
+
+    const dateSlug = dateInput.value.replace(/[^\w]+/g, '_');
+    const name = `Olisa Tools - PI Wise Priority Delivery Date ${dateSlug}.xlsx`;
+    const buf = await wb.xlsx.writeBuffer();
+    const saved = saveBlobAs(new Blob([buf], { type: 'application/octet-stream' }), name, true);
+    if (typeof notifyDownload === 'function') notifyDownload(saved);
+    statusEl.textContent = `Downloaded ${saved} — ${piRows.length} PI(s).`;
+    statusEl.className = 'status ok';
+  } catch (err) {
+    statusEl.textContent = 'Download failed: ' + err.message;
+    statusEl.className = 'status err';
+  } finally {
+    piwiseBtn.disabled = false;
+  }
 }
 
 genBtn.addEventListener('click', generate);
 downloadBtn.addEventListener('click', downloadXlsx);
+piwiseBtn.addEventListener('click', downloadPiWise);
 
 })();
 

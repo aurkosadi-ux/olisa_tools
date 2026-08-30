@@ -19,29 +19,41 @@ const ast = acorn.parse(src, { ecmaVersion: 2022, locations: true });
 
 const WANT = ['measNorm', 'parseDMY', 'fmtNoteDate', 'manualTime', 'effectiveShort', 'acceptKey',
   'challanDisp', 'normPiKey', 'dmyFromMs', 'acceptedFor', 'remarkColorWord', 'effectiveRemark',
-  'extractMeasurement', 'reconcileManualChallans', 'reconcileExcessAgainstShorts', 'combinedRemarks'];
+  'extractMeasurement', 'reconcileManualChallans', 'reconcileExcessAgainstShorts', 'combinedRemarks',
+  'sameCartonItem'];
 const found = {};
+// Collect EVERY top-level function declaration in the file, then pull in the transitive closure of
+// the ones WANT names. The old version listed helpers by hand, so every helper added to olisa.html
+// since broke this test with a ReferenceError that looked like a product bug and was not one.
+const allFns = {};
 (function scan(node) {
   if (!node || typeof node.type !== 'string') return;
-  if (node.type === 'FunctionDeclaration' && node.id && WANT.includes(node.id.name)) {
-    found[node.id.name] = src.slice(node.start, node.end);
-  }
-  for (const k of Object.keys(node)) {
+  if (node.type === 'FunctionDeclaration' && node.id) allFns[node.id.name] = src.slice(node.start, node.end);
+  for (const k in node) {
     if (k === 'loc') continue;
     const v = node[k];
     if (Array.isArray(v)) v.forEach(c => c && typeof c.type === 'string' && scan(c));
     else if (v && typeof v.type === 'string') scan(v);
   }
 })(ast);
-
+const IDENT = /\b([A-Za-z_$][\w$]*)\s*\(/g;
+const queue = [...WANT];
+while (queue.length) {
+  const n = queue.shift();
+  if (found[n] || !allFns[n]) continue;
+  found[n] = allFns[n];
+  let m; IDENT.lastIndex = 0;
+  while ((m = IDENT.exec(allFns[n]))) if (allFns[m[1]] && !found[m[1]]) queue.push(m[1]);
+}
 // The previous build has no excess pass at all — stub it so the same harness runs both.
 if (!found['reconcileExcessAgainstShorts']) found['reconcileExcessAgainstShorts'] = 'function reconcileExcessAgainstShorts() {}';
+const WANTED_ORDER = Object.keys(found);
 const missing = WANT.filter(n => !found[n]);
 if (missing.length) { console.error('FAIL: could not lift ' + missing.join(', ') + ' from ' + path); process.exit(1); }
 
 const sandbox = `
   let allRecords = [], acceptedShorts = {}, remarkOverrides = {};
-  ${WANT.map(n => found[n]).join('\n')}
+  ${WANTED_ORDER.map(n => found[n]).join('\n')}
   return { run: () => reconcileManualChallans(),
            set: r => { allRecords = r; },
            get: () => allRecords,
@@ -177,12 +189,16 @@ t('excess total moved by exactly the pieces matched', (rawExcess - totalExcess) 
 
 // ================= 4. matching discipline =================
 console.log('\n4. Matching discipline');
-let badMeas = 0, badTime = 0, badStyle = 0;
+let badMeas = 0, badTime = 0, badStyle = 0; const orphans = [];
 all.forEach(x => {
   if (!(x._consumed > 0)) return;
+  // NOTE: exact equality is stricter than the shipped rule, which walks a ladder of
+  // exact -> format-variant -> prefix. Anything this reports is a PREFIX-tier match: the pieces went
+  // to a short on a NEARBY style, not the same one. That is the matcher working as designed, but it
+  // is worth a human eye, so the lines are named rather than quietly accepted.
   const partners = all.filter(s => (s._covered || 0) > 0 && s.styleNorm === x.styleNorm &&
     API.measNorm(s.itemDesc) === API.measNorm(x.itemDesc));
-  if (!partners.length) { badStyle++; return; }
+  if (!partners.length) { badStyle++; orphans.push(x); return; }
   partners.forEach(s => { if (API.measNorm(s.itemDesc) !== API.measNorm(x.itemDesc)) badMeas++; });
 });
 // Time order is checked against the DATE THE CODE ITSELF WROTE into the note, not against a
@@ -199,7 +215,11 @@ all.forEach(r => {
     if (noteMs < own) timeTravel.push(r.sheet + ':' + r.xlRow + ' short ' + new Date(own).toISOString().slice(0,10) + ' <- note ' + n);
   });
 });
-t('coverage only ever within the same style', badStyle === 0, badStyle);
+if (orphans.length) {
+  console.log('   FYI — excess consumed with no same-style covered short (prefix-tier matches):');
+  orphans.forEach(x => console.log('     ' + x.styleNorm + '  consumed=' + x._consumed + ' pcs'));
+}
+t('coverage only ever within the same style', badStyle === 0, badStyle + ' prefix-tier match(es) — see list above');
 t('coverage only ever at the same measurement', badMeas === 0, badMeas);
 t('no note claims delivery BEFORE the short happened', timeTravel.length === 0, timeTravel.slice(0,3).join(' ;; '));
 t('undated lines never act as a coverage source',
