@@ -166,7 +166,7 @@
                         <div class="flex flex-col mb-2">
                             <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Rate per SQM ($)</label>
                             <div class="relative">
-                                <input type="number" id="ratePerSqm" value="0.80" oninput="App.calculatePrice()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                                <input type="number" min="0" id="ratePerSqm" value="0.80" oninput="App.calculatePrice()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
                             </div>
                         </div>
                     </div>
@@ -177,15 +177,15 @@
                 <div id="dimensionInputs" class="grid grid-cols-3 gap-3">
                     <div class="flex flex-col mb-2">
                         <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Length (L)</label>
-                        <input type="number" id="lengthInput" value="" placeholder="0.00" oninput="App.calculatePrice()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                        <input type="number" min="0" id="lengthInput" value="" placeholder="0.00" oninput="App.calculatePrice()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
                     </div>
                     <div class="flex flex-col mb-2">
                         <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Width (W)</label>
-                        <input type="number" id="widthInput" value="" placeholder="0.00" oninput="App.calculatePrice()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                        <input type="number" min="0" id="widthInput" value="" placeholder="0.00" oninput="App.calculatePrice()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
                     </div>
                     <div class="flex flex-col mb-2" id="heightContainer">
                         <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Height (H)</label>
-                        <input type="number" id="heightInput" value="" placeholder="0.00" oninput="App.calculatePrice()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                        <input type="number" min="0" id="heightInput" value="" placeholder="0.00" oninput="App.calculatePrice()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
                     </div>
                 </div>
 
@@ -214,11 +214,11 @@
                     <div class="grid grid-cols-2 gap-3">
                         <div class="flex flex-col mb-2">
                             <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Wastage Width (WW)</label>
-                            <input type="number" id="wastageWidth" value="6" oninput="App.calculatePrice()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                            <input type="number" min="0" id="wastageWidth" value="6" oninput="App.calculatePrice()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
                         </div>
                         <div class="flex flex-col mb-2">
                             <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Wastage Height (WH)</label>
-                            <input type="number" id="wastageHeight" value="4" oninput="App.calculatePrice()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                            <input type="number" min="0" id="wastageHeight" value="4" oninput="App.calculatePrice()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
                         </div>
                     </div>
                 </div>
@@ -260,6 +260,36 @@
 
     // --- Helper Functions ---
     const getVal = (id) => parseFloat(document.getElementById(id).value) || 0;
+
+    // A blank or negative box reads as 0 through getVal, and 0 flows all the way into a copied quote
+    // as "$0.0000 / pcs." — a real-looking price, sent to a customer, for a carton nobody measured.
+    // Live typing still shows 0.0000, because you have to be able to type "7" before "71.5". But a
+    // quote is only allowed OUT of the calculator once every number behind it is a real one.
+    function badNumbers(vals) {
+        const bad = [];
+        for (const label in vals) {
+            const n = Number(vals[label]);
+            if (!Number.isFinite(n) || n <= 0) bad.push(label);
+        }
+        return bad;
+    }
+    function refuseQuote(bad) {
+        // Reuses the existing "Quote Copied!" line under the price, in red. It is already positioned
+        // and already fades, so the refusal appears exactly where the confirmation would have.
+        const el = document.getElementById('copyMessage');
+        const msg = 'Nothing copied \u2014 ' + bad.join(', ') + ' must be greater than zero.';
+        if (el) {
+            el.textContent = msg;
+            el.classList.remove('text-emerald-600');
+            el.classList.add('text-red-600');
+            el.style.opacity = '1';
+            setTimeout(() => {
+                el.style.opacity = '0';
+                el.classList.remove('text-red-600');
+                el.classList.add('text-emerald-600');
+            }, 4500);
+        } else { alert(msg); }
+    }
     const formatSqm = (value) => value.toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 4 });
     const formatCurrency = (value) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 4, maximumFractionDigits: 4 }).format(value);
     const formatRawPrice = (value) => parseFloat(value).toFixed(4);
@@ -446,31 +476,31 @@
                      priced at different rates in the same quote. Defaults to the last rate used. -->
                 <div class="flex flex-col mb-2">
                     <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Rate per SQM ($)</label>
-                    <input type="number" id="multiRate-${index}" value="${App.lastRate}" oninput="App.rememberRate(${index}); App.calculateAllMultiPrices();" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                    <input type="number" min="0" id="multiRate-${index}" value="${App.lastRate}" oninput="App.rememberRate(${index}); App.calculateAllMultiPrices();" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
                 </div>
 
                 <!-- NEW: Separate L, W, H inputs -->
                 <h5 class="text-xs font-medium text-gray-700 mt-2 mb-1 leading-tight">Measurements (CM)</h5>
                 <div id="multiDimensionInputs-${index}" class="grid grid-cols-3 gap-3">
                     <div class="flex flex-col">
-                        <input type="number" id="multiL-${index}" placeholder="L" oninput="App.calculateAllMultiPrices()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                        <input type="number" min="0" id="multiL-${index}" placeholder="L" oninput="App.calculateAllMultiPrices()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
                     </div>
                     <div class="flex flex-col">
-                        <input type="number" id="multiW-${index}" placeholder="W" oninput="App.calculateAllMultiPrices()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                        <input type="number" min="0" id="multiW-${index}" placeholder="W" oninput="App.calculateAllMultiPrices()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
                     </div>
                     <div class="flex flex-col" id="multiHContainer-${index}">
-                        <input type="number" id="multiH-${index}" placeholder="H" oninput="App.calculateAllMultiPrices()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                        <input type="number" min="0" id="multiH-${index}" placeholder="H" oninput="App.calculateAllMultiPrices()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
                     </div>
                 </div>
                 
                 <div id="multiWastageContainer-${index}" class="grid grid-cols-2 gap-3 mt-4">
                     <div class="flex flex-col mb-2">
                         <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Wastage W (CM)</label>
-                        <input type="number" id="multiWW-${index}" value="6" oninput="App.calculateAllMultiPrices()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                        <input type="number" min="0" id="multiWW-${index}" value="6" oninput="App.calculateAllMultiPrices()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
                     </div>
                     <div class="flex flex-col mb-2">
                         <label class="text-xs font-medium text-gray-700 mb-1 leading-tight">Wastage H (CM)</label>
-                        <input type="number" id="multiWH-${index}" value="4" oninput="App.calculateAllMultiPrices()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
+                        <input type="number" min="0" id="multiWH-${index}" value="4" oninput="App.calculateAllMultiPrices()" class="w-full p-2.5 rounded-lg border text-sm bg-white border-gray-300 focus:border-indigo-600 focus:ring-indigo-600" step="any">
                     </div>
                 </div>
             `;
@@ -604,6 +634,12 @@
             } else {
                 dimensionString = `L${displayL} X W${displayW} X H${displayH} CM`;
             }
+            // Refuse before building the string, not after: once it is on the clipboard it is gone.
+            const _need = { Length: displayL, Width: displayW, Rate: price };
+            if (itemName !== 'Top/Bottom') _need.Height = displayH;
+            const _bad = badNumbers(_need);
+            if (_bad.length) return refuseQuote(_bad);
+
 
             const quoteString = `${itemName}; ${dimensionString} - $${price} / pcs.`;
             App.copyToClipboard(quoteString, 'Quote Copied!');
@@ -619,6 +655,7 @@
             // Use the specified opening phrase
             let quoteString = "Please see the prices below-\n\n";
             let itemQuotes = [];
+            const badRows = [];
             
             // Get all actual row elements currently in the container
             const container = document.getElementById('multipleRowsContainer');
@@ -650,10 +687,19 @@
                     dimensionString = `L${L} X W${W} X H${H} CM`;
                 }
                 
+                // Same rule as the single quote: a row with a missing or negative measurement is a
+                // row nobody priced. It names the item number so you know which one to go back to,
+                // rather than refusing the whole list with no clue where the gap is.
+                const _need = { Length: L_raw, Width: W_raw, Rate: price };
+                if (itemName !== 'Top/Bottom') _need.Height = H_raw;
+                const _bad = badNumbers(_need);
+                if (_bad.length) { badRows.push(`item ${index + 1} (${_bad.join(', ')})`); return; }
+
                 // Use index + 1 for sequential numbering
                 const itemQuote = `${index + 1}. ${itemName}; ${dimensionString} - $${price} / pcs.`;
                 itemQuotes.push(itemQuote);
             });
+            if (badRows.length) return refuseQuote(badRows);
 
             // Assemble the final string without a grand total
             quoteString += itemQuotes.join('\n');
@@ -675,13 +721,23 @@
             document.body.appendChild(tempInput);
 
             let success = false;
-            try {
-                tempInput.select();
-                document.execCommand('copy');
+            // navigator.clipboard is the supported path and the one that behaves on modern Android,
+            // where execCommand is increasingly a no-op that still reports success. It needs a secure
+            // context, so the old textarea trick stays behind it rather than being thrown away.
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(textToCopy).catch(() => {
+                    try { tempInput.select(); document.execCommand('copy'); } catch (e) {}
+                });
                 success = true;
-            } catch (err) {
-                console.error('Copy failed with execCommand fallback:', err);
-                success = false;
+            } else {
+                try {
+                    tempInput.select();
+                    document.execCommand('copy');
+                    success = true;
+                } catch (err) {
+                    console.error('Copy failed with execCommand fallback:', err);
+                    success = false;
+                }
             }
 
             document.body.removeChild(tempInput);

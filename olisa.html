@@ -2434,14 +2434,22 @@ async function downloadXlsx() {
   titleCell.value = generatedTitle;                  // "…Schedule\n(31st August 2026)"
   titleCell.font = { bold: true, size: 13, name: 'Arial' };
   titleCell.alignment = UND_CENTER;                  // wrapText keeps the break inside the one cell
-  ws.getRow(1).height = 40;                          // room for both lines
+  // The YELLOW belongs to the heading, not the column names. Filling the merged title cell alone
+  // leaves a gap of white across the rest of row 1, so the fill is applied to every cell the merge
+  // covers — Excel merges the display, not the formatting underneath it.
+  for (let c = 1; c <= NCOL; c++) {
+    const cell = ws.getCell(1, c);
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFF00' } };
+    cell.border = UND_BORDER;
+  }
+  ws.getRow(1).height = 39;
 
   const headerRow = ws.getRow(2);
   UND_HEADERS.forEach((h, i) => { headerRow.getCell(i + 1).value = h; });
-  headerRow.height = 34;                             // taller than a body row, as asked
+  headerRow.height = 28;
   headerRow.eachCell({ includeEmpty: true }, c => {
     c.font = { bold: true, name: 'Arial', size: 10 };
-    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFF00' } };   // yellow
+    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8EAF0' } };   // plain grey, not yellow
     c.alignment = UND_CENTER;
     c.border = UND_BORDER;
   });

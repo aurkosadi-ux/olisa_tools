@@ -122,18 +122,26 @@ function fakeFile(p) {
       t('title reads OLISA\'s Undelivered Qty & Delivery Schedule', title.startsWith("OLISA's Undelivered Qty & Delivery Schedule"), title.slice(0, 60));
       t('the date sits on a SECOND LINE of the same cell', title.includes('\n(') && title.trim().endsWith(')'), JSON.stringify(title));
       t('the title is one merged cell, not two rows', String(w.getCell('A2').value || '') === 'PI');
-      t('title row is given height for two lines', (w.getRow(1).height || 0) >= 30, String(w.getRow(1).height));
       t('title cell wraps (without it Excel drops the break)', w.getCell('A1').alignment && w.getCell('A1').alignment.wrapText === true);
       const hrow = w.getRow(2);
       t('header row is taller than a body row', (hrow.height || 0) > (w.getRow(3).height || 15), `${hrow.height} vs ${w.getRow(3).height}`);
+      // The YELLOW belongs to the heading row, not the column-name row.
+      let titleYellow = 0;
+      for (let c = 1; c <= 7; c++) {
+        const f = w.getCell(1, c).fill;
+        if (f && f.fgColor && f.fgColor.argb === 'FFFFFF00') titleYellow++;
+      }
+      t(`the heading row is yellow all the way across (${titleYellow}/7)`, titleYellow === 7);
       let yellow = 0, centred = 0, cells = 0;
       hrow.eachCell({ includeEmpty: true }, c => {
         cells++;
         if (c.fill && c.fill.fgColor && c.fill.fgColor.argb === 'FFFFFF00') yellow++;
         if (c.alignment && c.alignment.horizontal === 'center' && c.alignment.vertical === 'middle') centred++;
       });
-      t(`every header cell is yellow (${yellow}/${cells})`, yellow === cells && cells === 7);
-      t('every header cell is centred and middle-aligned', centred === cells);
+      t('the PI/Item/Style row is NOT yellow', yellow === 0, `${yellow} yellow header cell(s)`);
+      t('every header cell is centred and middle-aligned', centred === cells && cells === 7);
+      t('heading row height is 39', w.getRow(1).height === 39, String(w.getRow(1).height));
+      t('column-name row height is 28', hrow.height === 28, String(hrow.height));
       t('headers are the seven asked for', want.every((v, i) => w.getCell(2, i + 1).value === v),
         want.map((v, i) => w.getCell(2, i + 1).value).join(' | '));
       let offCentre = 0, body = 0;
