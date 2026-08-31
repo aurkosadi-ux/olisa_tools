@@ -2327,6 +2327,10 @@ function buildOutputRows(groups) {
     const kinds = ['master', 'punch', 'cross'].filter(k => entries.some(([, v]) => v[k] > 0));
     const itemLabel = kinds.map(k => KIND_LABEL[k]).join(' & ');
     const groupStart = rows.length;
+    // Same pass, two outputs: the per-style lines the main report shows, and the ONE per-PI total
+    // the PI Wise sheet shows. Summing here rather than re-walking the groups afterwards is what
+    // guarantees the two sheets can never disagree about a PI.
+    let piMaster = 0, piPunch = 0, piCross = 0;
     entries.forEach(([, v], i) => {
       rows.push({
         piRef: i === 0 ? g.ref : null,
@@ -2337,12 +2341,17 @@ function buildOutputRows(groups) {
         punch: v.punch || null,
         cross: v.cross || null
       });
+      piMaster += v.master; piPunch += v.punch; piCross += v.cross;
       totalMaster += v.master;
       totalPunch += v.punch;
       totalCross += v.cross;
     });
     if (entries.length > 1) rows[groupStart]._span = entries.length;
-    piRows.push({ ref: g.ref, doDate: g.piDate || '', deliveryDate: g.deliveryDate || '', status: 'Undelivered' });
+    piRows.push({
+      ref: g.ref, doDate: g.piDate || '', deliveryDate: g.deliveryDate || '',
+      master: piMaster, punch: piPunch, cross: piCross,
+      status: 'Undelivered'
+    });
   }
   return { rows, piRows, totalMaster, totalPunch, totalCross };
 }
@@ -2517,47 +2526,69 @@ async function downloadPiWise() {
   try {
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('PI Wise Priority Delivery Date');
-    ws.columns = [{ width: 12 }, { width: 20 }, { width: 26 }, { width: 16 }];
+    const PW_HEADS = ['PI', 'DO Date', 'Priority Delivery Date',
+                      'Master Carton', 'Master Carton (Punch)', 'Cross Divider', 'Status'];
+    const PW_N = PW_HEADS.length;
+    ws.columns = [{ width: 10 }, { width: 16 }, { width: 22 },
+                  { width: 16 }, { width: 20 }, { width: 15 }, { width: 14 }];
 
-    ws.mergeCells(1, 1, 1, 4);
+    ws.mergeCells(1, 1, 1, PW_N);
     const t1 = ws.getCell(1, 1);
-    t1.value = 'PI WISE PRIORITY DELIVERY DATE';
+    // Two lines in the one cell, matching the main report's heading rather than sitting on two rows.
+    t1.value = `PI WISE PRIORITY DELIVERY DATE\n(${dateInput.value})`;
     t1.font = { bold: true, size: 13, name: 'Arial' };
     t1.alignment = UND_CENTER;
-    ws.getRow(1).height = 26;
+    for (let c = 1; c <= PW_N; c++) {
+      ws.getCell(1, c).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFF00' } };
+      ws.getCell(1, c).border = UND_BORDER;
+    }
+    ws.getRow(1).height = 39;
 
-    ws.mergeCells(2, 1, 2, 4);
-    const t2 = ws.getCell(2, 1);
-    t2.value = `(${dateInput.value})`;
-    t2.font = { bold: true, size: 11, name: 'Arial' };
-    t2.alignment = UND_CENTER;
-    ws.getRow(2).height = 22;
-
-    const heads = ['PI', 'DO Date', 'Priority Delivery Date', 'Status'];
-    const hr = ws.getRow(3);
-    heads.forEach((h, i) => { hr.getCell(i + 1).value = h; });
-    hr.height = 30;
+    const hr = ws.getRow(2);
+    PW_HEADS.forEach((h, i) => { hr.getCell(i + 1).value = h; });
+    hr.height = 28;
     hr.eachCell({ includeEmpty: true }, c => {
       c.font = { bold: true, name: 'Arial', size: 10 };
-      c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFF00' } };
+      c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8EAF0' } };
       c.alignment = UND_CENTER;
       c.border = UND_BORDER;
     });
 
-    let r = 4;
+    let r = 3;
+    let sumMaster = 0, sumPunch = 0, sumCross = 0;
     for (const p of piRows) {
       const row = ws.getRow(r);
       row.getCell(1).value = p.ref;
       row.getCell(2).value = p.doDate;
       row.getCell(3).value = p.deliveryDate;
-      row.getCell(4).value = p.status;
+      // A real 0, not a blank. On a totals sheet "0" says there are none of that item on this PI;
+      // an empty cell leaves the reader wondering whether it was simply never worked out.
+      row.getCell(4).value = p.master || 0;
+      row.getCell(5).value = p.punch || 0;
+      row.getCell(6).value = p.cross || 0;
+      row.getCell(7).value = p.status;
       row.eachCell({ includeEmpty: true }, c => {
         c.font = { name: 'Arial', size: 10 };
         c.alignment = UND_CENTER;
         c.border = UND_BORDER;
       });
+      [4, 5, 6].forEach(c => { row.getCell(c).numFmt = '#,##0'; });
+      sumMaster += p.master || 0; sumPunch += p.punch || 0; sumCross += p.cross || 0;
       r++;
     }
+
+    const tot = ws.getRow(r);
+    tot.getCell(1).value = 'Total';
+    tot.getCell(4).value = sumMaster;
+    tot.getCell(5).value = sumPunch;
+    tot.getCell(6).value = sumCross;
+    ws.mergeCells(r, 1, r, 3);
+    tot.eachCell({ includeEmpty: true }, c => {
+      c.font = { bold: true, name: 'Arial', size: 10 };
+      c.alignment = UND_CENTER;
+      c.border = UND_BORDER;
+    });
+    [4, 5, 6].forEach(c => { tot.getCell(c).numFmt = '#,##0'; });
 
     const dateSlug = dateInput.value.replace(/[^\w]+/g, '_');
     const name = `Olisa Tools - PI Wise Priority Delivery Date ${dateSlug}.xlsx`;

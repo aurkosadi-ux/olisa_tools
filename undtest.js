@@ -168,16 +168,43 @@ function fakeFile(p) {
       const back = new ExcelJS.Workbook();
       await back.xlsx.load(captured);
       const w = back.worksheets[0];
-      t('title row', String(w.getCell('A1').value) === 'PI WISE PRIORITY DELIVERY DATE', String(w.getCell('A1').value));
-      t('date row under the title', String(w.getCell('A2').value) === `(${dateInput.value})`, String(w.getCell('A2').value));
-      t('headers PI / DO Date / Priority Delivery Date / Status',
-        ['PI','DO Date','Priority Delivery Date','Status'].every((v, i) => w.getCell(3, i + 1).value === v));
-      t(`one row per PI (${w.rowCount - 3})`, w.rowCount - 3 === out.piRows.length, `${w.rowCount - 3} vs ${out.piRows.length}`);
-      t('Status is Undelivered on every row',
-        Array.from({ length: w.rowCount - 3 }, (_, i) => w.getCell(i + 4, 4).value).every(v => v === 'Undelivered'));
-      t('DO Date column holds PI_DATE', String(w.getCell(4, 2).value) === out.piRows[0].doDate,
-        `${w.getCell(4, 2).value} vs ${out.piRows[0].doDate}`);
-      t('Priority Delivery Date column holds PI_DLV_DATE', String(w.getCell(4, 3).value) === out.piRows[0].deliveryDate);
+      const title = String(w.getCell('A1').value || '');
+      t('title row', title.startsWith('PI WISE PRIORITY DELIVERY DATE'), title.slice(0, 40));
+      t('the date sits on a second line of the same cell', title.includes(`\n(${dateInput.value})`), JSON.stringify(title));
+      const PW = ['PI','DO Date','Priority Delivery Date','Master Carton','Master Carton (Punch)','Cross Divider','Status'];
+      t('seven columns, quantities before Status',
+        PW.every((v, i) => w.getCell(2, i + 1).value === v),
+        PW.map((v, i) => w.getCell(2, i + 1).value).join(' | '));
+      const nData = out.piRows.length;
+      t(`one row per PI (${nData}) plus a Total row`, w.rowCount === 2 + nData + 1, `${w.rowCount} rows`);
+      t('Status is Undelivered on every PI row',
+        Array.from({ length: nData }, (_, i) => w.getCell(i + 3, 7).value).every(v => v === 'Undelivered'));
+      t('DO Date column holds PI_DATE', String(w.getCell(3, 2).value) === out.piRows[0].doDate,
+        `${w.getCell(3, 2).value} vs ${out.piRows[0].doDate}`);
+      t('Priority Delivery Date column holds PI_DLV_DATE', String(w.getCell(3, 3).value) === out.piRows[0].deliveryDate);
+
+      // The quantities are the whole point of the new columns: they must equal the per-PI totals
+      // in the main report, PI for PI, or the two sheets tell the business head different stories.
+      let mism = 0, zeroBlank = 0;
+      for (let i = 0; i < nData; i++) {
+        const p = out.piRows[i], rr = i + 3;
+        if (Number(w.getCell(rr, 4).value) !== p.master) mism++;
+        if (Number(w.getCell(rr, 5).value) !== p.punch) mism++;
+        if (Number(w.getCell(rr, 6).value) !== p.cross) mism++;
+        [4, 5, 6].forEach(c => { if (w.getCell(rr, c).value === null || w.getCell(rr, c).value === undefined) zeroBlank++; });
+      }
+      t('every PI quantity matches its group total', mism === 0, mism + ' mismatched cell(s)');
+      t('a zero quantity is written as 0, never left blank', zeroBlank === 0, zeroBlank + ' blank(s)');
+      const lastR = w.rowCount;
+      t('Total row sums Master Carton', Number(w.getCell(lastR, 4).value) === out.totalMaster,
+        `${w.getCell(lastR, 4).value} vs ${out.totalMaster}`);
+      t('Total row sums Master Carton (Punch)', Number(w.getCell(lastR, 5).value) === out.totalPunch);
+      t('Total row sums Cross Divider', Number(w.getCell(lastR, 6).value) === out.totalCross);
+      t('PI Wise totals equal the main report totals',
+        Number(w.getCell(lastR, 4).value) + Number(w.getCell(lastR, 5).value) + Number(w.getCell(lastR, 6).value)
+          === out.totalMaster + out.totalPunch + out.totalCross);
+      t('heading row is yellow', (() => { let n = 0; for (let c = 1; c <= 7; c++) { const f = w.getCell(1, c).fill; if (f && f.fgColor && f.fgColor.argb === 'FFFFFF00') n++; } return n === 7; })());
+      t('the column-name row is not yellow', (() => { let n = 0; for (let c = 1; c <= 7; c++) { const f = w.getCell(2, c).fill; if (f && f.fgColor && f.fgColor.argb === 'FFFFFF00') n++; } return n === 0; })());
       let off = 0, n = 0;
       for (let rr = 1; rr <= w.rowCount; rr++) w.getRow(rr).eachCell({ includeEmpty: true }, c => {
         n++; if (!c.alignment || c.alignment.horizontal !== 'center') off++;

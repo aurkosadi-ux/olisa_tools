@@ -4,7 +4,7 @@
 /* Bump this on EVERY release. The name is the only thing that evicts the old cache: the activate
    handler deletes every cache whose key isn't this one. It sat on v24 through three releases,
    which left anyone opening the app offline on a stale build. */
-const CACHE = 'olisa-tools-v44';
+const CACHE = 'olisa-tools-v45';
 const SHELL = ['./', './index.html', './olisa.html', './calculator.html', './DC_Bypass_Bill.html', './manifest.json', './icon-192.png', './icon-512.png', './calc-icon-512.png', './apple-touch-icon.png'];
 
 self.addEventListener('install', e => {
