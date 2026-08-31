@@ -49,6 +49,7 @@ function fakeFile(p) {
   console.log('1. Punch is its own kind');
   t('"Master Carton" is master', M.itemKind('Master Carton') === 'master');
   t('"Master Carton (Punch)" is punch', M.itemKind('Master Carton (Punch)') === 'punch', M.itemKind('Master Carton (Punch)'));
+  t('renaming the LABEL did not change the MATCH', M.itemKind('Master Carton (Punch)') === 'punch' && M.KIND_LABEL.punch === 'Chip Box (Punch)', M.KIND_LABEL.punch);
   t('lower-case "punch" still counts', M.itemKind('master carton punch') === 'punch');
   t('"Perforated Master Carton" is the same thing', M.itemKind('Perforated Master Carton') === 'punch');
   t('"Cross Divider" is cross', M.itemKind('Cross Divider') === 'cross');
@@ -57,7 +58,7 @@ function fakeFile(p) {
   t('every kind has a label', ['master','punch','cross'].every(k => M.KIND_LABEL[k]));
 
   console.log('\n2. Column layout is exactly what was asked for');
-  const want = ['PI','Item','Style','Priority Delivery Date','Master Carton (qty)','Perforated Master Carton (qty)','Cross Divider (qty)'];
+  const want = ['Priority Delivery Date','Item','Style','PI','Master Carton (qty)','Chip Box (Punch) (qty)','Cross Divider (qty)'];
   t('seven columns, named and ordered', JSON.stringify(M.UND_HEADERS) === JSON.stringify(want), JSON.stringify(M.UND_HEADERS));
   ['Buyer','Priority','Previous PI'].forEach(c =>
     t(`"${c}" column is gone`, !M.UND_HEADERS.includes(c)));
@@ -104,8 +105,29 @@ function fakeFile(p) {
     const punchRow = out.rows.find(r => r.punch);
     t('a punch line carries its qty in the punch column', !!punchRow && punchRow.punch > 0);
     t('a punch line leaves the master column empty', !!punchRow && !punchRow.master);
-    const punchLabel = out.rows.find(r => r.item && /Punch/.test(r.item));
-    t('the Item column names Master Carton (Punch)', !!punchLabel, out.rows.filter(r => r.item).map(r => r.item).join(' | '));
+    const punchLabel = out.rows.find(r => r.item && /Chip Box \(Punch\)/.test(r.item));
+    t('the Item column names Chip Box (Punch)', !!punchLabel, out.rows.filter(r => r.item).map(r => r.item).join(' | '));
+    t('no sheet still says "Perforated Master Carton"', !/Perforated Master Carton/.test(src));
+    t('the Item column no longer says "Master Carton (Punch)"',
+      !out.rows.some(r => r.item && /Master Carton \(Punch\)/.test(r.item)));
+
+    console.log('\n3b. Rows run earliest delivery date first');
+    const key = l => { const m = String(l||'').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); return m ? Date.UTC(+m[3],+m[2]-1,+m[1]) : null; };
+    const seq = out.piRows.map(p => key(p.deliveryDate));
+    t('delivery dates ascend, never descend',
+      seq.every((v, i) => i === 0 || v === null || seq[i-1] === null || seq[i-1] <= v),
+      out.piRows.map(p => p.deliveryDate).join(' -> '));
+    t('undated PIs sort last, not into the middle',
+      (() => { const f = seq.findIndex(v => v === null); return f === -1 || seq.slice(f).every(v => v === null); })());
+    t('PI order is kept inside a shared date', (() => {
+      for (let i = 1; i < out.piRows.length; i++)
+        if (seq[i] === seq[i-1] && Number(out.piRows[i].ref) < Number(out.piRows[i-1].ref)) return false;
+      return true;
+    })(), out.piRows.map(p => `${p.deliveryDate}#${p.ref}`).join(' '));
+    t('both sheets list the PIs in the SAME order',
+      out.rows.filter(r => r.piRef).map(r => String(r.piRef)).join(',') === out.piRows.map(p => String(p.ref)).join(','));
+    t('no PI was lost or duplicated by the sort',
+      new Set(out.piRows.map(p => p.ref)).size === out.piRows.length);
 
     console.log('\n4. The real workbook, read back cell by cell');
     M.setState(out.rows, out.piRows, `OLISA's Undelivered Qty & Delivery Schedule\n(${dateInput.value})`);
@@ -121,7 +143,7 @@ function fakeFile(p) {
       const title = String(w.getCell('A1').value || '');
       t('title reads OLISA\'s Undelivered Qty & Delivery Schedule', title.startsWith("OLISA's Undelivered Qty & Delivery Schedule"), title.slice(0, 60));
       t('the date sits on a SECOND LINE of the same cell', title.includes('\n(') && title.trim().endsWith(')'), JSON.stringify(title));
-      t('the title is one merged cell, not two rows', String(w.getCell('A2').value || '') === 'PI');
+      t('the title is one merged cell, not two rows', String(w.getCell('A2').value || '') === want[0], String(w.getCell('A2').value));
       t('title cell wraps (without it Excel drops the break)', w.getCell('A1').alignment && w.getCell('A1').alignment.wrapText === true);
       const hrow = w.getRow(2);
       t('header row is taller than a body row', (hrow.height || 0) > (w.getRow(3).height || 15), `${hrow.height} vs ${w.getRow(3).height}`);
@@ -171,7 +193,7 @@ function fakeFile(p) {
       const title = String(w.getCell('A1').value || '');
       t('title row', title.startsWith('PI WISE PRIORITY DELIVERY DATE'), title.slice(0, 40));
       t('the date sits on a second line of the same cell', title.includes(`\n(${dateInput.value})`), JSON.stringify(title));
-      const PW = ['PI','DO Date','Priority Delivery Date','Master Carton','Master Carton (Punch)','Cross Divider','Status'];
+      const PW = ['Priority Delivery Date','DO Date','PI','Master Carton','Chip Box (Punch)','Cross Divider','Status'];
       t('seven columns, quantities before Status',
         PW.every((v, i) => w.getCell(2, i + 1).value === v),
         PW.map((v, i) => w.getCell(2, i + 1).value).join(' | '));
@@ -179,9 +201,15 @@ function fakeFile(p) {
       t(`one row per PI (${nData}) plus a Total row`, w.rowCount === 2 + nData + 1, `${w.rowCount} rows`);
       t('Status is Undelivered on every PI row',
         Array.from({ length: nData }, (_, i) => w.getCell(i + 3, 7).value).every(v => v === 'Undelivered'));
-      t('DO Date column holds PI_DATE', String(w.getCell(3, 2).value) === out.piRows[0].doDate,
-        `${w.getCell(3, 2).value} vs ${out.piRows[0].doDate}`);
-      t('Priority Delivery Date column holds PI_DLV_DATE', String(w.getCell(3, 3).value) === out.piRows[0].deliveryDate);
+      t('column 1 is now the Priority Delivery Date', String(w.getCell(3, 1).value) === out.piRows[0].deliveryDate,
+        `${w.getCell(3, 1).value} vs ${out.piRows[0].deliveryDate}`);
+      t('DO Date column still holds PI_DATE', String(w.getCell(3, 2).value) === out.piRows[0].doDate);
+      t('column 3 is now the PI', String(w.getCell(3, 3).value) === String(out.piRows[0].ref));
+      t('the written sheet is in date order too', (() => {
+        const k = l => { const m = String(l||'').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); return m ? Date.UTC(+m[3],+m[2]-1,+m[1]) : null; };
+        const col = Array.from({length: out.piRows.length}, (_, i) => k(w.getCell(i + 3, 1).value));
+        return col.every((v, i) => i === 0 || v === null || col[i-1] === null || col[i-1] <= v);
+      })());
 
       // The quantities are the whole point of the new columns: they must equal the per-PI totals
       // in the main report, PI for PI, or the two sheets tell the business head different stories.

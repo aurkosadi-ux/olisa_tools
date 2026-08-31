@@ -1013,10 +1013,11 @@ document.addEventListener('click', function (e) {
     <div class="previewbox"><table class="preview" id="undpreviewTable"></table></div>
     <div class="totals" id="undtotalsBox"></div>
     <div class="hint">
-      Every column is taken straight from the raw export. <b>Master Carton (Punch)</b> is counted in its own
-      <b>Perforated Master Carton</b> column and named as itself in the Item column &mdash; it is no longer
-      folded in with plain Master Carton. <b>PI Wise Priority Delivery Date</b> downloads the separate
-      PI / DO Date / Priority Delivery Date sheet.
+      Every column is taken straight from the raw export. Punch lines are counted in their own
+      <b>Chip Box (Punch)</b> column and named as themselves in the Item column &mdash; they are no longer
+      folded in with plain Master Carton. Rows run <b>earliest delivery date first</b>, and PI order is
+      kept inside each date. <b>PI Wise Priority Delivery Date</b> downloads the separate one-line-per-PI
+      sheet with the same totals.
     </div>
   </div>
   </div>
@@ -2290,7 +2291,10 @@ function itemKind(desc) {
   if (/punch|perforat/i.test(d)) return 'punch';
   return 'master';
 }
-const KIND_LABEL = { master: 'Master Carton', punch: 'Master Carton (Punch)', cross: 'Cross Divider' };
+// DISPLAY name only. itemKind() still matches on the words the raw export actually writes
+// ("punch", "perforated"); renaming what is SHOWN must never change what is MATCHED, or every
+// punch line would silently stop being recognised and land back in the Master Carton column.
+const KIND_LABEL = { master: 'Master Carton', punch: 'Chip Box (Punch)', cross: 'Cross Divider' };
 
 function buildGroups(allRecords) {
   const groups = new Map();
@@ -2315,11 +2319,42 @@ function buildGroups(allRecords) {
   return groups;
 }
 
+// The delivery date arrives as the text the export wrote, so it needs turning back into something
+// that sorts. Anything unrecognised keeps a null key and is placed after the real dates rather than
+// being guessed at and dropped somewhere arbitrary in the middle.
+function deliverySortKey(label) {
+  const t = String(label || '').trim();
+  if (!t) return null;
+  let m = t.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})$/);        // dd/mm/yyyy — the Olisa form
+  if (m) return Date.UTC(+m[3], +m[2] - 1, +m[1]);
+  m = t.match(/^(\d{4})[\/.\-](\d{1,2})[\/.\-](\d{1,2})$/);            // yyyy-mm-dd
+  if (m) return Date.UTC(+m[1], +m[2] - 1, +m[3]);
+  m = t.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2})$/);            // dd/mm/yy
+  if (m) return Date.UTC(2000 + +m[3], +m[2] - 1, +m[1]);
+  return null;
+}
+function piSortKey(ref) {
+  const n = Number(ref);
+  return Number.isFinite(n) ? n : Number.MAX_SAFE_INTEGER;
+}
+
 function buildOutputRows(groups) {
   const rows = [];
   const piRows = [];
   let totalMaster = 0, totalPunch = 0, totalCross = 0;
-  for (const [, g] of groups) {
+  // Earliest delivery date at the top. PI order is kept WITHIN a date, so the serial run you had
+  // before survives wherever several PIs share a due date. Both sheets are written from this one
+  // ordered list, which is what stops the two attachments listing the same PIs differently.
+  const ordered = [...groups.values()].sort((a, b) => {
+    const ka = deliverySortKey(a.deliveryDate), kb = deliverySortKey(b.deliveryDate);
+    if (ka !== null && kb !== null && ka !== kb) return ka - kb;
+    if (ka === null && kb !== null) return 1;
+    if (kb === null && ka !== null) return -1;
+    const pa = piSortKey(a.ref), pb = piSortKey(b.ref);
+    if (pa !== pb) return pa - pb;
+    return String(a.ref).localeCompare(String(b.ref));
+  });
+  for (const g of ordered) {
     const entries = [...g.styles.entries()].filter(([, v]) => v.master > 0 || v.punch > 0 || v.cross > 0);
     if (!entries.length) continue;
     // The Item label names every kind actually present on the PI, in a fixed order, so a PI that
@@ -2401,19 +2436,21 @@ async function generate() {
 
 function undYield() { return new Promise(r => setTimeout(r, 0)); }
 
-const UND_HEADERS = ['PI','Item','Style','Priority Delivery Date','Master Carton (qty)','Perforated Master Carton (qty)','Cross Divider (qty)'];
+// Delivery date first: this is a delivery schedule, so the date is what the reader scans down.
+// PI moves into the slot the date left.
+const UND_HEADERS = ['Priority Delivery Date','Item','Style','PI','Master Carton (qty)','Chip Box (Punch) (qty)','Cross Divider (qty)'];
 
 function renderPreview(rows, totalMaster, totalPunch, totalCross) {
   let html = '<tr>' + UND_HEADERS.map(h => `<th style="text-align:center;vertical-align:middle;">${escHtml(h)}</th>`).join('') + '</tr>';
   for (const r of rows) {
-    html += '<tr>' + [r.piRef, r.item, r.style, r.deliveryDate, r.master, r.punch, r.cross]
+    html += '<tr>' + [r.deliveryDate, r.item, r.style, r.piRef, r.master, r.punch, r.cross]
       .map(v => `<td style="text-align:center;vertical-align:middle;">${v === null || v === undefined ? '' : escHtml(v)}</td>`).join('') + '</tr>';
   }
   html += `<tr style="font-weight:700;background:#f7f8fa;text-align:center;"><td colspan="4">Total</td>`
         + `<td>${totalMaster}</td><td>${totalPunch}</td><td>${totalCross}</td></tr>`;
   previewTable.innerHTML = html;
   totalsBox.innerHTML = `<b>Master Carton:</b> ${totalMaster.toLocaleString()}`
-    + ` &nbsp;&nbsp; <b>Perforated Master Carton:</b> ${totalPunch.toLocaleString()}`
+    + ` &nbsp;&nbsp; <b>Chip Box (Punch):</b> ${totalPunch.toLocaleString()}`
     + ` &nbsp;&nbsp; <b>Cross Divider:</b> ${totalCross.toLocaleString()}`;
 }
 
@@ -2429,12 +2466,12 @@ async function downloadXlsx() {
   const ws = wb.addWorksheet('Undelivered Report');
   const NCOL = UND_HEADERS.length;   // 7
   ws.columns = [
-    { width: 10 },   // PI
+    { width: 21 },   // Priority Delivery Date
     { width: 30 },   // Item
     { width: 20 },   // Style
-    { width: 20 },   // Priority Delivery Date
+    { width: 10 },   // PI
     { width: 18 },   // Master Carton (qty)
-    { width: 22 },   // Perforated Master Carton (qty)
+    { width: 21 },   // Chip Box (Punch) (qty)
     { width: 18 }    // Cross Divider (qty)
   ];
 
@@ -2468,10 +2505,10 @@ async function downloadXlsx() {
   const merges = [];
   for (const row of rows) {
     const excelRow = ws.getRow(r);
-    excelRow.getCell(1).value = row.piRef;
+    excelRow.getCell(1).value = row.deliveryDate;
     excelRow.getCell(2).value = row.item;
     excelRow.getCell(3).value = row.style;
-    excelRow.getCell(4).value = row.deliveryDate;
+    excelRow.getCell(4).value = row.piRef;
     excelRow.getCell(5).value = row.master;
     excelRow.getCell(6).value = row.punch;
     excelRow.getCell(7).value = row.cross;
@@ -2486,8 +2523,9 @@ async function downloadXlsx() {
     if (row._span && row._span > 1) merges.push([r, r + row._span - 1]);
     r++;
   }
-  // PI, Item and the delivery date are written once per PI and merged down its styles, exactly as
-  // before — only the column numbers moved, because Buyer is gone from between them.
+  // The delivery date, Item and PI are written once per PI and merged down its styles, exactly as
+  // before. Columns 1 and 4 have swapped contents, so the SAME three columns are still the merged
+  // ones — the date now leads and the PI sits where the date used to.
   merges.forEach(([st, en]) => {
     ws.mergeCells(st, 1, en, 1);
     ws.mergeCells(st, 2, en, 2);
@@ -2526,11 +2564,11 @@ async function downloadPiWise() {
   try {
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('PI Wise Priority Delivery Date');
-    const PW_HEADS = ['PI', 'DO Date', 'Priority Delivery Date',
-                      'Master Carton', 'Master Carton (Punch)', 'Cross Divider', 'Status'];
+    const PW_HEADS = ['Priority Delivery Date', 'DO Date', 'PI',
+                      'Master Carton', 'Chip Box (Punch)', 'Cross Divider', 'Status'];
     const PW_N = PW_HEADS.length;
-    ws.columns = [{ width: 10 }, { width: 16 }, { width: 22 },
-                  { width: 16 }, { width: 20 }, { width: 15 }, { width: 14 }];
+    ws.columns = [{ width: 21 }, { width: 16 }, { width: 10 },
+                  { width: 16 }, { width: 19 }, { width: 15 }, { width: 14 }];
 
     ws.mergeCells(1, 1, 1, PW_N);
     const t1 = ws.getCell(1, 1);
@@ -2558,9 +2596,9 @@ async function downloadPiWise() {
     let sumMaster = 0, sumPunch = 0, sumCross = 0;
     for (const p of piRows) {
       const row = ws.getRow(r);
-      row.getCell(1).value = p.ref;
+      row.getCell(1).value = p.deliveryDate;
       row.getCell(2).value = p.doDate;
-      row.getCell(3).value = p.deliveryDate;
+      row.getCell(3).value = p.ref;
       // A real 0, not a blank. On a totals sheet "0" says there are none of that item on this PI;
       // an empty cell leaves the reader wondering whether it was simply never worked out.
       row.getCell(4).value = p.master || 0;
