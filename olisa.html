@@ -4735,40 +4735,71 @@ async function buildStyleIndex() {
   for await (const [name, handle] of piRootHandle.entries()) {
     if (handle.kind === 'directory') piFolders.push({ name, handle });
   }
-  progressText.textContent = `Found ${piFolders.length} PI folder(s). Starting scan...`;
+  progressText.textContent = `Found ${piFolders.length} PI folder(s). Listing files\u2026`;
 
-  const scanStart = newEtaClock();
-  for (let i = 0; i < piFolders.length; i++) {
-    const { name, handle } = piFolders[i];
+  // THE 25-MINUTE PROBLEM: every folder listing and every file download is one Google Drive round
+  // trip, and this used to do them ONE AT A TIME — finish folder 1 entirely (list, download every
+  // file in it) before folder 2 was even asked about. On Drive's real-world latency that is easily
+  // 200-500ms per request with nothing overlapping it, so 127 folders with a few files each adds up
+  // to hundreds of round trips run back to back. Concurrency is the fix, not a faster connection:
+  // driveFetch already backs off automatically on a 429, so several requests in flight at once is
+  // safe, and runPool is the same tool already used for the PI-quantity and challan phases below.
+  //
+  // Two phases instead of nesting the file loop inside the folder loop: phase 1 finds out what
+  // needs reading (fast, list-only), phase 2 reads all of it in parallel lanes regardless of which
+  // folder each file came from — so a folder with one small file finishes just as fast as it should,
+  // instead of waiting behind a slow neighbour that happened to be scanned first.
+  const LIST_CONCURRENCY = 8;
+  const listStart = newEtaClock();
+  let foldersListed = 0;
+  const perFolder = await runPool(piFolders, LIST_CONCURRENCY, async ({ name, handle }) => {
     const piRef = parsePiNumber(name);
-    foldersScanned++;
     const files = [];
-    for await (const [fname, fhandle] of handle.entries()) {
-      if (fhandle.kind === 'file' && /\.(xlsx|xls)$/i.test(fname)) files.push(fhandle);
-    }
-    for (const fhandle of files) {
-      try {
-        const file = await fhandle.getFile();
-        const buf = await file.arrayBuffer();
-        const wb = XLSX.read(buf, { type: 'array' });
-        let text = '';
-        wb.SheetNames.forEach(sn => {
-          text += XLSX.utils.sheet_to_csv(wb.Sheets[sn]) + '\n';
-        });
-        const tokens = extractStyleTokens(text);
-        tokens.forEach(t => {
-          if (!index[t]) index[t] = [];
-          if (!index[t].includes(piRef)) index[t].push(piRef);
-        });
-        filesScanned++;
-      } catch (e) { /* skip unreadable file */ }
-    }
-    const pct = Math.round(((i + 1) / piFolders.length) * 100);
+    try {
+      for await (const [fname, fhandle] of handle.entries()) {
+        if (fhandle.kind === 'file' && /\.(xlsx|xls)$/i.test(fname)) files.push(fhandle);
+      }
+    } catch (e) { /* this folder is unreadable — its files are simply absent, the rest continue */ }
+    foldersListed++;
+    progressText.textContent = `Listing PI folders: ${foldersListed} / ${piFolders.length}${etaText(listStart, foldersListed, piFolders.length)}`;
+    return { piRef, files };
+  });
+  foldersScanned = foldersListed;
+
+  const readTasks = [];
+  perFolder.forEach(entry => {
+    if (!entry || entry.__err) return;   // a runPool task that threw is skipped, not fatal to the rest
+    entry.files.forEach(fhandle => readTasks.push({ piRef: entry.piRef, fhandle }));
+  });
+  progressBar.style.width = '0%';
+  progressText.textContent = `Found ${readTasks.length} work-order file(s) across ${piFolders.length} PI folder(s). Reading\u2026`;
+
+  const READ_CONCURRENCY = 8;
+  const scanStart = newEtaClock();
+  let filesDone = 0;
+  await runPool(readTasks, READ_CONCURRENCY, async ({ piRef, fhandle }) => {
+    try {
+      const file = await fhandle.getFile();
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: 'array' });
+      let text = '';
+      wb.SheetNames.forEach(sn => {
+        text += XLSX.utils.sheet_to_csv(wb.Sheets[sn]) + '\n';
+      });
+      const tokens = extractStyleTokens(text);
+      tokens.forEach(t => {
+        if (!index[t]) index[t] = [];
+        if (!index[t].includes(piRef)) index[t].push(piRef);
+      });
+      filesScanned++;
+    } catch (e) { /* skip unreadable file */ }
+    filesDone++;
+    const pct = readTasks.length ? Math.round((filesDone / readTasks.length) * 100) : 100;
     progressBar.style.width = pct + '%';
-    progressText.textContent = `Scanning work orders: ${i + 1} / ${piFolders.length} PI folders (${filesScanned} files)${etaText(scanStart, i + 1, piFolders.length)}`;
+    progressText.textContent = `Scanning work orders: ${filesDone} / ${readTasks.length} file(s) across ${piFolders.length} PI folder(s) (${filesScanned} read)${etaText(scanStart, filesDone, readTasks.length)}`;
     styleIndex = index;                 // searchable as it grows, not only when the whole scan ends
     await checkpointStyleIndex(index);  // banked every few seconds — see CHECKPOINT_MS
-  }
+  });
 
   styleIndex = index;
   await checkpointStyleIndex(index, true);
@@ -6526,9 +6557,12 @@ async function buildChallanIndex(onProgress) {
       // ".doc" is included on purpose: those are the hand challans, and they exist in no other form.
       else if (/\.(pdf|docx?|rtf)$/i.test(name)) pdfs.push({ name, path: prefix + name, handle });
     }
-    for (const [name, handle] of subs) {
+    // A "Challans" folder with a subfolder per month used to walk them one at a time — each an
+    // extra Drive round trip waiting on the last. Concurrency 6 matches the folder-walk elsewhere
+    // in this file (the local-disk PI scan uses the same number for the same reason).
+    await runPool(subs, 6, async ([name, handle]) => {
       try { await walk(handle, prefix + name + '/', depth + 1); } catch (e) { /* unreadable subfolder */ }
-    }
+    });
   }
   await walk(root, '', 0);
   if (!pdfs.length) throw new Error(`The "${root.name}" folder has no challan documents (PDF or .doc) in it.`);
@@ -6538,12 +6572,16 @@ async function buildChallanIndex(onProgress) {
   let done = 0, challans = 0, failed = 0;
   const skipped = [];     // opened fine, but no challan header inside — reported, never silent
   const binaryDoc = [];   // genuinely unreadable in a browser; needs re-saving, so name the files
-  for (const f of pdfs) {
+  // Downloading and reading each PDF is one Drive round trip plus real parsing time, and this ran
+  // one document after another. Concurrency 5 matches buildPiQtyIndex, which parses PDFs of a
+  // similar size right above this function — that number is already proven not to overload Drive
+  // or make the page feel stuck while it runs.
+  await runPool(pdfs, 5, async f => {
     let file = null, fp = '';
     try {
       file = await f.handle.getFile();
       fp = `${f.path}|${file.size}|${file.lastModified}`;
-    } catch (e) { failed++; done++; continue; }
+    } catch (e) { failed++; done++; return; }
     // Unchanged file: reuse what was read last time instead of parsing every page again. This is
     // what keeps a rebuild after one new challan to seconds rather than minutes.
     const reused = Object.values(challanIndex).filter(e => e && e.fp === fp);
@@ -6559,7 +6597,7 @@ async function buildChallanIndex(onProgress) {
     done++;
     await checkpointChallanIndex(next);
     if (onProgress) onProgress(done, pdfs.length, challans, etaText(clock, done, pdfs.length));
-  }
+  });
   challanIndex = next;
   challanIndexBuiltAt = Date.now();
   await checkpointChallanIndex(next, true);
