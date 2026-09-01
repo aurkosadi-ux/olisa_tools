@@ -15,7 +15,15 @@
 <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
 <link rel="icon" type="image/png" sizes="512x512" href="icon-512.png">
 <title>Sadi’s Universe</title>
-<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&display=swap" rel="stylesheet">
+<!-- The stylesheet used to BLOCK the first paint: nothing on the page could render until Google
+     answered. On a weak factory connection that is a blank screen for as long as the request takes
+     to time out. Loading it as media="print" lets the browser render immediately, then onload flips
+     it to all and the real fonts swap in. The URL already carries display=swap, so the brief moment
+     of fallback type happened before this change too — the only difference is that the page is now
+     usable during it. The <noscript> copy keeps fonts working with JavaScript disabled.
+     The service worker caches these cache-first, so this only ever costs anything on a first run. -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&display=swap" media="print" onload="this.media='all';this.onload=null">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&display=swap"></noscript>
 <style>
   * { box-sizing: border-box; }
   :root {

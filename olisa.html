@@ -17,15 +17,46 @@
 <title>Olisa Reporting Tools</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.7.0/mammoth.browser.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<!-- The stylesheet used to BLOCK the first paint: nothing on the page could render until Google
+     answered. On a weak factory connection that is a blank screen for as long as the request takes
+     to time out. Loading it as media="print" lets the browser render immediately, then onload flips
+     it to all and the real fonts swap in. The URL already carries display=swap, so the brief moment
+     of fallback type happened before this change too — the only difference is that the page is now
+     usable during it. The <noscript> copy keeps fonts working with JavaScript disabled.
+     The service worker caches these cache-first, so this only ever costs anything on a first run. -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;600&display=swap" media="print" onload="this.media='all';this.onload=null">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;600&display=swap"></noscript>
+<script src="./lib/xlsx.full.min.js"></script>
+<script src="./lib/exceljs.min.js"></script>
+<script src="./lib/mammoth.browser.min.js"></script>
+<script src="./lib/pdf.min.js"></script>
 <!-- pdf.js READS PDFs; it cannot write them. Splitting one challan out of a multi-challan file
      needs a writer, so pdf-lib copies the exact pages into a fresh, valid PDF. -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
-<script>if (window.pdfjsLib) { pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'; }</script>
+<script src="./lib/pdf-lib.min.js"></script>
+<script>
+// pdf.js does its parsing in a SEPARATE worker file. Self-hosting pdf.min.js without also hosting
+// its worker breaks every challan read, so the local copy is used when it is there and the CDN copy
+// when it is not. The probe is a HEAD request, and the worker itself is not needed until a PDF is
+// actually opened, so this costs nothing at launch.
+(function () {
+  if (!window.pdfjsLib) return;
+  var LOCAL = './lib/pdf.worker.min.js';
+  var CDN = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  pdfjsLib.GlobalWorkerOptions.workerSrc = LOCAL;
+  try {
+    fetch(LOCAL, { method: 'HEAD' })
+      .then(function (r) {
+        // GitHub Pages answers a missing file with a 404 HTML page, so the status is the tell.
+        if (!r.ok) throw new Error('missing');
+      })
+      .catch(function () {
+        pdfjsLib.GlobalWorkerOptions.workerSrc = CDN;
+        console.warn('[olisa] lib/pdf.worker.min.js was not found — using the CDN worker instead. '
+          + 'Upload that one file to finish self-hosting.');
+      });
+  } catch (e) { pdfjsLib.GlobalWorkerOptions.workerSrc = CDN; }
+})();
+</script>
 <style>
 
   /* ============================================================
@@ -1217,8 +1248,17 @@ fileInput.addEventListener('change', e => handleFiles(e.target.files));
 function handleFiles(fileListObj) {
   const files = Array.from(fileListObj).filter(f => /\.(xlsx|xls)$/i.test(f.name));
   if (!files.length) return;
-  selectedFiles = files;
+  const kept = [], dupes = [];
+  files.forEach(f => {
+    if (kept.some(k => sameUploadedFile(k, f))) { dupes.push(f.name); return; }
+    kept.push(f);
+  });
+  selectedFiles = kept;
   renderFileList();
+  if (dupes.length) {
+    statusEl.textContent = `Ignored ${dupes.length} duplicate file(s): ${[...new Set(dupes)].join(', ')} — the same file twice would have doubled every quantity.`;
+    statusEl.className = 'status';
+  }
 }
 
 // Dropping a new file used to ADD to the list while the old preview stayed on screen, so it was
@@ -2117,8 +2157,17 @@ fileInput.addEventListener('change', e => handleFiles(e.target.files));
 function handleFiles(fileListObj) {
   const files = Array.from(fileListObj).filter(f => f.name.toLowerCase().endsWith('.xlsx'));
   if (!files.length) return;
-  selectedFiles = files;
+  const kept = [], dupes = [];
+  files.forEach(f => {
+    if (kept.some(k => sameUploadedFile(k, f))) { dupes.push(f.name); return; }
+    kept.push(f);
+  });
+  selectedFiles = kept;
   renderFileList();
+  if (dupes.length) {
+    statusEl.textContent = `Ignored ${dupes.length} duplicate file(s): ${[...new Set(dupes)].join(', ')} — the same file twice would have doubled every quantity.`;
+    statusEl.className = 'status';
+  }
 }
 
 // Same rule as the PO Summary tab: whatever changes the selection redraws the list and clears the
@@ -2350,6 +2399,14 @@ function buildOutputRows(groups) {
     if (ka !== null && kb !== null && ka !== kb) return ka - kb;
     if (ka === null && kb !== null) return 1;
     if (kb === null && ka !== null) return -1;
+    if (ka === null && kb === null) {
+      // Both undated. A written note like "ASAP" still tells the reader something; a blank tells
+      // them nothing, so the blanks go to the very bottom rather than above the notes.
+      const ea = !String(a.deliveryDate || '').trim(), eb = !String(b.deliveryDate || '').trim();
+      if (ea !== eb) return ea ? 1 : -1;
+      const c = String(a.deliveryDate || '').localeCompare(String(b.deliveryDate || ''));
+      if (c) return c;
+    }
     const pa = piSortKey(a.ref), pb = piSortKey(b.ref);
     if (pa !== pb) return pa - pb;
     return String(a.ref).localeCompare(String(b.ref));
@@ -2403,11 +2460,16 @@ async function generate() {
       statusEl.textContent = `Reading ${f.name}\u2026`;
       await undYield();
       const recs = await readWorkbookRows(f);
+      // Same export saved under a different name slips past the duplicate-file check, and its lines
+      // then ADD to the ones already read. Tag each line with the file it came from so an overlap
+      // can be named afterwards instead of quietly inflating a PI.
+      recs.forEach(r => { r._srcFile = f.name; });
       allRecords = allRecords.concat(recs);
     }
     if (!allRecords.length) throw new Error('No undelivered lines found (all quantities are zero, or the file format is unexpected).');
 
     await undYield();
+    const overlaps = findCrossFileOverlaps(allRecords);
     const groups = buildGroups(allRecords);
     const { rows, piRows, totalMaster, totalPunch, totalCross } = buildOutputRows(groups);
     generatedRows = rows;
@@ -2418,8 +2480,19 @@ async function generate() {
 
     await undYield();
     renderPreview(rows, totalMaster, totalPunch, totalCross);
-    statusEl.textContent = `Done — ${rows.length} line(s) across ${groups.size} PI number(s).`;
-    statusEl.className = 'status ok';
+    if (overlaps.length) {
+      // Not silently merged and not silently refused: named, so you can decide which file is the
+      // right one and remove the other.
+      statusEl.innerHTML = `Done — ${rows.length} line(s) across ${groups.size} PI number(s).`
+        + `<br><b>Check this:</b> PI ${overlaps.slice(0, 6).map(o => escHtml(String(o.ref))).join(', ')}`
+        + `${overlaps.length > 6 ? ' and others' : ''} appear in more than one uploaded file, so their`
+        + ` quantities have been added together. If those files are two copies of the same export,`
+        + ` remove one and generate again.`;
+      statusEl.className = 'status';
+    } else {
+      statusEl.textContent = `Done — ${rows.length} line(s) across ${groups.size} PI number(s).`;
+      statusEl.className = 'status ok';
+    }
     downloadBtn.classList.remove('hidden');
     piwiseBtn.classList.remove('hidden');
     previewCard.classList.remove('hidden');
@@ -2435,6 +2508,22 @@ async function generate() {
 }
 
 function undYield() { return new Promise(r => setTimeout(r, 0)); }
+
+// A PI that arrives from two different files is either two partial exports (fine, adding is right)
+// or the same export twice under two names (wrong, and the totals are now double). The tool cannot
+// tell which, so it does not guess — it names the PIs and lets you look.
+function findCrossFileOverlaps(records) {
+  const seen = new Map();
+  for (const r of records) {
+    if (!r._srcFile) continue;
+    let s = seen.get(r.piNo);
+    if (!s) { s = new Set(); seen.set(r.piNo, s); }
+    s.add(r._srcFile);
+  }
+  const out = [];
+  for (const [piNo, files] of seen) if (files.size > 1) out.push({ piNo, ref: extractPiRef(piNo), files: [...files] });
+  return out;
+}
 
 // Delivery date first: this is a delivery schedule, so the date is what the reader scans down.
 // PI moves into the slot the date left.
@@ -5187,6 +5276,14 @@ function saveBlobAs(blob, name, exact) {
 // they are published the same way notifyDownload already is — the one sanctioned way across this
 // file for a helper to stay near its dependencies AND be reachable from another tab's IIFE.
 // scopetest.js understands `window.foo = foo` as a real declaration and checks it.
+// Two files are the same file when the name, the byte length AND the last-modified stamp all
+// match. That is the drag-it-twice case, and it used to sail straight through: every quantity in
+// the report simply doubled, with nothing on screen to say so. Re-exporting the SAME data under a
+// new name is a different situation and is caught separately, by PI, after the read.
+function sameUploadedFile(a, b) {
+  return a.name === b.name && a.size === b.size && a.lastModified === b.lastModified;
+}
+window.sameUploadedFile = sameUploadedFile;
 window.saveBlobAs = saveBlobAs;
 window.makeZipBuilder = makeZipBuilder;
 window.zipSafeName = zipSafeName;

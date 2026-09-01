@@ -4,8 +4,14 @@
 /* Bump this on EVERY release. The name is the only thing that evicts the old cache: the activate
    handler deletes every cache whose key isn't this one. It sat on v24 through three releases,
    which left anyone opening the app offline on a stale build. */
-const CACHE = 'olisa-tools-v46';
-const SHELL = ['./', './index.html', './olisa.html', './calculator.html', './DC_Bypass_Bill.html', './manifest.json', './icon-192.png', './icon-512.png', './calc-icon-512.png', './apple-touch-icon.png'];
+const CACHE = 'olisa-tools-v49';
+/* The libraries are now OURS, served from this repo, so they belong in the shell alongside the
+   pages. Before this they were fetched from cdnjs on every cold start: the app only worked offline
+   AFTER a successful online launch had populated the cache, and a blocked or slow cdnjs stopped it
+   dead. Now everything the app needs to open ships with the app. */
+const LIB = ['./lib/xlsx.full.min.js', './lib/exceljs.min.js', './lib/pdf.min.js',
+             './lib/pdf-lib.min.js', './lib/mammoth.browser.min.js', './lib/pdf.worker.min.js'];
+const SHELL = ['./', './index.html', './olisa.html', './calculator.html', './DC_Bypass_Bill.html', './manifest.json', './icon-192.png', './icon-512.png', './calc-icon-512.png', './apple-touch-icon.png'].concat(LIB);
 
 self.addEventListener('install', e => {
   // cache.addAll() is ATOMIC: one 404 anywhere in the list rejects the whole install, the worker
@@ -38,6 +44,20 @@ self.addEventListener('fetch', e => {
     e.respondWith(caches.open(CACHE).then(async c =>
       (await c.match(e.request)) || fetch(e.request).then(r => { if (r.status === 200) c.put(e.request, r.clone()); return r; })
     ));
+    return;
+  }
+  // The libraries carry their version in the file itself and never change between releases, so
+  // they are served cache-first. Leaving them on the shell's network-first path would mean asking
+  // the network for 3 MB on every single launch — which would make self-hosting SLOWER on a weak
+  // connection than the CDN was, and losing that was the whole point.
+  if (url.origin === location.origin && /\/lib\/[^/]+\.js$/.test(url.pathname)) {
+    e.respondWith(caches.open(CACHE).then(async c => {
+      const hit = await c.match(e.request);
+      if (hit) return hit;
+      const r = await fetch(e.request);
+      if (r && r.status === 200 && r.type === 'basic') c.put(e.request, r.clone());
+      return r;
+    }));
     return;
   }
   if (url.origin === location.origin) {
