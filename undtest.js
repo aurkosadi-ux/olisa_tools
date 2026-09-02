@@ -191,7 +191,7 @@ function fakeFile(p) {
       await back.xlsx.load(captured);
       const w = back.worksheets[0];
       const title = String(w.getCell('A1').value || '');
-      t('title row', title.startsWith('PI WISE PRIORITY DELIVERY DATE'), title.slice(0, 40));
+      t('title row', title.startsWith('OLISA : PRIORITY WISE DELIVERY DATE'), title.slice(0, 45));
       t('the date sits on a second line of the same cell', title.includes(`\n(${dateInput.value})`), JSON.stringify(title));
       const PW = ['Priority Delivery Date','DO Date','PI','Master Carton','Chip Box (Punch)','Cross Divider','Status'];
       t('seven columns, quantities before Status',
@@ -241,7 +241,17 @@ function fakeFile(p) {
     }
   }
 
-  console.log('\n6. The after-midnight date bug');
+  console.log('\n5b. The Undelivered preview cannot flood the DOM (the freeze)');
+  t('a row cap exists in the Undelivered tab', /const PREVIEW_LIMIT = \d+;\s*\nlet previewShowAll/.test(src));
+  t('rows are sliced before being drawn', /const shown = capped \? rows\.slice\(0, PREVIEW_LIMIT\)/.test(src));
+  t('the loop draws the CAPPED set, not every row', /for \(const r of shown\)/.test(src));
+  t('the user is told BOTH downloads still hold every line', /both downloads always contain all/.test(src));
+  t('"show all" is offered', /undShowAllBtn/.test(src));
+  t('a new report re-applies the cap', /previewShowAll = false;\s+\/\/ a new report starts capped/.test(src));
+  t('the cap is never applied to a download path',
+    !/buildWorkbookBuffer\(\s*shown/.test(src) && !/piRows\.slice\(0, PREVIEW_LIMIT\)/.test(src));
+
+console.log('\n6. The after-midnight date bug');
   t('the default date is recomputed, not frozen at page load', /function refreshDefaultDate/.test(src));
   t('it refreshes when the app comes back into view', /visibilityState === 'visible'\) refreshDefaultDate/.test(src));
   t('it refreshes again the moment Generate is pressed', /refreshDefaultDate\(\);\s*\/\/ a report started after midnight/.test(src));

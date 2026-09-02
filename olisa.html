@@ -1042,6 +1042,7 @@ document.addEventListener('click', function (e) {
   <div class="card hidden" id="undpreviewCard">
     <h2><span class="step-num">3</span>Preview</h2>
     <div class="previewbox"><table class="preview" id="undpreviewTable"></table></div>
+    <div class="sub-note" id="undpreviewNote" style="margin-top:9px;display:none;"></div>
     <div class="totals" id="undtotalsBox"></div>
     <div class="hint">
       Every column is taken straight from the raw export. Punch lines are counted in their own
@@ -2117,6 +2118,7 @@ const dateInput = document.getElementById('unddateInput');
 const clearWrap = document.getElementById('undclearWrap');
 const clearBtn = document.getElementById('undclearBtn');
 const piwiseBtn = document.getElementById('undpiwiseBtn');
+const previewNote = document.getElementById('undpreviewNote');
 
 let selectedFiles = [];
 let generatedRows = null;
@@ -2197,6 +2199,8 @@ function clearResults() {
   piwiseBtn.classList.add('hidden');
   previewTable.innerHTML = '';
   totalsBox.innerHTML = '';
+  previewNote.innerHTML = '';
+  previewNote.style.display = 'none';
 }
 
 function resetUnd() {
@@ -2474,6 +2478,7 @@ async function generate() {
     const { rows, piRows, totalMaster, totalPunch, totalCross } = buildOutputRows(groups);
     generatedRows = rows;
     generatedPiRows = piRows;
+    previewShowAll = false;      // a new report starts capped again, however big the last one was
     // Two lines inside ONE cell: the schedule name, then the date under it. Excel keeps the break
     // where "\n" sits as long as the cell wraps, which is why the row is given a height below.
     generatedTitle = `OLISA's Undelivered Qty & Delivery Schedule\n(${dateInput.value})`;
@@ -2529,9 +2534,20 @@ function findCrossFileOverlaps(records) {
 // PI moves into the slot the date left.
 const UND_HEADERS = ['Priority Delivery Date','Item','Style','PI','Master Carton (qty)','Chip Box (Punch) (qty)','Cross Divider (qty)'];
 
+// THE FREEZE. This drew EVERY line in one innerHTML assignment, into a width:100% table with
+// border-collapse:collapse and no fixed layout — so the browser had to measure every cell in every
+// row to work out the column widths, in a single task with no repaint in it. That is exactly the
+// bug that was fixed in the PO Summary tab; this tab was left with it. The preview box is only a
+// few hundred pixels tall, so all but a dozen rows were laid out purely to be scrolled past.
+// The DOWNLOADED FILE IS UNAFFECTED — every line is always written to the .xlsx.
+const PREVIEW_LIMIT = 200;
+let previewShowAll = false;
+
 function renderPreview(rows, totalMaster, totalPunch, totalCross) {
+  const capped = !previewShowAll && rows.length > PREVIEW_LIMIT;
+  const shown = capped ? rows.slice(0, PREVIEW_LIMIT) : rows;
   let html = '<tr>' + UND_HEADERS.map(h => `<th style="text-align:center;vertical-align:middle;">${escHtml(h)}</th>`).join('') + '</tr>';
-  for (const r of rows) {
+  for (const r of shown) {
     html += '<tr>' + [r.deliveryDate, r.item, r.style, r.piRef, r.master, r.punch, r.cross]
       .map(v => `<td style="text-align:center;vertical-align:middle;">${v === null || v === undefined ? '' : escHtml(v)}</td>`).join('') + '</tr>';
   }
@@ -2541,7 +2557,31 @@ function renderPreview(rows, totalMaster, totalPunch, totalCross) {
   totalsBox.innerHTML = `<b>Master Carton:</b> ${totalMaster.toLocaleString()}`
     + ` &nbsp;&nbsp; <b>Chip Box (Punch):</b> ${totalPunch.toLocaleString()}`
     + ` &nbsp;&nbsp; <b>Cross Divider:</b> ${totalCross.toLocaleString()}`;
+  if (capped) {
+    previewNote.innerHTML =
+      `Showing the first ${PREVIEW_LIMIT} of ${rows.length} lines so the page stays responsive \u2014 `
+      + `<b>both downloads always contain all ${rows.length}</b>.`
+      + ` <button type="button" class="secondary" id="undShowAllBtn" style="padding:5px 10px;font-size:12.5px;margin-left:6px;">Show all ${rows.length}</button>`;
+    previewNote.style.display = '';
+  } else if (previewShowAll && rows.length > PREVIEW_LIMIT) {
+    previewNote.innerHTML = `Showing all ${rows.length} lines.`;
+    previewNote.style.display = '';
+  } else {
+    previewNote.innerHTML = '';
+    previewNote.style.display = 'none';
+  }
 }
+
+previewNote.addEventListener('click', async e => {
+  if (!e.target.closest || !e.target.closest('#undShowAllBtn')) return;
+  previewShowAll = true;
+  previewNote.innerHTML = 'Drawing the full table\u2026';
+  await undYield();
+  const r = generatedRows || [];
+  renderPreview(r, r.reduce((n, x) => n + (x.master || 0), 0),
+                   r.reduce((n, x) => n + (x.punch || 0), 0),
+                   r.reduce((n, x) => n + (x.cross || 0), 0));
+});
 
 // Every cell in this workbook is centred and middle-aligned, header and body alike, so the sheet
 // reads as one block instead of numbers hugging the right edge and text the left.
@@ -2662,7 +2702,7 @@ async function downloadPiWise() {
     ws.mergeCells(1, 1, 1, PW_N);
     const t1 = ws.getCell(1, 1);
     // Two lines in the one cell, matching the main report's heading rather than sitting on two rows.
-    t1.value = `PI WISE PRIORITY DELIVERY DATE\n(${dateInput.value})`;
+    t1.value = `OLISA : PRIORITY WISE DELIVERY DATE\n(${dateInput.value})`;
     t1.font = { bold: true, size: 13, name: 'Arial' };
     t1.alignment = UND_CENTER;
     for (let c = 1; c <= PW_N; c++) {
