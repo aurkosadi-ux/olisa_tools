@@ -5823,8 +5823,11 @@ function renderHealth() {
   // long enough for a whole batch of new PIs to be missing behind a colour that said everything was
   // fine. Amber from day 2, red from day 5.
   const IDX_WARN_DAYS = 2, IDX_STALE_DAYS = 5;
+  // AGE decides the colour, and only age. A missing challan count used to force amber, so a
+  // freshly-built index 34 minutes old showed the same warning colour as one five days stale —
+  // two completely different problems wearing the same face, and the one it actually meant
+  // ("no challans here") was never spelled out. Absent challans are now said in words instead.
   const idxDot = piCount === 0 ? 'hgrey'
-    : !chCount ? 'hyellow'
     : days === null ? 'hgreen'
     : days >= IDX_STALE_DAYS ? 'hred'
     : days >= IDX_WARN_DAYS ? 'hyellow'
@@ -5832,7 +5835,7 @@ function renderHealth() {
   // One index, one line. PI folders and challan copies are read by the same build, so splitting
   // them across two pills implied two separate jobs and left a permanent grey "not read" beside a
   // green "built" — which read as a failure even when everything had worked.
-  const chPart = chCount ? ` and ${chCount} challan copies` : '';
+  const chPart = chCount ? ` and ${chCount} challan copies` : ' \u2014 no challan copies indexed yet';
   const idxTxt = piCount === 0 ? 'Index: not built'
     : `Index: ${piCount} PI(s)${chPart} \u2014 ${stampText(piIndexBuiltAt)} (${agoText(piIndexBuiltAt)})${days !== null && days >= IDX_STALE_DAYS ? ' \u2014 rebuild recommended' : ''}${newPiHint()}`;
   el.innerHTML = [
@@ -5892,6 +5895,11 @@ function currentIndexPayload() {
     styleCount: styleIndex ? Object.keys(styleIndex).length : 0,
     piIndex,
     styleIndex: styleIndex || {},
+    // The challan index was BUILT by the same job as the rest but never packed into this payload,
+    // so the phone adopted an index with 127 PIs and zero challans — and challan lookups on the
+    // phone quietly had nothing to search. It is the same build, so it travels with the same file.
+    challanIndex: challanIndex || {},
+    challanCount: Object.keys(challanIndex || {}).length,
     acceptedShorts, // travel with the index so a decision made on the laptop reaches the phone
     remarkOverrides
   };
@@ -5969,6 +5977,13 @@ function adoptIndexPayload(data, sourceLabel) {
   });
   piIndex = clean;
   if (data.styleIndex && Object.keys(data.styleIndex).length) styleIndex = data.styleIndex;
+  // Only replace the challan index when the file actually carries one. An index file written by an
+  // older build has no challanIndex at all, and adopting an empty object from it would wipe a
+  // perfectly good local copy — worse than the bug this fixes.
+  if (data.challanIndex && Object.keys(data.challanIndex).length) {
+    challanIndex = data.challanIndex;
+    idbSet('challanIndex', { data: challanIndex, builtAt: incoming }).catch(() => {});
+  }
   piIndexBuiltAt = incoming;
   piIndexRestoredAt = incoming;
   piQtyMisses.clear();

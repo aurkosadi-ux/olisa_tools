@@ -46,6 +46,22 @@ t('the file handle is built from the raw Drive listing object, not (id, name)',
   /new DriveFileHandle\(f\)/.test(poll) && !/new DriveFileHandle\(f\.id/.test(poll),
   'DriveFileHandle takes meta — (id,name) throws inside getFile()');
 
+console.log('\n4b. The challan index travels too (it did not before)');
+t('challanIndex is packed into the shared payload', /challanIndex: challanIndex \|\| \{\}/.test(src),
+  'phone adopts an index with zero challans and challan lookups find nothing');
+t('a challan count rides along for the status line', /challanCount: Object\.keys\(challanIndex/.test(src));
+t('the receiving device adopts it', /challanIndex = data\.challanIndex;/.test(src));
+t('it is persisted locally so it survives a reload', /idbSet\('challanIndex', \{ data: challanIndex/.test(src));
+t('an OLD index file without challans cannot wipe a good local copy',
+  /if \(data\.challanIndex && Object\.keys\(data\.challanIndex\)\.length\) \{/.test(src),
+  'adopting an empty challanIndex would be worse than the bug');
+
+console.log('\n4c. The freshness dot means ONE thing: age');
+t('a missing challan count no longer forces amber', !/: !chCount \? 'hyellow'/.test(src),
+  'a 34-minute-old index showed the same colour as a 5-day-old one');
+t('green under 2 days, amber at 2, red at 5', /days >= IDX_STALE_DAYS \? 'hred'\s*\n\s*: days >= IDX_WARN_DAYS \? 'hyellow'\s*\n\s*: 'hgreen'/.test(src));
+t('missing challans are stated in words instead of a colour', /no challan copies indexed yet/.test(src));
+
 console.log('\n5. Adopting is still guarded — no thrashing, no going backwards');
 t('an index of the same age or older is refused', /if \(piIndexBuiltAt && incoming <= piIndexBuiltAt\) return false;/.test(src));
 t('an index from an older app version is refused', /data\.version !== PI_CACHE_VERSION/.test(src));

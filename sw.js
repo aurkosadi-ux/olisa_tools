@@ -4,7 +4,7 @@
 /* Bump this on EVERY release. The name is the only thing that evicts the old cache: the activate
    handler deletes every cache whose key isn't this one. It sat on v24 through three releases,
    which left anyone opening the app offline on a stale build. */
-const CACHE = 'olisa-tools-v52';
+const CACHE = 'olisa-tools-v53';
 /* The libraries are now OURS, served from this repo, so they belong in the shell alongside the
    pages. Before this they were fetched from cdnjs on every cold start: the app only worked offline
    AFTER a successful online launch had populated the cache, and a blocked or slow cdnjs stopped it
