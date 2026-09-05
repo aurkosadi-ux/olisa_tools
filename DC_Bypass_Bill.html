@@ -609,9 +609,9 @@
   </div>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="./lib/jszip.min.js"></script>
+<script src="./lib/pdf.min.js"></script>
+<script src="./lib/jspdf.umd.min.js"></script>
 <script id="core">
 /* ==================================================================
    CORE  —  pure logic, no DOM. Everything below is unit-tested.
@@ -1401,8 +1401,18 @@ function libsReady(){
 var libsOk = false;
 (function waitLibs(tries){
   if(libsReady()){
-    pdfjsLib.GlobalWorkerOptions.workerSrc =
-      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+    // Same self-hosted pdf.js the main app uses — identical version, already in lib/, already in
+    // the service-worker cache. Falls back to the CDN only if the local copy is genuinely absent,
+    // so this page can never be the one component that breaks when the network is down.
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "./lib/pdf.worker.min.js";
+    try {
+      fetch("./lib/pdf.worker.min.js", { method: "HEAD" }).then(function(r){
+        if(!r.ok) throw new Error("missing");
+      }).catch(function(){
+        pdfjsLib.GlobalWorkerOptions.workerSrc =
+          "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+      });
+    } catch(e){ /* fetch unavailable — the local path stands */ }
     libsOk = true;
     refresh();
     return;
@@ -1571,7 +1581,9 @@ function pdfToText(buf){
     for(var p=1;p<=pdf.numPages;p++){
       (function(pn){
         seq = seq.then(function(){
+          var _page = null;
           return pdf.getPage(pn).then(function(page){
+            _page = page;
             return page.getTextContent();
           }).then(function(tc){
             /* rebuild visual lines: group by y, then order by x */
@@ -1590,11 +1602,25 @@ function pdfToText(buf){
               bk.parts.sort(function(a,b){ return a.x - b.x; });
               pages.push(bk.parts.map(function(o){ return o.s; }).join(" "));
             });
+            // Release the page's own buffers as soon as its text is out. Without this a batch of
+            // work orders holds every page of every PDF in memory until the whole run finishes,
+            // which is exactly when a phone or a loaded laptop gives up.
+            if(_page && _page.cleanup) { try { _page.cleanup(); } catch(e){} }
+            _page = null;
           });
         });
       })(p);
     }
-    return seq.then(function(){ return pages.join("\n"); });
+    // And release the document itself once its pages are read — on success OR failure, so a
+    // malformed PDF halfway through a batch does not leak what it already allocated.
+    return seq.then(function(){
+      var text = pages.join("\n");
+      if(pdf && pdf.destroy) { try { pdf.destroy(); } catch(e){} }
+      return text;
+    }, function(err){
+      if(pdf && pdf.destroy) { try { pdf.destroy(); } catch(e){} }
+      throw err;
+    });
   });
 }
 

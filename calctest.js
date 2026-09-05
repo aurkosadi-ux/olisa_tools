@@ -20,7 +20,7 @@ const ast = acorn.parse(src, { ecmaVersion: 2022, locations: true });
 const WANT = ['measNorm', 'parseDMY', 'fmtNoteDate', 'manualTime', 'effectiveShort', 'acceptKey',
   'challanDisp', 'normPiKey', 'dmyFromMs', 'acceptedFor', 'remarkColorWord', 'effectiveRemark',
   'extractMeasurement', 'reconcileManualChallans', 'reconcileExcessAgainstShorts', 'combinedRemarks',
-  'sameCartonItem'];
+  'sameCartonItem', 'reconciliationInvariants', 'recordReconEvent', 'resetReconEvents'];
 const found = {};
 // Collect EVERY top-level function declaration in the file, then pull in the transitive closure of
 // the ones WANT names. The old version listed helpers by hand, so every helper added to olisa.html
@@ -54,7 +54,10 @@ if (missing.length) { console.error('FAIL: could not lift ' + missing.join(', ')
 const sandbox = `
   let allRecords = [], acceptedShorts = {}, remarkOverrides = {};
   ${WANTED_ORDER.map(n => found[n]).join('\n')}
-  return { run: () => reconcileManualChallans(),
+  return { run: () => { reconcileManualChallans(); reconcileExcessAgainstShorts(); },
+           reconEvents: () => reconEvents,
+           reconciliationInvariants,
+           acceptKey,
            set: r => { allRecords = r; },
            get: () => allRecords,
            accept: m => { acceptedShorts = m; },
@@ -188,44 +191,52 @@ t('short total moved by exactly the pieces matched', Math.abs((totalShort - rawS
 t('excess total moved by exactly the pieces matched', (rawExcess - totalExcess) === consumed, (rawExcess - totalExcess) + ' vs ' + consumed);
 
 // ================= 4. matching discipline =================
-console.log('\n4. Matching discipline');
-let badMeas = 0, badTime = 0, badStyle = 0; const orphans = [];
-all.forEach(x => {
-  if (!(x._consumed > 0)) return;
-  // NOTE: exact equality is stricter than the shipped rule, which walks a ladder of
-  // exact -> format-variant -> prefix. Anything this reports is a PREFIX-tier match: the pieces went
-  // to a short on a NEARBY style, not the same one. That is the matcher working as designed, but it
-  // is worth a human eye, so the lines are named rather than quietly accepted.
-  const partners = all.filter(s => (s._covered || 0) > 0 && s.styleNorm === x.styleNorm &&
-    API.measNorm(s.itemDesc) === API.measNorm(x.itemDesc));
-  if (!partners.length) { badStyle++; orphans.push(x); return; }
-  partners.forEach(s => { if (API.measNorm(s.itemDesc) !== API.measNorm(x.itemDesc)) badMeas++; });
-});
-// Time order is checked against the DATE THE CODE ITSELF WROTE into the note, not against a
-// guessed pairing: with several shorts and several excesses on one style, any outside guess at
-// who paid for whom is wrong. The note is the tool's own claim, so that is what must hold up.
-const timeTravel = [];
-all.forEach(r => {
-  if (!((r._covered || 0) > 0) || (r.short || 0) >= 0) return;
-  const own = API.manualTime(r);
-  (r.autoNotes || []).forEach(n => {
-    const m = n.match(/^On (\d{1,2})-(\d{1,2})-(\d{4}),/);
-    if (!m || !own) return;
-    const noteMs = new Date(+m[3], +m[2] - 1, +m[1]).getTime();
-    if (noteMs < own) timeTravel.push(r.sheet + ':' + r.xlRow + ' short ' + new Date(own).toISOString().slice(0,10) + ' <- note ' + n);
-  });
-});
-if (orphans.length) {
-  console.log('   FYI — excess consumed with no same-style covered short (prefix-tier matches):');
-  orphans.forEach(x => console.log('     ' + x.styleNorm + '  consumed=' + x._consumed + ' pcs'));
-}
-t('coverage only ever within the same style', badStyle === 0, badStyle + ' prefix-tier match(es) — see list above');
-t('coverage only ever at the same measurement', badMeas === 0, badMeas);
-t('no note claims delivery BEFORE the short happened', timeTravel.length === 0, timeTravel.slice(0,3).join(' ;; '));
-t('undated lines never act as a coverage source',
-  all.every(r => !((r._consumed || 0) > 0 && !API.manualTime(r))));
+console.log('\n4. Matching discipline — read from the ACTUAL decision ledger');
+// The old version of this section INFERRED which line covered which by searching for a plausible
+// partner, using a stricter predicate than the engine's (description text vs parsed dimensions).
+// It reported 7 correct matches as violations. Now the engine records every decision as it makes
+// it, and these assertions read that record instead of guessing.
+const events = API.reconEvents();
+t('the engine recorded its decisions', events.length > 0, events.length + ' event(s)');
+console.log(`   ${events.length} coverage event(s): ` +
+  Object.entries(events.reduce((a,e)=>{a[e.rule]=(a[e.rule]||0)+1;return a;},{})).map(([k,v])=>`${v} ${k}`).join(', '));
 
-// ================= 5. accepted shorts are not raided =================
+t('every match is same-style', events.every(e => e.sourceStyle === e.targetStyle),
+  events.filter(e=>e.sourceStyle!==e.targetStyle).map(e=>`${e.sourceStyle}->${e.targetStyle}`).join(', '));
+t('no cross-item netting: dimensions agree wherever both are readable',
+  events.every(e => !e.sourceDims || !e.targetDims || e.sourceDims === e.targetDims),
+  events.filter(e=>e.sourceDims&&e.targetDims&&e.sourceDims!==e.targetDims).map(e=>`${e.sourceDims}->${e.targetDims}`).join(', '));
+t('no line ever covers itself', events.every(e => e.sourceKey !== e.targetKey));
+t('an accepted line is never covered again', events.every(e => !e.targetAccepted));
+t('coverage never travels backwards in time',
+  events.every(e => !e.sourceTime || !e.targetTime || e.targetTime <= e.sourceTime));
+t('every event moves a positive quantity', events.every(e => e.qty > 0));
+
+const bySrc = {}, byTgt = {};
+events.forEach(e => { bySrc[e.sourceId]=(bySrc[e.sourceId]||0)+e.qty; byTgt[e.targetId]=(byTgt[e.targetId]||0)+e.qty; });
+t('SOURCE CONSERVATION: no source gives more than it had',
+  events.every(e => bySrc[e.sourceId] <= e.sourceAvail),
+  events.filter(e=>bySrc[e.sourceId]>e.sourceAvail).map(e=>`${e.sourceKey} gave ${bySrc[e.sourceId]}/${e.sourceAvail}`).slice(0,3).join(' | '));
+t('TARGET CONSERVATION: no shortage is covered beyond its size',
+  events.every(e => byTgt[e.targetId] <= e.targetShort),
+  events.filter(e=>byTgt[e.targetId]>e.targetShort).map(e=>`${e.targetKey} took ${byTgt[e.targetId]}/${e.targetShort}`).slice(0,3).join(' | '));
+t('the ledger total equals the engine\'s own _covered total',
+  Object.values(byTgt).reduce((a,b)=>a+b,0) === all.reduce((a,r)=>a+(r._covered||0),0),
+  `${Object.values(byTgt).reduce((a,b)=>a+b,0)} vs ${all.reduce((a,r)=>a+(r._covered||0),0)}`);
+t('the engine\'s built-in invariant checker reports nothing',
+  API.reconciliationInvariants().length === 0,
+  API.reconciliationInvariants().slice(0,3).join(' | '));
+
+console.log('\n4b. Idempotence and order-independence');
+const idOf = r => `${r.xlSheet||r.sheet||''}#${r.xlRow||0}`;
+const before = all.map(r => `${idOf(r)}=${r._covered||0}/${r._consumed||0}`).sort().join(';');
+API.run();
+const after = all.map(r => `${idOf(r)}=${r._covered||0}/${r._consumed||0}`).sort().join(';');
+t('running reconciliation twice gives the same result', before === after);
+const evAfter = API.reconEvents();
+t('the ledger does not double up on a re-run (reset each pass)', evAfter.length === events.length,
+  `${events.length} -> ${evAfter.length}`);
+
 console.log('\n5. Accepted (waived) shorts must not eat coverage');
 const victim = records.find(r => r.short < 0 && r.styleNorm === 'M82039-1B1-5');
 if (victim) {

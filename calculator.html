@@ -720,7 +720,7 @@
          * @param {string} textToCopy - The string content to copy to the clipboard.
          * @param {string} confirmationMessage - The message to show on success.
          */
-        copyToClipboard: function(textToCopy, confirmationMessage = 'Copied!') {
+        copyToClipboard: async function(textToCopy, confirmationMessage = 'Copied!') {
             const tempInput = document.createElement('textarea');
             tempInput.value = textToCopy;
             tempInput.style.position = 'absolute';
@@ -731,11 +731,21 @@
             // navigator.clipboard is the supported path and the one that behaves on modern Android,
             // where execCommand is increasingly a no-op that still reports success. It needs a secure
             // context, so the old textarea trick stays behind it rather than being thrown away.
+            //
+            // AWAITED. It used to fire writeText() and set success = true on the very next line,
+            // without waiting — so "Quote Copied!" appeared whether or not anything reached the
+            // clipboard. Telling someone their price is copied when it is not is worse than telling
+            // them the copy failed, because they paste the PREVIOUS quote into a customer's chat.
             if (navigator.clipboard && window.isSecureContext) {
-                navigator.clipboard.writeText(textToCopy).catch(() => {
-                    try { tempInput.select(); document.execCommand('copy'); } catch (e) {}
-                });
-                success = true;
+                try {
+                    await navigator.clipboard.writeText(textToCopy);
+                    success = true;
+                } catch (err) {
+                    try {
+                        tempInput.select();
+                        success = document.execCommand('copy');
+                    } catch (e2) { success = false; }
+                }
             } else {
                 try {
                     tempInput.select();

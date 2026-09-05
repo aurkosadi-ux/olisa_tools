@@ -4,13 +4,16 @@
 /* Bump this on EVERY release. The name is the only thing that evicts the old cache: the activate
    handler deletes every cache whose key isn't this one. It sat on v24 through three releases,
    which left anyone opening the app offline on a stale build. */
-const CACHE = 'olisa-tools-v53';
+const CACHE = 'olisa-tools-v57';
 /* The libraries are now OURS, served from this repo, so they belong in the shell alongside the
    pages. Before this they were fetched from cdnjs on every cold start: the app only worked offline
    AFTER a successful online launch had populated the cache, and a blocked or slow cdnjs stopped it
    dead. Now everything the app needs to open ships with the app. */
 const LIB = ['./lib/xlsx.full.min.js', './lib/exceljs.min.js', './lib/pdf.min.js',
-             './lib/pdf-lib.min.js', './lib/mammoth.browser.min.js', './lib/pdf.worker.min.js'];
+             './lib/pdf-lib.min.js', './lib/mammoth.browser.min.js', './lib/pdf.worker.min.js',
+             // DC Bypass Bill Maker's own two: zip packaging and PDF output. It shares pdf.js with
+             // the main app rather than carrying a second copy of it.
+             './lib/jszip.min.js', './lib/jspdf.umd.min.js'];
 const SHELL = ['./', './index.html', './olisa.html', './calculator.html', './DC_Bypass_Bill.html', './manifest.json', './icon-192.png', './icon-512.png', './calc-icon-512.png', './apple-touch-icon.png'].concat(LIB);
 
 self.addEventListener('install', e => {

@@ -1895,11 +1895,19 @@ function renderPreview(rows) {
   let html = '<tr>' + headers.map(h => `<th>${h}</th>`).join('') + '</tr>';
   for (const r of shown) {
     const cells = [
-      r.needsReview ? '<span class="flag">NEEDS REVIEW</span>' : r.classification,
+      r.classification,
       r.sizeText, r.style, r.color, r.productCode, r.ply, r.wastageW, r.wastageH,
       r.l, r.w, r.h, r.l !== null ? 'CM' : '', r.qty
     ];
-    html += `<tr class="${r.needsReview ? 'review' : ''}">` + cells.map(v => `<td>${v === null || v === undefined ? '' : v}</td>`).join('') + '</tr>';
+    // escHtml on EVERY cell. sizeText, style and productCode all come straight out of an uploaded
+    // spreadsheet, and a cell reading `CARTON 30*20*7CM <img src=x onerror=...>` used to reach the
+    // DOM as live markup — proven with a crafted file, not theoretical. The flag is the one piece
+    // of markup this row is allowed to contain, so it is built here rather than trusted from data.
+    html += `<tr class="${r.needsReview ? 'review' : ''}">`
+      + cells.map((v, ci) => {
+          if (ci === 0 && r.needsReview) return '<td><span class="flag">NEEDS REVIEW</span></td>';
+          return `<td>${v === null || v === undefined ? '' : escHtml(String(v))}</td>`;
+        }).join('') + '</tr>';
   }
   previewTable.innerHTML = html;
   // A line that needs review must never be hidden behind the cap — that is the one thing the
@@ -3007,7 +3015,7 @@ function showShortageList() {
       const piCell = (r.piRef !== null && r.piRef !== undefined && r.piRef !== '') ? `<a href="#" class="pi-link" data-pi="${r.piRef}">${r.piRef}</a>` : '';
       const outstanding = effectiveShort(r);
       const act = `<button class="secondary acc-btn" data-k="${escHtml(acceptKey(r))}" style="padding:4px 9px;font-size:11.5px;white-space:nowrap;">Mark accepted</button>`;
-      html += `<tr class="${rowClass(r)}"><td>${piCell}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(String(r.item ?? ''))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${r.delQty ?? ''}</td><td>${r.recQty ?? ''}</td><td>${outstanding}</td><td>${challanCell(r)}</td><td>${escHtml(String(r.challanDate ?? ''))}</td>${remarkCell(r)}<td>${act}</td></tr>`;
+      html += `<tr class="${rowClass(r)}"><td>${piCell}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(String(r.item ?? ''))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${escHtml(String(r.delQty ?? ''))}</td><td>${escHtml(String(r.recQty ?? ''))}</td><td>${outstanding}</td><td>${challanCell(r)}</td><td>${escHtml(String(r.challanDate ?? ''))}</td>${remarkCell(r)}<td>${act}</td></tr>`;
     });
     html += tableCapNote(Math.min(sorted.length, MAX_TABLE_ROWS), sorted.length);
     html += `</table></div>`;
@@ -3016,7 +3024,7 @@ function showShortageList() {
       html += `<div class="previewbox" style="margin-top:6px;max-height:260px;"><table class="preview"><tr><th>PI Ref</th><th>Inv. Date</th><th>Style</th><th>Item</th><th>Measurement</th><th>Original Short</th><th>Challan No</th><th>Accepted because</th><th></th></tr>`;
       acceptedInScope.slice(0, MAX_TABLE_ROWS).forEach(r => {
         const piCell = (r.piRef !== null && r.piRef !== undefined && r.piRef !== '') ? `<a href="#" class="pi-link" data-pi="${r.piRef}">${r.piRef}</a>` : '';
-        html += `<tr class="resolved"><td>${piCell}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(String(r.item ?? ''))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${r.short ?? ''}</td><td>${challanCell(r)}</td><td>${escHtml(r.accepted.reason || '(no reason given)')} <span class="sub-note">${dmyFromMs(r.accepted.at)}</span></td><td><button class="secondary unacc-btn" data-k="${escHtml(acceptKey(r))}" style="padding:4px 9px;font-size:11.5px;white-space:nowrap;">Undo</button></td></tr>`;
+        html += `<tr class="resolved"><td>${piCell}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(String(r.item ?? ''))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${escHtml(String(r.short ?? ''))}</td><td>${challanCell(r)}</td><td>${escHtml(r.accepted.reason || '(no reason given)')} <span class="sub-note">${dmyFromMs(r.accepted.at)}</span></td><td><button class="secondary unacc-btn" data-k="${escHtml(acceptKey(r))}" style="padding:4px 9px;font-size:11.5px;white-space:nowrap;">Undo</button></td></tr>`;
       });
       html += `</table></div>`;
     }
@@ -3128,7 +3136,7 @@ function showManualChallanList() {
     html += `<div class="previewbox" style="margin-top:6px;max-height:420px;"><table class="preview"><tr><th>PI Ref</th><th>Inv. Date</th><th>Style</th><th>Item</th><th>Measurement</th><th>Del Qty</th><th>Rec Qty</th><th>Short&Exs</th><th>Challan No</th><th>Challan Date</th><th>Remarks</th></tr>`;
     sorted.slice(0, MAX_TABLE_ROWS).forEach(r => {
       const piCell = (r.piRef !== null && r.piRef !== undefined && r.piRef !== '') ? `<a href="#" class="pi-link" data-pi="${r.piRef}">${r.piRef}</a>` : '';
-      html += `<tr class="${rowClass(r)}"><td>${piCell}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(String(r.item ?? ''))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${r.delQty ?? ''}</td><td>${r.recQty ?? ''}</td><td>${r.short ?? ''}</td><td>${challanCell(r)}</td><td>${escHtml(String(r.challanDate ?? ''))}</td>${remarkCell(r)}</tr>`;
+      html += `<tr class="${rowClass(r)}"><td>${piCell}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(String(r.item ?? ''))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${escHtml(String(r.delQty ?? ''))}</td><td>${escHtml(String(r.recQty ?? ''))}</td><td>${escHtml(String(r.short ?? ''))}</td><td>${challanCell(r)}</td><td>${escHtml(String(r.challanDate ?? ''))}</td>${remarkCell(r)}</tr>`;
     });
     html += tableCapNote(Math.min(sorted.length, MAX_TABLE_ROWS), sorted.length);
     html += `</table></div>`;
@@ -7147,6 +7155,11 @@ function rowClass(r) {
 // assumed. Challan date is the real re-delivery date, so it leads; inventory date is the fallback.
 function manualTime(r) { return parseDMY(r.challanDate) || parseDMY(r.invDate) || 0; }
 function reconcileManualChallans() {
+  // Cleared here because this is the entry point of a full reconciliation pass — it resets the
+  // computed fields below and then calls the excess pass. Without this, running reconciliation a
+  // second time (which happens on every Master File reload) would append a second set of events to
+  // the first and every conservation check would read double.
+  resetReconEvents();
   // reset any previous computation
   allRecords.forEach(r => { delete r.autoNotes; delete r.autoNote; delete r.resolved; delete r._covered; delete r._consumed; delete r.accepted; delete r.forceColor; delete r.remarkEdited; });
   // Overlay first: an accepted line is settled and must not also be "covered" by a manual challan.
@@ -7219,6 +7232,7 @@ function reconcileManualChallans() {
       if (need <= 0) continue;
       const applied = Math.min(need, remaining);
       s._covered = covered + applied;
+      recordReconEvent(m, s, applied, 'manual-challan');
       remaining -= applied;
       const crossPi = mPi && normPiKey(s.piRef) && normPiKey(s.piRef) !== mPi
         ? ` (covered by a manual challan raised under PI ${m.piRef})` : '';
@@ -7252,6 +7266,64 @@ function reconcileManualChallans() {
 // two lines matched below carry the SAME physical item at the SAME measurement, so applying one to
 // the other just records where the pieces actually went. Both raw Short&Exs figures stay untouched
 // and on screen, and both lines get a note naming the other, so every movement is auditable.
+// ==================== RECONCILIATION EVENT LEDGER ====================
+// Every coverage decision, recorded as it is made. Before this, verifying the engine meant guessing
+// backwards from _covered/_consumed at which line paid for which — and a test written that way
+// checks the reviewer's model of the rule, not the rule. It flagged 7 real matches as violations
+// because it compared DESCRIPTION TEXT while the engine compares PARSED DIMENSIONS; the engine was
+// right and the test was wrong, which is the exact failure mode a ledger removes.
+// Recording only. Nothing here changes what gets matched.
+let reconEvents = [];
+function resetReconEvents() { reconEvents = []; }
+function recordReconEvent(source, target, applied, rule) {
+  // acceptKey is the OVERLAY key and is deliberately not unique per physical row — a Master File
+  // legitimately holds several identical lines (same challan, style, measurement and Short), and
+  // they share one key. Conservation has to be counted per PHYSICAL ROW or three rows each giving
+  // one piece look like one row giving three. The sheet/row pair is that identity.
+  const rowId = r => `${r.xlSheet || r.sheet || ''}#${r.xlRow || 0}#${acceptKey(r)}`;
+  reconEvents.push({
+    rule,
+    qty: applied,
+    sourceId: rowId(source), targetId: rowId(target),
+    sourceKey: acceptKey(source), targetKey: acceptKey(target),
+    sourceStyle: source.styleNorm, targetStyle: target.styleNorm,
+    sourceDims: cartonDims(source), targetDims: cartonDims(target),
+    sourceMeas: measNorm(source.itemDesc), targetMeas: measNorm(target.itemDesc),
+    sourcePi: normPiKey(source.piRef), targetPi: normPiKey(target.piRef),
+    sourceTime: manualTime(source) || 0, targetTime: manualTime(target) || 0,
+    sourceAvail: rule === 'manual-challan' ? (source.recQty || 0) : (source.short || 0),
+    targetShort: Math.abs(target.short || 0),
+    targetAccepted: !!target.accepted
+  });
+}
+// Independent re-derivation from the ledger alone. If the engine and its own record of what it did
+// ever disagree, that is worth knowing loudly rather than shipping a number nobody can explain.
+function reconciliationInvariants() {
+  const problems = [];
+  const bySource = new Map(), byTarget = new Map();
+  for (const e of reconEvents) {
+    if (!(e.qty > 0)) problems.push(`non-positive coverage of ${e.qty} on ${e.targetKey}`);
+    if (e.sourceStyle !== e.targetStyle) problems.push(`cross-style match: ${e.sourceStyle} -> ${e.targetStyle}`);
+    if (e.sourceDims && e.targetDims && e.sourceDims !== e.targetDims)
+      problems.push(`cross-item match: ${e.sourceDims} -> ${e.targetDims} on ${e.targetKey}`);
+    if (e.sourceKey === e.targetKey) problems.push(`line covered itself: ${e.sourceKey}`);
+    if (e.targetAccepted) problems.push(`accepted line was covered again: ${e.targetKey}`);
+    if (e.sourceTime && e.targetTime && e.targetTime > e.sourceTime)
+      problems.push(`coverage travelled backwards in time on ${e.targetKey}`);
+    bySource.set(e.sourceId, (bySource.get(e.sourceId) || 0) + e.qty);
+    byTarget.set(e.targetId, (byTarget.get(e.targetId) || 0) + e.qty);
+  }
+  for (const e of reconEvents) {
+    if (bySource.get(e.sourceId) > e.sourceAvail)
+      problems.push(`source over-spent: ${e.sourceKey} gave ${bySource.get(e.sourceId)} of ${e.sourceAvail}`);
+    if (byTarget.get(e.targetId) > e.targetShort)
+      problems.push(`target over-covered: ${e.targetKey} took ${byTarget.get(e.targetId)} for a short of ${e.targetShort}`);
+  }
+  return [...new Set(problems)];
+}
+window.reconEvents = () => reconEvents;
+window.reconciliationInvariants = reconciliationInvariants;
+
 function reconcileExcessAgainstShorts() {
   // Manual challans are deliberately excluded as sources: the loop above already spends their whole
   // received quantity on earlier shorts, so letting their excess pay out a second time would cover
@@ -7288,6 +7360,7 @@ function reconcileExcessAgainstShorts() {
       const applied = Math.min(need, pool);
       s._covered = (s._covered || 0) + applied;
       x._consumed = (x._consumed || 0) + applied;
+      recordReconEvent(x, s, applied, 'excess-vs-short');
       pool -= applied;
       const ch = challanDisp(x);
       const chRef = ch ? ` on challan ${ch}` : '';
@@ -8708,7 +8781,7 @@ async function showPiDetails(refRaw) {
     html += `<div class="previewbox" style="margin-top:5px;max-height:300px;"><table class="preview"><tr><th>PI Ref</th><th>PI Date</th><th>PI Qty</th><th>Inventory Date</th><th>Style</th><th>Item</th><th>Measurement</th><th>Delivered Qty</th><th>Received Qty</th><th>Short&amp;Exs</th><th>Challan No</th><th>Challan Date</th><th>Remarks</th></tr>`;
     rows.slice(0, MAX_TABLE_ROWS).forEach(r => {
       const piQ = piQtyForRow(r.piRef, r.styleNorm, r.itemDesc);
-      html += `<tr class="${rowClass(r)}"><td><a href="#" class="pi-link" data-pi="${escHtml(ref)}">${escHtml(String(r.piRef))}</a></td><td>${piDateFor(r.piRef)}</td><td>${piQ !== null ? piQ : ''}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(String(r.item ?? ''))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${r.delQty ?? ''}</td><td>${r.recQty ?? ''}</td><td>${r.short ?? ''}</td><td>${challanCell(r)}</td><td>${escHtml(String(r.challanDate ?? ''))}</td><td>${escHtml(combinedRemarks(r))}</td></tr>`;
+      html += `<tr class="${rowClass(r)}"><td><a href="#" class="pi-link" data-pi="${escHtml(ref)}">${escHtml(String(r.piRef))}</a></td><td>${escHtml(String(piDateFor(r.piRef) ?? ''))}</td><td>${escHtml(String(piQ !== null ? piQ : ''))}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(String(r.item ?? ''))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${escHtml(String(r.delQty ?? ''))}</td><td>${escHtml(String(r.recQty ?? ''))}</td><td>${escHtml(String(r.short ?? ''))}</td><td>${challanCell(r)}</td><td>${escHtml(String(r.challanDate ?? ''))}</td><td>${escHtml(combinedRemarks(r))}</td></tr>`;
     });
     html += tableCapNote(Math.min(rows.length, MAX_TABLE_ROWS), rows.length);
     html += `</table></div>`;
@@ -8750,7 +8823,7 @@ async function renderSingleResult(result) {
       if (piLineGroups.length) {
         html += `<div class="previewbox" style="margin-top:8px;max-height:260px;"><table class="preview"><tr><th>PI Ref</th><th>PI Date</th><th>PI Qty</th><th>Inventory Date</th><th>Style</th><th>Item</th><th>Measurement</th><th>Delivered Qty</th><th>Received Qty</th><th>Short&Exs</th><th>Challan No</th><th>Challan Date</th><th>Remarks</th></tr>`;
         piLineGroups.forEach(g => g.lines.forEach(ln => {
-          html += `<tr class="review"><td><a href="#" class="pi-link" data-pi="${g.ref}">${g.ref}</a></td><td>${piDateFor(g.ref)}</td><td>${ln.qty}</td><td></td><td>${ln.style}</td><td>${ln.item || ''}</td><td>${ln.meas || ''}</td><td>0</td><td></td><td></td><td></td><td></td><td>Not delivered yet (from PI)</td></tr>`;
+          html += `<tr class="review"><td><a href="#" class="pi-link" data-pi="${escHtml(String(g.ref))}">${escHtml(String(g.ref))}</a></td><td>${escHtml(String(piDateFor(g.ref) ?? ''))}</td><td>${escHtml(String(ln.qty ?? ''))}</td><td></td><td>${escHtml(String(ln.style ?? ''))}</td><td>${escHtml(String(ln.item || ''))}</td><td>${escHtml(String(ln.meas || ''))}</td><td>0</td><td></td><td></td><td></td><td></td><td>Not delivered yet (from PI)</td></tr>`;
         }));
         html += `</table></div>`;
       } else {
@@ -8818,13 +8891,13 @@ async function renderSingleResult(result) {
     const refKey = normPiKey(r.piRef);
     if (piQ !== null && refKey) coveredPiLine.add(refKey + '|' + r.styleNorm + '|' + (rowDk || 'nodim'));
     if (shownRows++ >= MAX_TABLE_ROWS) return;
-    html += `<tr class="${rowClass(r)}"><td>${piCell}</td><td>${piDateFor(r.piRef)}</td><td>${piQ !== null ? piQ : ''}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(String(r.item ?? ''))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${r.delQty ?? ''}</td><td>${r.recQty ?? ''}</td><td>${r.short ?? ''}</td><td>${challanCell(r)}</td><td>${escHtml(String(r.challanDate ?? ''))}</td>${remarkCell(r)}</tr>`;
+    html += `<tr class="${rowClass(r)}"><td>${piCell}</td><td>${escHtml(String(piDateFor(r.piRef) ?? ''))}</td><td>${escHtml(String(piQ !== null ? piQ : ''))}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(String(r.item ?? ''))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${escHtml(String(r.delQty ?? ''))}</td><td>${escHtml(String(r.recQty ?? ''))}</td><td>${escHtml(String(r.short ?? ''))}</td><td>${challanCell(r)}</td><td>${escHtml(String(r.challanDate ?? ''))}</td>${remarkCell(r)}</tr>`;
   });
   // Append PI measurement lines for this style with NO matching Master row yet — not delivered.
   piLinesForStyle(codeNorm).forEach(g => g.lines.forEach(ln => {
     const sig = g.ref + '|' + ln.style + '|' + (ln.dims || 'nodim');
     if (!coveredPiLine.has(sig)) {
-      html += `<tr class="review"><td><a href="#" class="pi-link" data-pi="${g.ref}">${g.ref}</a></td><td>${piDateFor(g.ref)}</td><td>${ln.qty}</td><td></td><td>${ln.style}</td><td>${ln.item || ''}</td><td>${ln.meas || ''}</td><td>0</td><td></td><td></td><td></td><td></td><td>Not delivered yet (from PI)</td></tr>`;
+      html += `<tr class="review"><td><a href="#" class="pi-link" data-pi="${escHtml(String(g.ref))}">${escHtml(String(g.ref))}</a></td><td>${escHtml(String(piDateFor(g.ref) ?? ''))}</td><td>${escHtml(String(ln.qty ?? ''))}</td><td></td><td>${escHtml(String(ln.style ?? ''))}</td><td>${escHtml(String(ln.item || ''))}</td><td>${escHtml(String(ln.meas || ''))}</td><td>0</td><td></td><td></td><td></td><td></td><td>Not delivered yet (from PI)</td></tr>`;
     }
   }));
   html += tableCapNote(Math.min(matches.length, MAX_TABLE_ROWS), matches.length);
@@ -8963,10 +9036,12 @@ function sugUpdate() {
   const merged = starts.concat(contains).slice(0, 50);
   sugList = merged.map(([k, e]) => {
     const pos = k.indexOf(tok);
+    // Escape BEFORE slicing would break the offsets (one char becomes six), so slice the raw text
+    // and escape each piece. The <b> around the matched part is ours; nothing from the file is.
     const disp = e.style.toUpperCase();
     const hl = pos >= 0
-      ? `${disp.slice(0, pos)}<b>${disp.slice(pos, pos + tok.length)}</b>${disp.slice(pos + tok.length)}`
-      : disp;
+      ? `${escHtml(disp.slice(0, pos))}<b>${escHtml(disp.slice(pos, pos + tok.length))}</b>${escHtml(disp.slice(pos + tok.length))}`
+      : escHtml(disp);
     return { ...e, key: k, hl };
   });
   sugHl = -1;
@@ -9589,12 +9664,14 @@ uqGenBtn.addEventListener('click', uqGenerateReport);
 function uqRenderPreview() {
   const headers = uqOutputHeaders;
   // Plain text throughout — no clickable PI/Challan links here (they caused lag on large lists).
-  let html = '<tr>' + headers.map(h => `<th>${h}</th>`).join('') + '</tr>';
+  // Headers AND cells here are read straight out of the uploaded workbook — a column heading is
+  // just as much file-derived data as the values under it.
+  let html = '<tr>' + headers.map(h => `<th>${escHtml(String(h ?? ''))}</th>`).join('') + '</tr>';
   const maxShow = 500;
   uqOutputRows.slice(0, maxShow).forEach(r => {
     const tds = r.cells.map(v => {
       const disp = (v === null || v === undefined) ? '' : (v instanceof Date ? fmtDate(v) : v);
-      return `<td>${disp}</td>`;
+      return `<td>${escHtml(String(disp))}</td>`;
     });
     html += `<tr class="${r.cls === 'unmatched' ? 'notfound' : r.cls}">` + tds.join('') + '</tr>';
   });
@@ -9795,7 +9872,26 @@ async function driveFetch(url, asBlob) {
       continue;
     }
     if (r.status === 429 || r.status === 403) {
-      // 403 can mean auth OR rate limit; one token refresh covers the auth case, backoff the rest.
+      // A 403 is two completely different problems wearing one status code. "You are going too
+      // fast" deserves backing off; "you are not allowed to touch this file" does not — backing
+      // off five times on a permission error just means twenty-five seconds of waiting before an
+      // error that was never going to change, with no hint of what is actually wrong. Google names
+      // the reason in the body, so read it rather than guessing. Cloned so the body stays readable
+      // for the throw below, and wrapped because a non-JSON body must not become its own failure.
+      let reason = '';
+      if (r.status === 403) {
+        try {
+          const body = await r.clone().json();
+          reason = (body && body.error && body.error.errors && body.error.errors[0] && body.error.errors[0].reason) || '';
+        } catch (e) { /* unreadable body — fall through to treating it as a rate limit */ }
+      }
+      const isPermission = /insufficientFilePermissions|forbidden|appNotAuthorizedToFile|domainPolicy|storageQuotaExceeded/i.test(reason);
+      if (isPermission) {
+        throw new Error(
+          `Google Drive refused this file (${reason}). This is a permission problem, not a busy server \u2014 `
+          + `retrying will not help. Check that the file is shared with the account you connected, then reconnect. `
+          + `(${url.slice(0, 80)})`);
+      }
       if (r.status === 403 && !refreshed) { refreshed = true; try { driveToken = null; await requestDriveToken(false); } catch (e) { /* keep backing off */ } }
       if (attempt < 5) { await sleep(800 * Math.pow(2, attempt)); continue; }
     }
