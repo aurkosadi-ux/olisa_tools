@@ -3650,6 +3650,50 @@ async function checkForNewerMaster(announce) {
 // start by itself while you are mid-search would be worse than the problem it solves. So the health
 // strip turns amber and says what is waiting; pressing Build stays your decision.
 const NEWPI_POLL_MS = 600000;         // 10 minutes — this is a nudge, not a live feed
+const SHAREDIDX_POLL_MS = 300000;    // 5 minutes — cheap enough to run often (one metadata call)
+let lastSharedIdxCheck = 0;
+let sharedIdxBusy = false;
+
+// Reconnecting is not the only moment a newer index can appear. Build it on the laptop while the
+// phone is sitting open and the phone should pick it up on its own, not wait to be reconnected.
+// Deliberately CHEAP: one metadata query for the file's modifiedTime. The index itself — which can
+// be megabytes — is only downloaded when that stamp is actually newer than what this device holds,
+// so an idle phone on mobile data costs one tiny request every five minutes and nothing else.
+async function checkForNewerSharedIndex() {
+  if (sharedIdxBusy) return;
+  if (!savedRootHandle || !savedRootHandle.isDrive) return;
+  if (typeof indexBuilding !== 'undefined' && indexBuilding) return;   // never fight a running build
+  if (connectInFlight) return;
+  if (navigator.onLine === false) return;
+  sharedIdxBusy = true;
+  try {
+    const q = encodeURIComponent(
+      `(name='${INDEX_FILE_GZ}' or name='${INDEX_FILE_NAME}') and trashed=false`);
+    const r = await driveApi(
+      `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,modifiedTime)&orderBy=modifiedTime desc&pageSize=5&supportsAllDrives=true`);
+    const f = r && r.files && r.files[0];
+    if (!f) return;
+    const stamp = f.modifiedTime ? Date.parse(f.modifiedTime) : 0;
+    // A file merely re-saved without a rebuild has a newer modifiedTime but the same builtAt
+    // inside, and adoptIndexPayload rejects that on its own — so this is a cheap pre-filter, not
+    // the decision. Small margin so a clock skew between devices cannot cause a download loop.
+    if (!stamp || stamp <= (piIndexBuiltAt || 0) + 1000) return;
+    // DriveFileHandle takes the RAW metadata object from the Drive listing, not (id, name) —
+    // getting that wrong throws inside getFile() and the poll would fail silently every time.
+    const data = await readIndexFile({ handle: new DriveFileHandle(f), gz: /\.gz$/i.test(f.name) });
+    const adopted = adoptIndexPayload(data, 'the shared index file in Drive');
+    if (adopted) {
+      if (typeof clearNewWorkOrderFlag === 'function') clearNewWorkOrderFlag();
+      if (typeof renderIndexStamp === 'function') renderIndexStamp();
+      if (typeof renderHealth === 'function') renderHealth();
+    }
+  } catch (e) {
+    /* a failed poll must never disturb what is already loaded */
+  } finally {
+    lastSharedIdxCheck = Date.now();
+    sharedIdxBusy = false;
+  }
+}
 let lastNewPiCheck = 0;
 let newPiCheckBusy = false;
 let driveNewSinceIndex = 0;
@@ -3719,6 +3763,7 @@ function startMasterPolling() {
   masterPollTimer = setInterval(() => {
     if (document.visibilityState !== 'visible') return;
     checkForNewerMaster(true);
+    if (Date.now() - lastSharedIdxCheck >= SHAREDIDX_POLL_MS) checkForNewerSharedIndex();
     if (Date.now() - lastNewPiCheck >= NEWPI_POLL_MS) checkForNewWorkOrders();
   }, MASTER_POLL_MS);
   // Coming back to the app is the most likely moment for the file to have changed while you were
@@ -3726,11 +3771,15 @@ function startMasterPolling() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return;
     checkForNewerMaster(true);
+    // Coming back to the app is the most likely moment for the laptop to have rebuilt while the
+    // phone was in a pocket, so this one is checked on EVERY return, not on the 5-minute timer.
+    checkForNewerSharedIndex();
     if (Date.now() - lastNewPiCheck >= NEWPI_POLL_MS) checkForNewWorkOrders();
   });
   // One check shortly after connecting, so a PI added since the last session is flagged straight
   // away instead of ten minutes into the session.
   setTimeout(checkForNewWorkOrders, 20000);
+  setTimeout(checkForNewerSharedIndex, 8000);   // and one shortly after connecting
 }
 
 // ==================== ONE CONNECT AT A TIME, AND IT KEEPS GOING ====================
@@ -3837,6 +3886,25 @@ async function connectFolderInner(existingHandle, forceNew) {
           loadStatus.textContent = `Master File loaded ("${warm.masterName}") \u00b7 ${piRootHandle ? 'Work Orders folder ready' : 'Work Orders folder not found'} \u00b7 resumed instantly (no rescan for another ${warmMinutesLeft(warm)} min).`;
           loadStatus.className = 'status ok';
           startMasterPolling();
+
+          // THE PHONE-NEVER-CATCHES-UP BUG. This warm path returned right here, and the shared
+          // index file in Drive was only ever looked at on the FULL connect below. On a phone the
+          // warm path is what runs almost every time — you open the app, it resumes in a second
+          // and returns — so the index built on the laptop and uploaded to Drive was never even
+          // looked for. The laptop said 2 days old and the phone said 8, both correct about their
+          // own local copy, with the newer one sitting in Drive untouched.
+          //
+          // Not awaited, for the same reason the cold path does not await it: adopting a newer
+          // index is advisory, never a prerequisite. The app stays usable in a second and this
+          // catches up behind it.
+          void (async () => {
+            try {
+              const adopted = await tryLoadIndexFromFolder(dirHandle);
+              if (adopted && typeof renderIndexStamp === 'function') renderIndexStamp();
+            } catch (e) { /* advisory only — must never break a warm resume */ }
+            if (typeof renderHealth === 'function') renderHealth();
+          })();
+
           if (typeof renderHealth === 'function') renderHealth();
           return;
         } catch (e) { /* snapshot unusable, or superseded — fall through to the full connect */ }
