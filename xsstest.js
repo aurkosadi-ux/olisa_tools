@@ -54,7 +54,34 @@ const M=new Function('XLSX','snapToLocalMidnight','escHtml','previewTable','prev
   t('style suggestions escape the code from the Master File', /escHtml\(disp\.slice\(0, pos\)\)/.test(src));
   t('the upload-checker escapes its cells', /return `<td>\$\{escHtml\(String\(disp\)\)\}<\/td>`/.test(src));
   t('the upload-checker escapes its HEADERS too', /headers\.map\(h => `<th>\$\{escHtml\(String\(h \?\? ''\)\)\}<\/th>`\)/.test(src));
-  const raw=[...src.matchAll(/<td>\$\{(?!escHtml)([^}]*)\}/g)].map(m=>m[1].trim())
+  // A ternary like `ch ? escHtml(ch) : '<i>none</i>'` is safe but does not START with escHtml, and
+  // escHtml(String(f(x) ?? '')) nests three deep, so regex cannot do this. Count parens instead:
+  // blank out every complete escHtml(...) call and every string literal, then whatever identifier
+  // survives is a value reaching the DOM raw.
+  const stripCalls = e => {
+    let out = e, guard = 0;
+    while (guard++ < 20) {
+      const at = out.indexOf('escHtml(');
+      if (at < 0) break;
+      let d = 0, k = at + 'escHtml'.length;
+      for (; k < out.length; k++) {
+        if (out[k] === '(') d++;
+        else if (out[k] === ')') { d--; if (d === 0) { k++; break; } }
+      }
+      out = out.slice(0, at) + '@' + out.slice(k);
+    }
+    return out;
+  };
+  const bare = e => {
+    const x = stripCalls(e)
+      .replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`/g, '@')
+      .replace(/\b(null|undefined|true|false)\b/g, '@')
+      // An identifier immediately before `?` is a ternary CONDITION, not a value being written out.
+      // `ch ? escHtml(ch) : '<i>none</i>'` writes nothing raw. `??` is left alone: that IS a value.
+      .replace(/[A-Za-z_$][\w$.]*\s*\?(?!\?)/g, '@?');
+    return /[A-Za-z_$][\w$]*/.test(x);
+  };
+  const raw=[...src.matchAll(/<td>\$\{([^}]*)\}/g)].map(m=>m[1].trim()).filter(bare)
     // Allowed: values the APP computes, and markup the app itself builds. Anything that could
     // carry file text must go through escHtml.
     .filter(e=>!/^(piCell|challanCell|remarkCell|piQ !== null|outstanding|act|g\.styles\.size|g\.lines|g\.del|total(Master|Punch|Cross)|v === null \|\| v === undefined \? '' : escHtml)/.test(e));

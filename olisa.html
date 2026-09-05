@@ -262,6 +262,31 @@
   /* Someone who has asked their phone for less motion gets none of this at all. */
   @media (prefers-reduced-motion: reduce) { .launch { display: none !important; } }
 
+  /* ---------- "Why?" evidence ---------- */
+  .why-btn { margin-left: 6px; border: 1px solid var(--line, #E5ECF5); background: #fff; color: #2563EB;
+    border-radius: 999px; padding: 1px 8px; font-size: 11px; font-weight: 700; cursor: pointer; line-height: 1.6; }
+  .why-btn:hover { background: #EFF6FF; }
+  .ev-back { position: fixed; inset: 0; background: rgba(16,24,45,.42); z-index: 99998;
+    display: flex; align-items: center; justify-content: center; padding: 18px; }
+  .ev-card { background: #fff; border-radius: 16px; max-width: 620px; width: 100%;
+    max-height: 82vh; overflow: auto; box-shadow: 0 22px 60px rgba(16,24,45,.28); padding: 18px 20px 20px; }
+  .ev-title { display: flex; align-items: flex-start; gap: 12px; justify-content: space-between; }
+  .ev-t1 { font-weight: 800; font-size: 16px; color: #12203D; }
+  .ev-t2 { font-family: var(--font-mono); font-size: 12px; color: var(--sub); margin-top: 3px; }
+  .ev-x { border: none; background: none; font-size: 24px; line-height: 1; cursor: pointer; color: var(--sub); padding: 0 4px; }
+  .ev-top { margin: 14px 0 10px; font-size: 13.5px; }
+  .ev-ok { color: #0F7B4F; } .ev-part { color: #B45309; }
+  .ev-item { display: flex; gap: 12px; border: 1px solid var(--line, #E5ECF5); border-radius: 12px;
+    padding: 11px 13px; margin-bottom: 9px; }
+  .ev-qty { font-weight: 800; font-size: 15px; color: #12203D; min-width: 64px; }
+  .ev-head { font-weight: 700; font-size: 13px; margin-bottom: 6px; color: #12203D; }
+  .ev-tbl { border-collapse: collapse; font-size: 12.5px; }
+  .ev-tbl td { padding: 2px 12px 2px 0; vertical-align: top; }
+  .ev-tbl td:first-child { color: var(--sub); white-space: nowrap; }
+  .ev-rule { margin-top: 7px; font-size: 12px; color: var(--sub); line-height: 1.45; }
+  .ev-foot { font-size: 11.5px; color: var(--sub); margin-top: 10px; line-height: 1.5; }
+  @media (max-width: 560px) { .ev-item { flex-direction: column; gap: 4px; } .ev-qty { min-width: 0; } }
+
   /* ---------- tab bar (sticky, gliding gradient pill) ---------- */
   .tabbar {
     position: sticky; top: 12px; z-index: 5;
@@ -7108,8 +7133,44 @@ function remarkCell(r) {
   const txt = combinedRemarks(r);
   const edited = r.remarkEdited ? ' <span class="sub-note" title="Edited by you">\u270e</span>' : '';
   return `<td class="rmk-cell" data-k="${escHtml(acceptKey(r))}" title="Click to edit. Type green or red to colour this line."
-    style="cursor:text;min-width:150px;">${escHtml(txt)}${edited}</td>`;
+    style="cursor:text;min-width:150px;">${escHtml(txt)}${edited}${whyBtn(r)}</td>`;
 }
+// One delegated listener for the whole page rather than one per row: these tables can hold hundreds
+// of lines, and a listener each would be exactly the kind of cost that made the previews freeze.
+document.addEventListener('click', e => {
+  const btn = e.target.closest && e.target.closest('.why-btn');
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();     // the remarks cell opens an editor on click — this must not trigger it
+  const rec = allRecords.find(r =>
+    `${r.xlSheet || r.sheet || ''}#${r.xlRow || 0}#${acceptKey(r)}` === btn.dataset.ev);
+  if (!rec) return;
+  openEvidencePanel(rec);
+});
+
+function openEvidencePanel(record) {
+  document.querySelectorAll('.ev-back').forEach(n => n.remove());
+  const back = document.createElement('div');
+  back.className = 'ev-back';
+  back.innerHTML = `<div class="ev-card" role="dialog" aria-modal="true" aria-label="Evidence for this line">
+      <div class="ev-title">
+        <div>
+          <div class="ev-t1">Why is this line settled?</div>
+          <div class="ev-t2">${escHtml(String(record.style || ''))} \u00b7 PI ${escHtml(String(record.piRef || '—'))} \u00b7 Short&amp;Exs ${escHtml(String(record.short ?? ''))}</div>
+        </div>
+        <button type="button" class="ev-x" aria-label="Close">&times;</button>
+      </div>
+      ${evidenceHtml(record)}
+    </div>`;
+  const close = () => back.remove();
+  back.addEventListener('click', ev => { if (ev.target === back) close(); });
+  back.querySelector('.ev-x').addEventListener('click', close);
+  document.addEventListener('keydown', function esc(ev) {
+    if (ev.key === 'Escape') { close(); document.removeEventListener('keydown', esc); }
+  });
+  document.body.appendChild(back);
+}
+
 function wireRemarkCells(bubble, rerender) {
   bubble.querySelectorAll('.rmk-cell').forEach(td => {
     td.addEventListener('click', () => {
@@ -7321,6 +7382,60 @@ function reconciliationInvariants() {
   }
   return [...new Set(problems)];
 }
+// ---------- "Why?" — the evidence behind a covered line ----------
+// The ledger already knows exactly which delivery paid for which shortage. This turns that record
+// into something you can put in front of your business head: not "the tool says delivered", but
+// which challan, on what date, how many pieces, and why that source was allowed to cover this line.
+// Only on lines that actually have evidence — a button that opens an empty panel teaches people
+// to stop pressing it.
+function whyBtn(record) {
+  if (!reconEvents.length) return '';
+  const evs = evidenceFor(record);
+  if (!evs.length) return '';
+  const id = `${record.xlSheet || record.sheet || ''}#${record.xlRow || 0}#${acceptKey(record)}`;
+  return ` <button type="button" class="why-btn" data-ev="${escHtml(id)}" title="Show the evidence for this line">Why?</button>`;
+}
+function evidenceFor(record) {
+  const id = `${record.xlSheet || record.sheet || ''}#${record.xlRow || 0}#${acceptKey(record)}`;
+  return reconEvents.filter(e => e.targetId === id);
+}
+function evidenceHtml(record) {
+  const evs = evidenceFor(record);
+  if (!evs.length) return '';
+  const shortAbs = Math.abs(record.short || 0);
+  const covered = evs.reduce((n, e) => n + e.qty, 0);
+  const rows = evs.map(e => {
+    const src = allRecords.find(r =>
+      `${r.xlSheet || r.sheet || ''}#${r.xlRow || 0}#${acceptKey(r)}` === e.sourceId);
+    const ch = src ? challanDisp(src) : '';
+    const when = src ? fmtNoteDate(src.challanDate || src.invDate) : '';
+    const how = e.rule === 'manual-challan'
+      ? 'Re-delivered on a hand-written challan'
+      : 'Extra pieces on a later delivery of the same item';
+    return `<div class="ev-item">
+      <div class="ev-qty">${e.qty} pcs</div>
+      <div class="ev-body">
+        <div class="ev-head">${escHtml(how)}</div>
+        <table class="ev-tbl">
+          <tr><td>Challan</td><td>${ch ? escHtml(ch) : '<i>not recorded</i>'}</td></tr>
+          <tr><td>Date</td><td>${escHtml(when || '—')}</td></tr>
+          <tr><td>Delivered under PI</td><td>${escHtml(String(src && src.piRef || '—'))}</td></tr>
+          <tr><td>Style</td><td>${escHtml(e.sourceStyle || '—')}</td></tr>
+          <tr><td>Item</td><td>${escHtml(e.sourceDims || e.sourceMeas || '—')}</td></tr>
+        </table>
+        <div class="ev-rule">Matched because the style is identical, it is the same physical item
+          and measurement, and the delivery is dated on or after the shortage.</div>
+      </div></div>`;
+  }).join('');
+  const verdict = covered >= shortAbs
+    ? `<b class="ev-ok">Fully covered</b> \u2014 all ${shortAbs} pcs accounted for`
+    : `<b class="ev-part">Partly covered</b> \u2014 ${covered} of ${shortAbs} pcs; ${shortAbs - covered} pcs still outstanding`;
+  return `<div class="ev-wrap"><div class="ev-top">${verdict}, from ${evs.length} source${evs.length > 1 ? 's' : ''}.</div>${rows}
+    <div class="ev-foot">Every figure here is the tool's own record of the decision it made, not a
+      re-calculation. The raw Short&amp;Exs value on the line is unchanged.</div></div>`;
+}
+window.evidenceFor = evidenceFor;
+window.evidenceHtml = evidenceHtml;
 window.reconEvents = () => reconEvents;
 window.reconciliationInvariants = reconciliationInvariants;
 
@@ -8781,7 +8896,7 @@ async function showPiDetails(refRaw) {
     html += `<div class="previewbox" style="margin-top:5px;max-height:300px;"><table class="preview"><tr><th>PI Ref</th><th>PI Date</th><th>PI Qty</th><th>Inventory Date</th><th>Style</th><th>Item</th><th>Measurement</th><th>Delivered Qty</th><th>Received Qty</th><th>Short&amp;Exs</th><th>Challan No</th><th>Challan Date</th><th>Remarks</th></tr>`;
     rows.slice(0, MAX_TABLE_ROWS).forEach(r => {
       const piQ = piQtyForRow(r.piRef, r.styleNorm, r.itemDesc);
-      html += `<tr class="${rowClass(r)}"><td><a href="#" class="pi-link" data-pi="${escHtml(ref)}">${escHtml(String(r.piRef))}</a></td><td>${escHtml(String(piDateFor(r.piRef) ?? ''))}</td><td>${escHtml(String(piQ !== null ? piQ : ''))}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(String(r.item ?? ''))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${escHtml(String(r.delQty ?? ''))}</td><td>${escHtml(String(r.recQty ?? ''))}</td><td>${escHtml(String(r.short ?? ''))}</td><td>${challanCell(r)}</td><td>${escHtml(String(r.challanDate ?? ''))}</td><td>${escHtml(combinedRemarks(r))}</td></tr>`;
+      html += `<tr class="${rowClass(r)}"><td><a href="#" class="pi-link" data-pi="${escHtml(ref)}">${escHtml(String(r.piRef))}</a></td><td>${escHtml(String(piDateFor(r.piRef) ?? ''))}</td><td>${escHtml(String(piQ !== null ? piQ : ''))}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(String(r.item ?? ''))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${escHtml(String(r.delQty ?? ''))}</td><td>${escHtml(String(r.recQty ?? ''))}</td><td>${escHtml(String(r.short ?? ''))}</td><td>${challanCell(r)}</td><td>${escHtml(String(r.challanDate ?? ''))}</td><td>${escHtml(combinedRemarks(r))}${whyBtn(r)}</td></tr>`;
     });
     html += tableCapNote(Math.min(rows.length, MAX_TABLE_ROWS), rows.length);
     html += `</table></div>`;

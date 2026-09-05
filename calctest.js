@@ -20,7 +20,7 @@ const ast = acorn.parse(src, { ecmaVersion: 2022, locations: true });
 const WANT = ['measNorm', 'parseDMY', 'fmtNoteDate', 'manualTime', 'effectiveShort', 'acceptKey',
   'challanDisp', 'normPiKey', 'dmyFromMs', 'acceptedFor', 'remarkColorWord', 'effectiveRemark',
   'extractMeasurement', 'reconcileManualChallans', 'reconcileExcessAgainstShorts', 'combinedRemarks',
-  'sameCartonItem', 'reconciliationInvariants', 'recordReconEvent', 'resetReconEvents'];
+  'sameCartonItem', 'reconciliationInvariants', 'recordReconEvent', 'resetReconEvents', 'evidenceFor'];
 const found = {};
 // Collect EVERY top-level function declaration in the file, then pull in the transitive closure of
 // the ones WANT names. The old version listed helpers by hand, so every helper added to olisa.html
@@ -57,7 +57,7 @@ const sandbox = `
   return { run: () => { reconcileManualChallans(); reconcileExcessAgainstShorts(); },
            reconEvents: () => reconEvents,
            reconciliationInvariants,
-           acceptKey,
+           acceptKey, evidenceFor,
            set: r => { allRecords = r; },
            get: () => allRecords,
            accept: m => { acceptedShorts = m; },
@@ -236,6 +236,28 @@ t('running reconciliation twice gives the same result', before === after);
 const evAfter = API.reconEvents();
 t('the ledger does not double up on a re-run (reset each pass)', evAfter.length === events.length,
   `${events.length} -> ${evAfter.length}`);
+
+console.log('\n4c. The "Why?" evidence view');
+const evLines = all.filter(r => (r._covered || 0) > 0);
+t('every covered line can produce its evidence', evLines.every(r => API.evidenceFor(r).length > 0),
+  evLines.filter(r => API.evidenceFor(r).length === 0).length + ' covered line(s) with no evidence');
+t('a line that was never covered offers no evidence',
+  all.filter(r => !(r._covered > 0)).every(r => API.evidenceFor(r).length === 0));
+t('the evidence adds up to exactly what the line was credited',
+  evLines.every(r => API.evidenceFor(r).reduce((n, e) => n + e.qty, 0) === r._covered));
+t('no piece of evidence appears on two different lines', (() => {
+  const seen = new Set();
+  for (const r of evLines) for (const e of API.evidenceFor(r)) {
+    const k = e.sourceId + '|' + e.targetId + '|' + e.qty;
+    if (seen.has(k)) return false;
+    seen.add(k);
+  }
+  return true;
+})());
+t('every piece of evidence names a real source line',
+  evLines.every(r => API.evidenceFor(r).every(e => all.some(x =>
+    `${x.xlSheet||x.sheet||''}#${x.xlRow||0}#${API.acceptKey(x)}` === e.sourceId))));
+console.log(`   ${evLines.length} settled line(s), all explainable`);
 
 console.log('\n5. Accepted (waived) shorts must not eat coverage');
 const victim = records.find(r => r.short < 0 && r.styleNorm === 'M82039-1B1-5');

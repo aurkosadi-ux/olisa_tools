@@ -49,10 +49,13 @@ if(calc){
   t('compiled Tailwind CSS is inlined instead', /--tw-border-spacing-x/.test(calc));
   t('the compiled CSS is small, not a shipped compiler', calc.length<200000, (calc.length/1024).toFixed(0)+' KB total page');
   // every class the page uses must survive the switch
+  // Strip the inline favicon first: it is an SVG data URI whose own class= attributes are not
+  // Tailwind classes, and counting them made this check fail on artwork that was never styled by Tailwind.
+  const calcNoIcon = calc.replace(/href="data:image\/svg\+xml,[^"]*"/g, 'href="#"');
   const toks=new Set();
-  for(const m of calc.matchAll(/class(?:Name)?\s*=\s*["'`]([^"'`]+)["'`]/g)) m[1].split(/\s+/).forEach(x=>x&&toks.add(x));
-  for(const m of calc.matchAll(/classList\.(?:add|remove|toggle)\(\s*["']([^"']+)["']/g)) m[1].split(/\s+/).forEach(x=>x&&toks.add(x));
-  const style=(calc.match(/<style>[\s\S]*?<\/style>/g)||[]).join('\n');
+  for(const m of calcNoIcon.matchAll(/class(?:Name)?\s*=\s*["'`]([^"'`]+)["'`]/g)) m[1].split(/\s+/).forEach(x=>x&&toks.add(x));
+  for(const m of calcNoIcon.matchAll(/classList\.(?:add|remove|toggle)\(\s*["']([^"']+)["']/g)) m[1].split(/\s+/).forEach(x=>x&&toks.add(x));
+  const style=(calcNoIcon.match(/<style>[\s\S]*?<\/style>/g)||[]).join('\n');
   const esc=c=>[...c].map(ch=>':/[].#()%,'.includes(ch)?'\\'+ch:ch).join('');
   const miss=[...toks].filter(x=>!x.startsWith('${')&&!style.includes('.'+esc(x))&&!style.includes(x));
   t(`all ${toks.size} classes still have styling`, miss.length===0, miss.join(', '));
