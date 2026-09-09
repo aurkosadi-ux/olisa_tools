@@ -2719,6 +2719,40 @@ async function downloadXlsx() {
 // Delivery Date is PI_DLV_DATE, both copied through as text exactly as the raw export wrote them,
 // so a dd/mm date can never be re-read by Excel as mm/dd. Status is always "Undelivered": this is
 // built from the undelivered export, so nothing on it can be anything else.
+// How far off is this delivery? Positive means still to come, negative means already late.
+// Measured against the date on the REPORT, not the wall clock: a report dated the 9th must still say
+// the same thing if it is re-opened on the 11th, or the sheet you sent and the sheet you kept would
+// disagree. Both sides are snapped to midnight so a stray time component cannot shift a day.
+function dueDayDiff(deliveryLabel, reportLabel) {
+  const key = deliverySortKey(deliveryLabel);
+  if (key === null) return null;                       // blank or free text like "ASAP"
+  const today = reportDateAsDate(reportLabel);
+  const t = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate());
+  return Math.round((key - t) / 86400000);
+}
+// "9th September 2026" back into a Date. Falls back to the real today if the box was typed into
+// with something unparseable, so this can never end up measuring against nothing.
+function reportDateAsDate(label) {
+  const MON = ['january','february','march','april','may','june','july','august','september','october','november','december'];
+  const m = String(label || '').match(/(\d{1,2})\s*(?:st|nd|rd|th)?\s+([A-Za-z]+)\s+(\d{4})/);
+  if (m) {
+    const mi = MON.indexOf(m[2].toLowerCase());
+    if (mi >= 0) return new Date(+m[3], mi, +m[1], 12, 0, 0, 0);
+  }
+  return snapToLocalMidnight(new Date());
+}
+const DUE_RED = 'FFC00000', DUE_YELLOW = 'FFFFFF00';
+// The words and the colour come from the same place, so a red cell can never carry a "due in" line.
+function dueDaysCell(diff) {
+  const pad = n => String(Math.abs(n)).padStart(2, '0');
+  if (diff === null) return { text: 'No delivery date given', fill: null, bold: false, white: false };
+  if (diff > 1)  return { text: `Delivery due in ${pad(diff)} days`, fill: null, bold: false, white: false };
+  if (diff === 1) return { text: 'Need to Deliver Tomorrow', fill: DUE_YELLOW, bold: true, white: false };
+  if (diff === 0) return { text: 'Need to Deliver Today', fill: DUE_YELLOW, bold: true, white: false };
+  if (diff === -1) return { text: 'Supposed to be Delivered Yesterday', fill: DUE_RED, bold: true, white: true };
+  return { text: `Delayed for ${pad(diff)} days`, fill: DUE_RED, bold: true, white: true };
+}
+
 async function downloadPiWise() {
   const piRows = generatedPiRows;
   if (!piRows || !piRows.length) { statusEl.textContent = 'Generate the report first.'; statusEl.className = 'status err'; return; }
@@ -2727,10 +2761,10 @@ async function downloadPiWise() {
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('PI Wise Priority Delivery Date');
     const PW_HEADS = ['Priority Delivery Date', 'DO Date', 'PI',
-                      'Master Carton', 'Chip Box (Punch)', 'Cross Divider', 'Status'];
+                      'Master Carton', 'Chip Box (Punch)', 'Cross Divider', 'Status', 'Due Days'];
     const PW_N = PW_HEADS.length;
     ws.columns = [{ width: 21 }, { width: 16 }, { width: 10 },
-                  { width: 16 }, { width: 19 }, { width: 15 }, { width: 14 }];
+                  { width: 16 }, { width: 19 }, { width: 15 }, { width: 14 }, { width: 32 }];
 
     ws.mergeCells(1, 1, 1, PW_N);
     const t1 = ws.getCell(1, 1);
@@ -2767,18 +2801,31 @@ async function downloadPiWise() {
       row.getCell(5).value = p.punch || 0;
       row.getCell(6).value = p.cross || 0;
       row.getCell(7).value = p.status;
+      const due = dueDaysCell(dueDayDiff(p.deliveryDate, dateInput.value));
+      row.getCell(8).value = due.text;
       row.eachCell({ includeEmpty: true }, c => {
         c.font = { name: 'Arial', size: 10 };
         c.alignment = UND_CENTER;
         c.border = UND_BORDER;
       });
       [4, 5, 6].forEach(c => { row.getCell(c).numFmt = '#,##0'; });
+      // Applied AFTER the row-wide styling above, or it would be overwritten by it.
+      const dc = row.getCell(8);
+      if (due.fill) dc.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: due.fill } };
+      dc.font = { name: 'Arial', size: 10, bold: due.bold,
+                  color: { argb: due.white ? 'FFFFFFFF' : 'FF12203D' } };
       sumMaster += p.master || 0; sumPunch += p.punch || 0; sumCross += p.cross || 0;
       r++;
     }
 
     const tot = ws.getRow(r);
     tot.getCell(1).value = 'Total';
+    // A count of what is already late, where the eye lands after reading the quantities.
+    const late = piRows.filter(p => { const d = dueDayDiff(p.deliveryDate, dateInput.value); return d !== null && d < 0; }).length;
+    const dueToday = piRows.filter(p => dueDayDiff(p.deliveryDate, dateInput.value) === 0).length;
+    tot.getCell(8).value = late || dueToday
+      ? `${late} overdue${dueToday ? `, ${dueToday} due today` : ''}`
+      : 'Nothing overdue';
     tot.getCell(4).value = sumMaster;
     tot.getCell(5).value = sumPunch;
     tot.getCell(6).value = sumCross;
@@ -2791,7 +2838,7 @@ async function downloadPiWise() {
     [4, 5, 6].forEach(c => { tot.getCell(c).numFmt = '#,##0'; });
 
     const dateSlug = dateInput.value.replace(/[^\w]+/g, '_');
-    const name = `Olisa Tools - PI Wise Priority Delivery Date ${dateSlug}.xlsx`;
+    const name = `Olisa Tools - Priority Wise Delivery Date ${dateSlug}.xlsx`;
     const buf = await wb.xlsx.writeBuffer();
     const saved = saveBlobAs(new Blob([buf], { type: 'application/octet-stream' }), name, true);
     if (typeof notifyDownload === 'function') notifyDownload(saved);

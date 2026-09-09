@@ -32,13 +32,15 @@ const dateInput = { value: '31st August 2026' };
 const statusEl = { textContent: '', className: '' };
 const piwiseBtn = { disabled: false, classList: { add() {}, remove() {} } };
 let captured = null;
+let savedPiWiseName = '';
 function CapBlob(parts) { captured = parts[0]; }
 const M = new Function('XLSX', 'ExcelJS', 'snapToLocalMidnight', 'escHtml', 'dateInput', 'saveBlobAs', 'Blob', 'document', 'statusEl', 'piwiseBtn',
   body + `
   return { readWorkbookRows, buildGroups, buildOutputRows, itemKind, KIND_LABEL, UND_HEADERS,
            defaultDateLabel, extractPiRef, formatDateValue, downloadXlsx, downloadPiWise,
+           dueDayDiff, dueDaysCell, reportDateAsDate,
            setState: (r, p, title) => { generatedRows = r; generatedPiRows = p; generatedTitle = title; } };`
-)(XLSX, ExcelJS, snap, s => String(s), dateInput, () => 'saved.xlsx', CapBlob, { addEventListener() {} }, statusEl, piwiseBtn);
+)(XLSX, ExcelJS, snap, s => String(s), dateInput, (b,n)=>{savedPiWiseName=n;return n;}, CapBlob, { addEventListener() {} }, statusEl, piwiseBtn);
 
 function fakeFile(p) {
   const b = fs.readFileSync(p);
@@ -193,14 +195,18 @@ function fakeFile(p) {
       const title = String(w.getCell('A1').value || '');
       t('title row', title.startsWith('OLISA : PRIORITY WISE DELIVERY DATE'), title.slice(0, 45));
       t('the date sits on a second line of the same cell', title.includes(`\n(${dateInput.value})`), JSON.stringify(title));
-      const PW = ['Priority Delivery Date','DO Date','PI','Master Carton','Chip Box (Punch)','Cross Divider','Status'];
-      t('seven columns, quantities before Status',
+      const PW = ['Priority Delivery Date','DO Date','PI','Master Carton','Chip Box (Punch)','Cross Divider','Status','Due Days'];
+      t('eight columns, Due Days after Status',
         PW.every((v, i) => w.getCell(2, i + 1).value === v),
         PW.map((v, i) => w.getCell(2, i + 1).value).join(' | '));
       const nData = out.piRows.length;
       t(`one row per PI (${nData}) plus a Total row`, w.rowCount === 2 + nData + 1, `${w.rowCount} rows`);
       t('Status is Undelivered on every PI row',
         Array.from({ length: nData }, (_, i) => w.getCell(i + 3, 7).value).every(v => v === 'Undelivered'));
+      t('every row has a Due Days verdict',
+        Array.from({ length: nData }, (_, i) => w.getCell(i + 3, 8).value).every(v => v && String(v).length > 3));
+      t('the download is named "Priority Wise Delivery Date"', /Olisa Tools - Priority Wise Delivery Date /.test(savedPiWiseName || ''),
+        savedPiWiseName || '(not captured)');
       t('column 1 is now the Priority Delivery Date', String(w.getCell(3, 1).value) === out.piRows[0].deliveryDate,
         `${w.getCell(3, 1).value} vs ${out.piRows[0].deliveryDate}`);
       t('DO Date column still holds PI_DATE', String(w.getCell(3, 2).value) === out.piRows[0].doDate);
@@ -250,6 +256,38 @@ function fakeFile(p) {
   t('a new report re-applies the cap', /previewShowAll = false;\s+\/\/ a new report starts capped/.test(src));
   t('the cap is never applied to a download path',
     !/buildWorkbookBuffer\(\s*shown/.test(src) && !/piRows\.slice\(0, PREVIEW_LIMIT\)/.test(src));
+
+console.log('\n5c. Due Days');
+  const R = '9th September 2026';
+  const cases = [
+    ['20/09/2026', 'Delivery due in 11 days', null,       false, false],
+    ['11/09/2026', 'Delivery due in 02 days', null,       false, false],
+    ['10/09/2026', 'Need to Deliver Tomorrow', 'FFFFFF00', true,  false],
+    ['09/09/2026', 'Need to Deliver Today',    'FFFFFF00', true,  false],
+    ['08/09/2026', 'Supposed to be Delivered Yesterday', 'FFC00000', true, true],
+    ['07/09/2026', 'Delayed for 02 days',      'FFC00000', true,  true],
+    ['31/08/2026', 'Delayed for 09 days',      'FFC00000', true,  true],
+    ['',           'No delivery date given',   null,       false, false],
+    ['ASAP',       'No delivery date given',   null,       false, false]
+  ];
+  cases.forEach(([d, want, fill, bold, white]) => {
+    const c = M.dueDaysCell(M.dueDayDiff(d, R));
+    t(`${(d||'(blank)').padEnd(11)} -> "${want}"`, c.text === want, c.text);
+    t(`   fill/bold/text colour correct`, (c.fill||null) === fill && c.bold === bold && c.white === white,
+      `${c.fill} ${c.bold} ${c.white}`);
+  });
+  t('every red cell is bold white (never red-on-black)',
+    cases.filter(c=>c[2]==='FFC00000').every(c=>{const x=M.dueDaysCell(M.dueDayDiff(c[0],R));return x.bold&&x.white;}));
+  t('no yellow cell uses white text (it would be unreadable)',
+    cases.filter(c=>c[2]==='FFFFFF00').every(c=>!M.dueDaysCell(M.dueDayDiff(c[0],R)).white));
+  t('a red cell can never say "due in"',
+    cases.every(c=>{const x=M.dueDaysCell(M.dueDayDiff(c[0],R));return !(x.fill==='FFC00000' && /due in/.test(x.text));}));
+  t('counted against the REPORT date, not the wall clock',
+    M.dueDayDiff('09/09/2026', '9th September 2026') === 0 &&
+    M.dueDayDiff('09/09/2026', '11th September 2026') === -2);
+  t('an unparseable report date falls back to today, not to nothing',
+    M.reportDateAsDate('rubbish') instanceof Date && !isNaN(M.reportDateAsDate('rubbish')));
+  t('days are zero-padded to two digits', M.dueDaysCell(-2).text === 'Delayed for 02 days');
 
 console.log('\n6. The after-midnight date bug');
   t('the default date is recomputed, not frozen at page load', /function refreshDefaultDate/.test(src));
