@@ -6873,17 +6873,30 @@ async function findChallanRoot() {
     } catch (e) { /* stale shortcut — fall through to the search */ }
   }
   // On Drive this used to walk every folder to depth 5. Connected to the whole of "My Drive" that
-  // is hundreds of list calls over mobile data, slow enough to look like a hang — which is how a
-  // build ends up sitting in the challan phase until it is given up on. Drive answers the same
-  // question in one query, the same fix the Master File finder already had.
+  // is hundreds of list calls, slow enough to look like a hang. Drive answers the same question in
+  // one query — the fix the Master File finder already had.
+  //
+  // The search term matters more than it looks. Drive's `name contains` is NOT a substring match:
+  // it matches WORD PREFIXES only. 'hallan' therefore matches nothing at all, because no word in
+  // "Challans" starts with those letters — I wrote it that way trying to dodge case sensitivity,
+  // which Drive handles by itself anyway. 'challan' matches "Challans", "Challan Copy" and
+  // "Delivery Challans" alike.
   let found = null;
   if (savedRootHandle.isDrive) {
-    try {
-      const q = encodeURIComponent("mimeType='application/vnd.google-apps.folder' and name contains 'hallan' and trashed=false");
-      const r = await driveApi(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&pageSize=20&supportsAllDrives=true&includeItemsFromAllDrives=true`);
-      const hit = ((r && r.files) || []).filter(f => /challan/i.test(f.name))[0];
-      if (hit) found = new DriveDirHandle(hit.id, hit.name);
-    } catch (e) { /* search unavailable — fall back to the walk below */ }
+    // Directly under the connected folder first. A Challans folder somewhere else in the Drive is
+    // not the one meant, and taking it would quietly index the wrong dispatches.
+    const tries = [
+      `mimeType='application/vnd.google-apps.folder' and name contains 'challan' and '${savedRootHandle.id}' in parents and trashed=false`,
+      `mimeType='application/vnd.google-apps.folder' and name contains 'challan' and trashed=false`
+    ];
+    for (const raw of tries) {
+      if (found) break;
+      try {
+        const r = await driveApi(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(raw)}&fields=files(id,name)&pageSize=20&supportsAllDrives=true&includeItemsFromAllDrives=true`);
+        const hit = ((r && r.files) || []).filter(f => /challan/i.test(f.name))[0];
+        if (hit) found = new DriveDirHandle(hit.id, hit.name);
+      } catch (e) { /* try the next form, then the walk */ }
+    }
   }
   if (!found) found = await findFolderRecursive(savedRootHandle, name => /challan/i.test(name), savedRootHandle.isDrive ? 3 : 5);
   if (found && savedRootHandle.isDrive && found.id) {
@@ -6894,9 +6907,27 @@ async function findChallanRoot() {
   }
   return found;
 }
+// When the folder cannot be found, "No Challans folder was found" is true and useless — it does
+// not say WHERE it looked or what it saw, so there is nothing to act on. This lists the folders
+// that ARE there, which turns a dead end into an obvious answer: wrong root, or wrong folder name.
+async function topLevelFolderNames(handle, limit) {
+  const out = [];
+  try {
+    for await (const [name, h] of handle.entries()) {
+      if (h.kind === 'directory') { out.push(name); if (out.length >= (limit || 12)) break; }
+    }
+  } catch (e) { /* unreadable root — the caller still reports the failure */ }
+  return out;
+}
 async function buildChallanIndex(onProgress) {
   const root = await findChallanRoot();
-  if (!root) throw new Error('No "Challans" folder was found under the connected folder.');
+  if (!root) {
+    const seen = await topLevelFolderNames(savedRootHandle, 12);
+    const where = (savedRootHandle && savedRootHandle.name) || 'the connected folder';
+    throw new Error(`no folder with "challan" in its name under "${where}". `
+      + (seen.length ? `Folders there: ${seen.join(', ')}.` : 'That folder appears to have no subfolders at all.')
+      + ' If your challans live somewhere else, use Change folder to point at the folder that contains them.');
+  }
   // Every PDF underneath, however deeply filed. The real folder has loose PDFs at the top AND a
   // "June - 2026" subfolder, and more months will follow.
   const pdfs = [];
@@ -7254,7 +7285,9 @@ async function openChallanCopy(challanNo) {
     const n = Object.keys(challanIndex).length;
     const reason = n
       ? `Challan <b>${escHtml(String(challanNo))}</b> is not in the challan index (${n} challan(s) indexed${challanIndexBuiltAt ? `, read ${dmyFromMs(challanIndexBuiltAt)}` : ''}). If its PDF was added since, rebuild below.`
-      : `The challan copies have not been read yet. This is a one-off scan of every PDF in your Challans folder; after it, opening a challan is instant.`;
+      : challanBuildError
+        ? `The challan copies could not be read: ${escHtml(challanBuildError)}`
+        : `The challan copies have not been read yet. This is a one-off scan of every PDF in your Challans folder; after it, opening a challan is instant.`;
     const b = addBubble(`${reason}<br><button class="secondary chBuildBtn" style="margin-top:8px;padding:7px 12px;font-size:12.5px;">${n ? 'Rebuild challan index' : 'Read my challan copies now'}</button>`, 'askA');
     b.querySelectorAll('.chBuildBtn').forEach(btn => btn.addEventListener('click', () => runChallanIndexBuild(key)));
     return;
@@ -7296,6 +7329,7 @@ async function runChallanIndexBuild(retryChallan) {
     const res = await buildChallanIndex((done, total, challans, eta) => {
       bubble.innerHTML = `Reading challan copies: ${done} / ${total} PDF(s) \\u2014 ${challans} challan(s) found${escHtml(eta || '')}`;
     });
+    challanBuildError = '';   // this run worked; any previous reason no longer applies
     bubble.innerHTML = `Challan copies ready \\u2014 <b>${res.challans}</b> challan(s) across ${res.files} PDF(s) in "${escHtml(res.folder)}", <b>${res.withLines}</b> with readable item lines.` +
       (res.improved.length ? `<br><span class="sub-note" style="color:var(--ok);">Drive read <b>${res.improved.length}</b> file(s) that had no readable text. Each one now has an <b>-Improved.pdf</b> beside it and the original was renamed to <b>-Original</b>:<br>${res.improved.slice(0, 6).map(r => escHtml(r.improved)).join('<br>')}</span>` : '') +
       (res.improveFailed.length ? `<br><span class="sub-note" style="color:var(--bad);">${res.improveFailed.length} file(s) could not be recovered even through Drive. Nothing was renamed for these:<br>${res.improveFailed.slice(0, 6).map(r => escHtml(r.name + ' \\u2014 ' + r.why)).join('<br>')}</span>` : '') +
@@ -7308,7 +7342,12 @@ async function runChallanIndexBuild(retryChallan) {
     if (typeof renderHealth === 'function') renderHealth();
     if (retryChallan && challanIndex[retryChallan]) openChallanCopy(retryChallan);
   } catch (e) {
+    // Remembered, not just printed: the bubble scrolls away, the health line does not. Without
+    // this the status went back to a bland "no challan copies indexed yet" the moment the message
+    // was out of sight, and the reason was lost.
+    challanBuildError = e.message;
     bubble.innerHTML = `Couldn't read the challan copies \\u2014 ${escHtml(e.message)}`;
+    if (typeof renderHealth === 'function') renderHealth();
   } finally {
     challanIndexBuilding = false;
     releaseBuildWakeLock();

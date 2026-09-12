@@ -106,7 +106,16 @@ t('why no challans were read is remembered', /challanBuildError = challanError;/
 t('and said in the health line instead of a blank "not indexed yet"',
   /challanBuildError \? ` \\u2014 challan copies NOT read/.test(src));
 t('the Challans folder is found by one Drive query, not a walk of the whole Drive',
-  /name contains 'hallan' and trashed=false/.test(src));
+  /name contains 'challan'/.test(src));
+// Drive's `name contains` matches WORD PREFIXES, not substrings. 'hallan' therefore matched
+// nothing at all — no word in "Challans" begins with it — and the query silently found zero
+// folders every single time. This assertion exists so that term can never drift again.
+t("the search term is a real word prefix, not a mid-word fragment",
+  !/name contains '[^c]hallan/.test(src), "'hallan' matches nothing in Drive");
+t('a folder under the connected root is preferred over one elsewhere in the Drive',
+  /'\$\{savedRootHandle\.id\}' in parents/.test(src));
+t('a missing folder says which folders it DID see', /Folders there: \$\{seen\.join/.test(src));
+t('the reason survives after the message scrolls away', /challanBuildError = e\.message;/.test(src));
 t('with the folder walk kept only as a fallback', /if \(!found\) found = await findFolderRecursive/.test(src));
 t('no OCR call can wait forever inside a build', /function ocrFetch/.test(src) && /ctrl\.abort\(\)/.test(src));
 t('every OCR network call goes through it', [...src.matchAll(/await ocrFetch\(/g)].length === 3,
