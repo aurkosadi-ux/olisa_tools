@@ -1220,7 +1220,10 @@ document.addEventListener('click', function (e) {
   </div>
 
   <a href="#" id="driveLogoutLink" style="position:fixed;right:12px;bottom:10px;z-index:9600;font-size:11px;color:var(--sub);text-decoration:none;opacity:.75;">Log out of Drive</a>
-  <footer>Courtesy of <strong>Sadi Mohammad</strong> &middot; built for Olisa carton operations &#128153;</footer>
+  <!-- A visible build number, because "I uploaded the new file and nothing changed" is impossible
+       to diagnose without one. If this does not say the version you were just given, the browser
+       is running an older olisa.html and no amount of reinstalling will change that. -->
+  <footer>Courtesy of <strong>Sadi Mohammad</strong> &middot; built for Olisa carton operations &#128153; &middot; <span id="buildStamp" style="opacity:.6;"></span></footer>
 </div>
 <script>
 
@@ -5041,6 +5044,16 @@ async function buildStyleIndex() {
   // to tell that a second, different action was needed. One button now produces one complete index.
   // A missing or unreadable Challans folder is reported, never fatal: the style index is already
   // built by this point and must not be thrown away because the challan folder was renamed.
+  // ==================== "I JUST INDEXED IT AND IT SAYS 2 HOURS AGO" ====================
+  // The style index is complete and checkpointed by this point. The stamp, though, was set only
+  // AFTER the challan phase below — so whenever that phase was slow, stalled or interrupted, a PI
+  // index that had genuinely just been built still reported the PREVIOUS build's time. The work
+  // was done and saved; only the clock lied. Stamp it the moment it becomes true.
+  piIndexBuiltAt = Date.now();
+  piIndexRestoredAt = piIndexBuiltAt;
+  piIndexPartial = false;
+  if (typeof renderIndexStamp === 'function') renderIndexStamp();
+  if (typeof renderHealth === 'function') renderHealth();
   let challanResult = null, challanError = '';
   try {
     progressBar.style.width = '0%';
@@ -5053,9 +5066,7 @@ async function buildStyleIndex() {
     challanError = e.message;
   }
 
-  piIndexBuiltAt = Date.now();
-  piIndexRestoredAt = piIndexBuiltAt;
-  piIndexPartial = false;   // this build ran to the end — the index is whole
+  challanBuildError = challanError;   // remembered so the health line can say WHY there are none
   if (typeof clearNewWorkOrderFlag === 'function') clearNewWorkOrderFlag();
   if (typeof renderIndexStamp === 'function') renderIndexStamp();
   if (typeof renderHealth === 'function') renderHealth();
@@ -5930,16 +5941,25 @@ function renderHealth() {
   // One index, one line. PI folders and challan copies are read by the same build, so splitting
   // them across two pills implied two separate jobs and left a permanent grey "not read" beside a
   // green "built" — which read as a failure even when everything had worked.
-  const chPart = chCount ? ` and ${chCount} challan copies` : ' \u2014 no challan copies indexed yet';
+  // "no challan copies indexed yet" was said whether the folder was missing, empty, unreachable
+  // or simply never scanned. Four different problems, one sentence, none of them actionable.
+  const chPart = chCount ? ` and ${chCount} challan copies`
+    : challanBuildError ? ` \u2014 challan copies NOT read: ${challanBuildError}`
+    : ' \u2014 no challan copies indexed yet';
   const idxTxt = piCount === 0 ? 'Index: not built'
     : `Index: ${piCount} PI(s)${chPart} \u2014 ${stampText(piIndexBuiltAt)} (${agoText(piIndexBuiltAt)})${days !== null && days >= IDX_STALE_DAYS ? ' \u2014 rebuild recommended' : ''}${newPiHint()}`;
   el.innerHTML = [
     `<span><span class="hdot ${online ? 'hgreen' : 'hred'}"></span>${online ? 'Online' : 'Offline \u2014 waiting for connection'}</span>`,
     `<span><span class="hdot ${driveOn ? 'hgreen' : localOn ? 'hgreen' : 'hgrey'}"></span>${driveOn ? 'Drive connected' : localOn ? 'Local folder connected' : 'No folder connected'}</span>`,
     `<span><span class="hdot ${rows ? 'hgreen' : 'hgrey'}"></span>${rows ? `Master: ${rows} rows` : 'Master File: not loaded'}</span>`,
-    `<span><span class="hdot ${idxDot}"></span>${idxTxt}</span>`
+    `<span><span class="hdot ${idxDot}"></span>${idxTxt}</span>`,
+    `<span style="opacity:.55;">v${APP_VERSION}</span>`
   ].join('');
 }
+(function paintBuildStamp() {
+  const el = document.getElementById('buildStamp');
+  if (el) el.textContent = 'build v' + APP_VERSION;
+})();
 setInterval(renderHealth, 5000);
 // Whole-page offline treatment. navigator.onLine is the browser's own signal; it flips the moment
 // the OS loses/regains connectivity, so the colour change is immediate and self-reverting.
@@ -5979,6 +5999,12 @@ function stampText(ms) {
 // phone, and there is no way around that from a web page. So the index is made PORTABLE instead.
 // Build once on the laptop, click "Save index file", drop the file into the Drive folder — every
 // other device picks it up automatically on connect. Read-only Drive permission is enough.
+// ==================== ONE VERSION NUMBER, IN ONE PLACE ====================
+// "I uploaded the new file and nothing changed" is impossible to diagnose without this. It shows
+// in the footer and in the health strip, and sw.js carries the SAME number as its cache name, so
+// the page and the cache can never disagree about which build is live. Bump both on every release.
+const APP_VERSION = 127;
+let challanBuildError = '';   // why the last build read no challans, in the build's own words
 const INDEX_FILE_NAME = 'olisa-index.json';
 const INDEX_FILE_GZ = 'olisa-index.json.gz';
 function currentIndexPayload() {
@@ -6841,7 +6867,20 @@ async function findChallanRoot() {
       }
     } catch (e) { /* stale shortcut — fall through to the search */ }
   }
-  const found = await findFolderRecursive(savedRootHandle, name => /challan/i.test(name), 5);
+  // On Drive this used to walk every folder to depth 5. Connected to the whole of "My Drive" that
+  // is hundreds of list calls over mobile data, slow enough to look like a hang — which is how a
+  // build ends up sitting in the challan phase until it is given up on. Drive answers the same
+  // question in one query, the same fix the Master File finder already had.
+  let found = null;
+  if (savedRootHandle.isDrive) {
+    try {
+      const q = encodeURIComponent("mimeType='application/vnd.google-apps.folder' and name contains 'hallan' and trashed=false");
+      const r = await driveApi(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&pageSize=20&supportsAllDrives=true&includeItemsFromAllDrives=true`);
+      const hit = ((r && r.files) || []).filter(f => /challan/i.test(f.name))[0];
+      if (hit) found = new DriveDirHandle(hit.id, hit.name);
+    } catch (e) { /* search unavailable — fall back to the walk below */ }
+  }
+  if (!found) found = await findFolderRecursive(savedRootHandle, name => /challan/i.test(name), savedRootHandle.isDrive ? 3 : 5);
   if (found && savedRootHandle.isDrive && found.id) {
     try {
       const sc = (await idbGet('driveShortcuts')) || {};
@@ -6958,6 +6997,19 @@ let lastChallanCheckpoint = 0;
 // read back FIRST; the original is renamed only once that has succeeded. Renaming first would mean
 // any failure after it leaves you holding a "-Original" and nothing else.
 const OCR_TEMP_NAME = 'olisa-tools-ocr-temp';
+// ==================== NOTHING IN A BUILD MAY WAIT FOREVER ====================
+// Every other Drive call goes through driveFetch, which survives the phone backgrounding the app.
+// These OCR calls are raw fetches against the upload and export endpoints, and a raw fetch on a
+// backgrounded Android tab can hang with no error and no end. Sitting inside the build loop, one
+// hung upload stalls the whole index — which looks exactly like "I indexed it and nothing changed".
+// Every one of them now fails loudly after two minutes instead of silently waiting.
+async function ocrFetch(url, opts, ms) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms || 120000);
+  try { return await fetch(url, { ...(opts || {}), signal: ctrl.signal }); }
+  catch (e) { throw new Error(e.name === 'AbortError' ? 'Drive did not answer within 2 minutes' : e.message); }
+  finally { clearTimeout(timer); }
+}
 function ocrBaseName(name) { return String(name).replace(/\.[^.]+$/, ''); }
 function ocrOriginalName(name) { return ocrBaseName(name) + '-Original' + (String(name).match(/\.[^.]+$/) || ['.pdf'])[0]; }
 function ocrImprovedName(name) { return ocrBaseName(name) + '-Improved.pdf'; }
@@ -6974,7 +7026,7 @@ async function driveOcrText(blob, mime, hintName) {
   const boundary = 'olisaocr' + Math.random().toString(36).slice(2);
   const head = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${boundary}\r\nContent-Type: ${mime}\r\n\r\n`;
   if (!driveToken) await requestDriveToken(false);
-  const up = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id&ocrLanguage=en&supportsAllDrives=true', {
+  const up = await ocrFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id&ocrLanguage=en&supportsAllDrives=true', {
     method: 'POST',
     headers: { Authorization: 'Bearer ' + driveToken, 'Content-Type': `multipart/related; boundary=${boundary}` },
     body: new Blob([head, blob, `\r\n--${boundary}--\r\n`])
@@ -6982,7 +7034,7 @@ async function driveOcrText(blob, mime, hintName) {
   if (!up.ok) throw new Error(`Drive OCR upload failed (${up.status}) for ${hintName}`);
   const made = await up.json();
   try {
-    const ex = await fetch(`https://www.googleapis.com/drive/v3/files/${made.id}/export?mimeType=text/plain`, { headers: { Authorization: 'Bearer ' + driveToken } });
+    const ex = await ocrFetch(`https://www.googleapis.com/drive/v3/files/${made.id}/export?mimeType=text/plain`, { headers: { Authorization: 'Bearer ' + driveToken } });
     if (!ex.ok) throw new Error(`Drive OCR export failed (${ex.status}) for ${hintName}`);
     return await ex.text();
   } finally {
@@ -7042,7 +7094,7 @@ async function improveOneChallanFile(entry) {
   const boundary = 'olisaimp' + Math.random().toString(36).slice(2);
   const head = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${boundary}\r\nContent-Type: application/pdf\r\n\r\n`;
   if (!driveToken) await requestDriveToken(false);
-  const up = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name&supportsAllDrives=true', {
+  const up = await ocrFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name&supportsAllDrives=true', {
     method: 'POST',
     headers: { Authorization: 'Bearer ' + driveToken, 'Content-Type': `multipart/related; boundary=${boundary}` },
     body: new Blob([head, new Blob([bytes], { type: 'application/pdf' }), `\r\n--${boundary}--\r\n`])
@@ -9081,14 +9133,14 @@ function tableCapNote(shown, total) {
   if (total <= shown) return '';
   return `<tr><td colspan="13" style="font-weight:700;color:var(--sub);">\u2026 ${total - shown} more row(s) not shown on screen \u2014 the Download button below contains all ${total} row(s).</td></tr>`;
 }
-function addDownloadButton(container, matches, code) {
+function addDownloadButton(container, matches, code, opts) {
   const btn = document.createElement('button');
   btn.className = 'secondary';
   btn.style.marginTop = '10px';
   btn.style.fontSize = '12.5px';
   btn.style.padding = '7px 12px';
   btn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16" stroke-linecap="round" stroke-linejoin="round"/></svg> Download this result (${matches.length} row(s))`;
-  btn.onclick = () => runMatchDownload(matches, code, undefined, btn);
+  btn.onclick = () => runMatchDownload(matches, code, opts, btn);
   container.appendChild(btn);
   scrollIntoChatView(btn);
 }
@@ -9478,6 +9530,21 @@ async function renderSingleResult(result) {
       }
       const bubble = addBubble(html, 'askA');
       bubble.querySelectorAll('.pi-link').forEach(a => a.addEventListener('click', e => { e.preventDefault(); openPiFolderFiles(a.dataset.pi); }));
+      // ==================== THE OTHER MISSING DOWNLOAD BUTTON ====================
+      // A style that Olisa has ORDERED but never taken delivery of has no Master File rows at all,
+      // so this branch renders its PI lines and returns — and returning is what skipped
+      // addDownloadButton entirely. Not off-screen this time: never created. Which is the worst
+      // case of the three, because "nothing has been delivered against these PIs" is exactly the
+      // list you need to send Olisa. The rows below are the same lines shown in the table, in the
+      // shape the writer expects, with noFillers set so the PI lines are not added a second time.
+      const piOnlyRows = [];
+      piLineGroups.forEach(g => g.lines.forEach(ln => piOnlyRows.push({
+        piRef: g.ref, invDate: '', style: ln.style, styleNorm: String(ln.style || '').trim().toUpperCase(),
+        item: ln.item || '', itemDesc: ln.meas || ln.item || '', delQty: 0, recQty: null, short: null,
+        challanNo: '', challanDate: '', remarks: 'Not delivered yet (from PI)', _piOnly: true
+      })));
+      if (piOnlyRows.length) addDownloadButton(bubble, piOnlyRows, code, { noFillers: true });
+      result.piOnlyRows = piOnlyRows;   // so a bulk search can put them in the combined file too
     } else if (styleIndex) {
       renderDetective(code);
     } else {
@@ -9576,6 +9643,9 @@ async function renderBulkResults(codes) {
     const result = lookupStyle(code);
     await renderSingleResult(result);
     allMatches.push(...result.matches);
+    // Undelivered styles produce no master rows but DO produce lines on screen. Leaving them out
+    // meant a search where nothing had been delivered showed tables and offered no combined file.
+    if (result.piOnlyRows && result.piOnlyRows.length) allMatches.push(...result.piOnlyRows);
   }
 
   if (allMatches.length) {
@@ -9586,7 +9656,7 @@ async function renderBulkResults(codes) {
     btn.style.fontSize = '12.5px';
     btn.style.padding = '7px 12px';
     btn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16" stroke-linecap="round" stroke-linejoin="round"/></svg> Download combined result (${allMatches.length} row(s))`;
-    btn.onclick = () => runMatchDownload(allMatches, 'Bulk_Query', undefined, btn);
+    btn.onclick = () => runMatchDownload(allMatches, 'Bulk_Query', allMatches.some(r => r._piOnly) ? { noFillers: true } : undefined, btn);
     bubble.appendChild(btn);
     scrollIntoChatView(btn);
   }

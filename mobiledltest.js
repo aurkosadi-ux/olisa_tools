@@ -83,7 +83,39 @@ t('a PI line shared by two matched styles is printed once, not twice',
   /if \(coveredPiLine\.has\(sig\)\) return;\s*\n\s*coveredPiLine\.add\(sig\);/.test(src) &&
   /if \(!coveredXls\.has\(sig\)\) \{\s*\n\s*coveredXls\.add\(sig\);/.test(src));
 
-console.log('\n7. The workbook really does hold one row per match (real ExcelJS)');
+
+console.log('\n7. The undelivered path offers a file too');
+// A style ordered but never delivered has no master rows, so this branch used to render its PI
+// lines and return — skipping the download button entirely. Not off-screen: never created.
+t('the PI-only branch builds real rows', /const piOnlyRows = \[\];/.test(src));
+t('and offers them for download', /addDownloadButton\(bubble, piOnlyRows, code, \{ noFillers: true \}\)/.test(src));
+t('with fillers off so the PI lines are not written twice', /addDownloadButton\(container, matches, code, opts\)/.test(src));
+t('a bulk search collects them into the combined file', /if \(result\.piOnlyRows && result\.piOnlyRows\.length\) allMatches\.push/.test(src));
+t('and the combined file turns fillers off when it carries them', /allMatches\.some\(r => r\._piOnly\)/.test(src));
+t('the rows carry the marker the combined file checks for', /_piOnly: true/.test(src));
+
+console.log('\n8. The build tells the truth about when it ran, and why challans are missing');
+// The stamp used to be set only after the challan phase, so a PI index that had just been built
+// and saved still reported the PREVIOUS build's time whenever that phase was slow or interrupted.
+const buildFn = src.slice(src.indexOf('Challan copies, in the same build'), src.indexOf('renderPiIndexDiagnostics'));
+t('the stamp is set before the challan phase, not after',
+  buildFn.indexOf('piIndexBuiltAt = Date.now()') < buildFn.indexOf('await buildChallanIndex'),
+  'stamp must not wait on challans');
+t('the challan phase still cannot abort the build', /catch \(e\) \{\s*challanError = e\.message;/.test(src));
+t('why no challans were read is remembered', /challanBuildError = challanError;/.test(src));
+t('and said in the health line instead of a blank "not indexed yet"',
+  /challanBuildError \? ` \\u2014 challan copies NOT read/.test(src));
+t('the Challans folder is found by one Drive query, not a walk of the whole Drive',
+  /name contains 'hallan' and trashed=false/.test(src));
+t('with the folder walk kept only as a fallback', /if \(!found\) found = await findFolderRecursive/.test(src));
+t('no OCR call can wait forever inside a build', /function ocrFetch/.test(src) && /ctrl\.abort\(\)/.test(src));
+t('every OCR network call goes through it', [...src.matchAll(/await ocrFetch\(/g)].length === 3,
+  [...src.matchAll(/await ocrFetch\(/g)].length + ' of 3');
+t('the build number is one constant', /const APP_VERSION = \d+;/.test(src));
+t('shown in the footer', /id="buildStamp"/.test(html) && /'build v' \+ APP_VERSION/.test(src));
+t('and in the health strip', /v\$\{APP_VERSION\}/.test(src));
+
+console.log('\n9. The workbook really does hold one row per match (real ExcelJS)');
 // Lift the shipped row-building code and run it, so "the file only had one line" is a thing the
 // suite can prove or disprove rather than a thing that has to be reproduced on a phone.
 (async () => {
