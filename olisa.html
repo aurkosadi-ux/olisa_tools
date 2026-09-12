@@ -1237,6 +1237,16 @@ function switchTab(which) {
 }
 
 // Shared by every section below (PO Summary, Undelivered Report, Ask, Upload checker) — kept at
+// ==================== ONE VERSION NUMBER, IN ONE PLACE ====================
+// It shows in the footer and in the health strip, and sw.js carries the SAME number as its cache
+// name, so the page and the cache can never disagree about which build is live. Bump both on every
+// release.
+// It lives at TRUE TOP LEVEL and nowhere else. Declared further down the file with `const`, it sat
+// in the temporal dead zone for every line above it — and the stamp painter that reads it runs
+// immediately, so the whole script threw on load. Evaluation stopped there, which meant every
+// `let` below it never initialised either, and the first thing to notice was an unrelated
+// "cannot access 'piIndex' before initialization". One misplaced constant, entire tool dead.
+const APP_VERSION = 127;
 // true top level, outside any IIFE, since it's used across all of them.
 function escHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -5999,11 +6009,6 @@ function stampText(ms) {
 // phone, and there is no way around that from a web page. So the index is made PORTABLE instead.
 // Build once on the laptop, click "Save index file", drop the file into the Drive folder — every
 // other device picks it up automatically on connect. Read-only Drive permission is enough.
-// ==================== ONE VERSION NUMBER, IN ONE PLACE ====================
-// "I uploaded the new file and nothing changed" is impossible to diagnose without this. It shows
-// in the footer and in the health strip, and sw.js carries the SAME number as its cache name, so
-// the page and the cache can never disagree about which build is live. Bump both on every release.
-const APP_VERSION = 127;
 let challanBuildError = '';   // why the last build read no challans, in the build's own words
 const INDEX_FILE_NAME = 'olisa-index.json';
 const INDEX_FILE_GZ = 'olisa-index.json.gz';
@@ -10826,6 +10831,13 @@ if (typeof document !== 'undefined') {
 
 })();
 
+// ==================== PROOF THE SCRIPT REACHED THE END ====================
+// A crash part-way through evaluation leaves the page looking almost normal: the HTML is all
+// there, the early functions exist, and only the bindings BELOW the crash quietly never come into
+// being. The first thing anyone notices is some unrelated button doing nothing. This marker is
+// only ever set if the very last line ran, so "did the script finish?" stops being a guess — the
+// smoke test asserts it before any build is shipped.
+window.__olisaReady = APP_VERSION;
 </script>
 <script>
 // A last-resort net for errors nothing else caught. Silent breakage is the worst failure mode this
