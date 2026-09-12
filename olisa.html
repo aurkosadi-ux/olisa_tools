@@ -863,7 +863,17 @@
   .filterbar .filterlabel {
     display: inline-flex; align-items: center; gap: 5px;
     font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--sub);
+    transition: color .15s;
   }
+  /* A filter left on is the quietest way to read the wrong answer off this tool: the table looks
+     completely normal, it is just missing rows. Grey-on-grey did not carry that. When anything is
+     active the label, the dropdown and the hint all go red and stay red. */
+  .filterbar.filter-on .filterlabel { color: var(--bad); }
+  .filterbar.filter-on select,
+  .filterbar.filter-on input[type="text"]:not(:placeholder-shown) {
+    border-color: var(--bad); color: var(--bad); box-shadow: 0 0 0 3px rgba(200,30,30,.10);
+  }
+  .filterbar.filter-on .filterhint { color: var(--bad); font-weight: 700; }
   .filterbar select {
     padding: 9px 12px; border: 1.5px solid var(--line); border-radius: 10px;
     font-family: var(--font-body); font-size: 13px; font-weight: 600; color: var(--ink);
@@ -1161,6 +1171,9 @@ document.addEventListener('click', function (e) {
       </span>
       <select id="askFilterMode">
         <option value="all">All records</option>
+        <option value="master">Master Carton only</option>
+        <option value="punch">Chip Box (Punch) only</option>
+        <option value="cross">Cross Divider only</option>
         <option value="manual">Manual Challan only</option>
       </select>
       <input type="text" id="askPiFrom" placeholder="PI from" title="Only show PI numbers &ge; this">
@@ -1246,7 +1259,27 @@ function switchTab(which) {
 // immediately, so the whole script threw on load. Evaluation stopped there, which meant every
 // `let` below it never initialised either, and the first thing to notice was an unrelated
 // "cannot access 'piIndex' before initialization". One misplaced constant, entire tool dead.
-const APP_VERSION = 127;
+const APP_VERSION = 128;
+// ==================== WHAT KIND OF CARTON IS THIS LINE? ====================
+// This lived inside the Undelivered Report's IIFE, so the Ask tab could not reach it and simply
+// printed the Master File's Item column as-is. That column says "Master Carton" on punch lines
+// too, so a search showed every line as a Master Carton while the Undelivered Report — reading the
+// DESCRIPTION, where the word "punch" actually appears — split them correctly. Same data, two
+// answers, which is exactly the inconsistency that must never exist between these two tabs.
+// Punch and perforated are the same thing under two names, so both words are recognised.
+function itemKind(desc) {
+  const d = String(desc || '');
+  if (/cross\s*divider/i.test(d)) return 'cross';
+  if (/punch|perforat/i.test(d)) return 'punch';
+  return 'master';
+}
+// DISPLAY name only. itemKind() still matches on the words the raw export writes; renaming what is
+// SHOWN must never change what is MATCHED.
+const KIND_LABEL = { master: 'Master Carton', punch: 'Chip Box (Punch)', cross: 'Cross Divider' };
+// The Item cell for any row, anywhere: the kind read from the description, never the raw column.
+function itemLabel(r) {
+  return KIND_LABEL[itemKind(String((r && r.itemDesc) || '') + ' ' + String((r && r.item) || ''))];
+}
 // true top level, outside any IIFE, since it's used across all of them.
 function escHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -2397,16 +2430,10 @@ async function readWorkbookRows(file) {
 // same thing under two names, so both words are recognised. Tolerant matching throughout: a variant
 // like "Cross Divider (5 Ply)" used to fall through to the Master Carton side and silently inflate
 // it, which looks perfectly clean in the output and is wrong.
-function itemKind(desc) {
-  const d = String(desc || '');
-  if (/cross\s*divider/i.test(d)) return 'cross';
-  if (/punch|perforat/i.test(d)) return 'punch';
-  return 'master';
-}
-// DISPLAY name only. itemKind() still matches on the words the raw export actually writes
-// ("punch", "perforated"); renaming what is SHOWN must never change what is MATCHED, or every
-// punch line would silently stop being recognised and land back in the Master Carton column.
-const KIND_LABEL = { master: 'Master Carton', punch: 'Chip Box (Punch)', cross: 'Cross Divider' };
+// Moved to true top level — see the shared definition above escHtml(). It lived in this IIFE while
+// the Ask tab rendered the raw Item column instead, which is why one tab called a line a punch and
+// the other called the same line a Master Carton.
+// KIND_LABEL now lives at true top level beside itemKind(), shared with the Ask tab.
 
 function buildGroups(allRecords) {
   const groups = new Map();
@@ -3113,7 +3140,7 @@ function showShortageList() {
       const piCell = (r.piRef !== null && r.piRef !== undefined && r.piRef !== '') ? `<a href="#" class="pi-link" data-pi="${r.piRef}">${r.piRef}</a>` : '';
       const outstanding = effectiveShort(r);
       const act = `<button class="secondary acc-btn" data-k="${escHtml(acceptKey(r))}" style="padding:4px 9px;font-size:11.5px;white-space:nowrap;">Mark accepted</button>`;
-      html += `<tr class="${rowClass(r)}"><td>${piCell}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(String(r.item ?? ''))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${escHtml(String(r.delQty ?? ''))}</td><td>${escHtml(String(r.recQty ?? ''))}</td><td>${outstanding}</td><td>${challanCell(r)}</td><td>${escHtml(String(r.challanDate ?? ''))}</td>${remarkCell(r)}<td>${act}</td></tr>`;
+      html += `<tr class="${rowClass(r)}"><td>${piCell}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(itemLabel(r))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${escHtml(String(r.delQty ?? ''))}</td><td>${escHtml(String(r.recQty ?? ''))}</td><td>${outstanding}</td><td>${challanCell(r)}</td><td>${escHtml(String(r.challanDate ?? ''))}</td>${remarkCell(r)}<td>${act}</td></tr>`;
     });
     html += tableCapNote(Math.min(sorted.length, MAX_TABLE_ROWS), sorted.length);
     html += `</table></div>`;
@@ -3122,7 +3149,7 @@ function showShortageList() {
       html += `<div class="previewbox" style="margin-top:6px;max-height:260px;"><table class="preview"><tr><th>PI Ref</th><th>Inv. Date</th><th>Style</th><th>Item</th><th>Measurement</th><th>Original Short</th><th>Challan No</th><th>Accepted because</th><th></th></tr>`;
       acceptedInScope.slice(0, MAX_TABLE_ROWS).forEach(r => {
         const piCell = (r.piRef !== null && r.piRef !== undefined && r.piRef !== '') ? `<a href="#" class="pi-link" data-pi="${r.piRef}">${r.piRef}</a>` : '';
-        html += `<tr class="resolved"><td>${piCell}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(String(r.item ?? ''))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${escHtml(String(r.short ?? ''))}</td><td>${challanCell(r)}</td><td>${escHtml(r.accepted.reason || '(no reason given)')} <span class="sub-note">${dmyFromMs(r.accepted.at)}</span></td><td><button class="secondary unacc-btn" data-k="${escHtml(acceptKey(r))}" style="padding:4px 9px;font-size:11.5px;white-space:nowrap;">Undo</button></td></tr>`;
+        html += `<tr class="resolved"><td>${piCell}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(itemLabel(r))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${escHtml(String(r.short ?? ''))}</td><td>${challanCell(r)}</td><td>${escHtml(r.accepted.reason || '(no reason given)')} <span class="sub-note">${dmyFromMs(r.accepted.at)}</span></td><td><button class="secondary unacc-btn" data-k="${escHtml(acceptKey(r))}" style="padding:4px 9px;font-size:11.5px;white-space:nowrap;">Undo</button></td></tr>`;
       });
       html += `</table></div>`;
     }
@@ -3235,7 +3262,7 @@ function showManualChallanList() {
     html += `<div class="previewbox" style="margin-top:6px;max-height:420px;"><table class="preview"><tr><th>PI Ref</th><th>Inv. Date</th><th>Style</th><th>Item</th><th>Measurement</th><th>Del Qty</th><th>Rec Qty</th><th>Short&Exs</th><th>Challan No</th><th>Challan Date</th><th>Remarks</th></tr>`;
     sorted.slice(0, MAX_TABLE_ROWS).forEach(r => {
       const piCell = (r.piRef !== null && r.piRef !== undefined && r.piRef !== '') ? `<a href="#" class="pi-link" data-pi="${r.piRef}">${r.piRef}</a>` : '';
-      html += `<tr class="${rowClass(r)}"><td>${piCell}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(String(r.item ?? ''))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${escHtml(String(r.delQty ?? ''))}</td><td>${escHtml(String(r.recQty ?? ''))}</td><td>${escHtml(String(r.short ?? ''))}</td><td>${challanCell(r)}</td><td>${escHtml(String(r.challanDate ?? ''))}</td>${remarkCell(r)}</tr>`;
+      html += `<tr class="${rowClass(r)}"><td>${piCell}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(itemLabel(r))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${escHtml(String(r.delQty ?? ''))}</td><td>${escHtml(String(r.recQty ?? ''))}</td><td>${escHtml(String(r.short ?? ''))}</td><td>${challanCell(r)}</td><td>${escHtml(String(r.challanDate ?? ''))}</td>${remarkCell(r)}</tr>`;
     });
     html += tableCapNote(Math.min(sorted.length, MAX_TABLE_ROWS), sorted.length);
     html += `</table></div>`;
@@ -7993,15 +8020,20 @@ function readAskFilters() {
   let from = parseFloat(String(fromEl.value).replace(/[^\d.\-]/g, ''));
   let to = parseFloat(String(toEl.value).replace(/[^\d.\-]/g, ''));
   if (!isNaN(from) && !isNaN(to) && from > to) { const t = from; from = to; to = t; }
-  return { ok: true, manualOnly: modeEl.value === 'manual', from, to };
+  const mode = modeEl.value;
+  const kind = (mode === 'master' || mode === 'punch' || mode === 'cross') ? mode : '';
+  return { ok: true, manualOnly: mode === 'manual', kind, from, to };
 }
 function applyAskFilters(matches) {
   const f = readAskFilters();
   if (!f.ok) return matches;
   const hasFrom = !isNaN(f.from), hasTo = !isNaN(f.to);
-  if (!f.manualOnly && !hasFrom && !hasTo) return matches; // nothing active — skip the pass entirely
+  if (!f.manualOnly && !f.kind && !hasFrom && !hasTo) return matches; // nothing active — skip the pass
   return matches.filter(r => {
     if (f.manualOnly && !r.manualCh) return false;
+    // Classified from the description, exactly as the Undelivered Report does it, so "punch only"
+    // means the same set of lines in both places.
+    if (f.kind && itemKind(String(r.itemDesc || '') + ' ' + String(r.item || '')) !== f.kind) return false;
     if (hasFrom || hasTo) {
       const p = parseFloat(r.piRef);          // one parse per row, not two
       if (isNaN(p)) return false;             // blank / "#N/A" PI Ref can't sit in a numeric range
@@ -8018,6 +8050,7 @@ function activeFilterDesc() {
   if (!f.ok) return '';
   const bits = [];
   if (f.manualOnly) bits.push('Manual Challan rows only');
+  if (f.kind) bits.push(KIND_LABEL[f.kind] + ' only');
   const hasFrom = !isNaN(f.from), hasTo = !isNaN(f.to);
   if (hasFrom || hasTo) bits.push(`PI ${hasFrom ? f.from : '…'} – ${hasTo ? f.to : '…'}`);
   return bits.join(' · ');
@@ -9084,7 +9117,7 @@ async function downloadMatches(matches, code, opts) {
       if (!piQtySeen.has(ck)) { piQtySeen.add(ck); totalPiQty += piQ; }
     }
     const shortCell = shortageOnly ? effectiveShort(r) : r.short;
-    const xr = ws.addRow([r.piRef, piDateFor(r.piRef), piQ !== null ? piQ : '', r.invDate, r.style, r.item, extractMeasurement(r.itemDesc), r.delQty, r.recQty, shortCell, challanDisp(r), r.challanDate, combinedRemarks(r)]);
+    const xr = ws.addRow([r.piRef, piDateFor(r.piRef), piQ !== null ? piQ : '', r.invDate, r.style, itemLabel(r), extractMeasurement(r.itemDesc), r.delQty, r.recQty, shortCell, challanDisp(r), r.challanDate, combinedRemarks(r)]);
     const rc = rowClass(r);
     const fill = rc === 'resolved' ? 'FFD9F3DF' : rc === 'review' ? 'FFFFF4DD' : rc === 'excess' ? 'FFE9F9EF' : null;
     if (fill) xr.eachCell({ includeEmpty: true }, c => { c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: fill } }; });
@@ -9523,7 +9556,7 @@ async function showPiDetails(refRaw) {
     html += `<div class="previewbox" style="margin-top:5px;max-height:300px;"><table class="preview"><tr><th>PI Ref</th><th>PI Date</th><th>PI Qty</th><th>Inventory Date</th><th>Style</th><th>Item</th><th>Measurement</th><th>Delivered Qty</th><th>Received Qty</th><th>Short&amp;Exs</th><th>Challan No</th><th>Challan Date</th><th>Remarks</th></tr>`;
     rows.slice(0, MAX_TABLE_ROWS).forEach(r => {
       const piQ = piQtyForRow(r.piRef, r.styleNorm, r.itemDesc);
-      html += `<tr class="${rowClass(r)}"><td><a href="#" class="pi-link" data-pi="${escHtml(ref)}">${escHtml(String(r.piRef))}</a></td><td>${escHtml(String(piDateFor(r.piRef) ?? ''))}</td><td>${escHtml(String(piQ !== null ? piQ : ''))}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(String(r.item ?? ''))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${escHtml(String(r.delQty ?? ''))}</td><td>${escHtml(String(r.recQty ?? ''))}</td><td>${escHtml(String(r.short ?? ''))}</td><td>${challanCell(r)}</td><td>${escHtml(String(r.challanDate ?? ''))}</td><td>${escHtml(combinedRemarks(r))}${whyBtn(r)}</td></tr>`;
+      html += `<tr class="${rowClass(r)}"><td><a href="#" class="pi-link" data-pi="${escHtml(ref)}">${escHtml(String(r.piRef))}</a></td><td>${escHtml(String(piDateFor(r.piRef) ?? ''))}</td><td>${escHtml(String(piQ !== null ? piQ : ''))}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(itemLabel(r))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${escHtml(String(r.delQty ?? ''))}</td><td>${escHtml(String(r.recQty ?? ''))}</td><td>${escHtml(String(r.short ?? ''))}</td><td>${challanCell(r)}</td><td>${escHtml(String(r.challanDate ?? ''))}</td><td>${escHtml(combinedRemarks(r))}${whyBtn(r)}</td></tr>`;
     });
     html += tableCapNote(Math.min(rows.length, MAX_TABLE_ROWS), rows.length);
     html += `</table></div>`;
@@ -9648,7 +9681,7 @@ async function renderSingleResult(result) {
     const refKey = normPiKey(r.piRef);
     if (piQ !== null && refKey) coveredPiLine.add(piCoverKey(r));
     if (shownRows++ >= MAX_TABLE_ROWS) return;
-    html += `<tr class="${rowClass(r)}"><td>${piCell}</td><td>${escHtml(String(piDateFor(r.piRef) ?? ''))}</td><td>${escHtml(String(piQ !== null ? piQ : ''))}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(String(r.item ?? ''))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${escHtml(String(r.delQty ?? ''))}</td><td>${escHtml(String(r.recQty ?? ''))}</td><td>${escHtml(String(r.short ?? ''))}</td><td>${challanCell(r)}</td><td>${escHtml(String(r.challanDate ?? ''))}</td>${remarkCell(r)}</tr>`;
+    html += `<tr class="${rowClass(r)}"><td>${piCell}</td><td>${escHtml(String(piDateFor(r.piRef) ?? ''))}</td><td>${escHtml(String(piQ !== null ? piQ : ''))}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(itemLabel(r))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${escHtml(String(r.delQty ?? ''))}</td><td>${escHtml(String(r.recQty ?? ''))}</td><td>${escHtml(String(r.short ?? ''))}</td><td>${challanCell(r)}</td><td>${escHtml(String(r.challanDate ?? ''))}</td>${remarkCell(r)}</tr>`;
   });
   // Append PI measurement lines for this style with NO matching Master row yet — not delivered.
   // Drawn from every style the search matched, which is what the download has always done: on a
@@ -9880,11 +9913,14 @@ askClearBtn.addEventListener('click', sugClose);
   const hint = document.getElementById('askFilterHint');
   const pf = document.getElementById('askPiFrom');
   const pt = document.getElementById('askPiTo');
+  const bar = hint.closest('.filterbar');
   function upd() {
     const desc = activeFilterDesc();
     hint.textContent = desc ? 'Active: ' + desc : '';
+    if (bar) bar.classList.toggle('filter-on', !!desc);
   }
   [mode, pf, pt].forEach(el => { el.addEventListener('input', upd); el.addEventListener('change', upd); });
+  upd();   // a filter restored from a previous session must show as on from the first paint
 })();
 
 // ================= Typewriter placeholder =================

@@ -34,13 +34,16 @@ const piwiseBtn = { disabled: false, classList: { add() {}, remove() {} } };
 let captured = null;
 let savedPiWiseName = '';
 function CapBlob(parts) { captured = parts[0]; }
-const M = new Function('XLSX', 'ExcelJS', 'snapToLocalMidnight', 'escHtml', 'dateInput', 'saveBlobAs', 'Blob', 'document', 'statusEl', 'piwiseBtn',
+// itemKind/KIND_LABEL moved to true top level so the Ask tab could reach them too. They are no
+// longer inside this IIFE, so the harness injects the real ones rather than a copy.
+const { itemKind: _ik, KIND_LABEL: _kl } = require('./shared_kind.js');
+const M = new Function('XLSX', 'ExcelJS', 'snapToLocalMidnight', 'escHtml', 'dateInput', 'saveBlobAs', 'Blob', 'document', 'statusEl', 'piwiseBtn', 'itemKind', 'KIND_LABEL',
   body + `
   return { readWorkbookRows, buildGroups, buildOutputRows, itemKind, KIND_LABEL, UND_HEADERS,
            defaultDateLabel, extractPiRef, formatDateValue, downloadXlsx, downloadPiWise,
            dueDayDiff, dueDaysCell, reportDateAsDate,
            setState: (r, p, title) => { generatedRows = r; generatedPiRows = p; generatedTitle = title; } };`
-)(XLSX, ExcelJS, snap, s => String(s), dateInput, (b,n)=>{savedPiWiseName=n;return n;}, CapBlob, { addEventListener() {} }, statusEl, piwiseBtn);
+)(XLSX, ExcelJS, snap, s => String(s), dateInput, (b,n)=>{savedPiWiseName=n;return n;}, CapBlob, { addEventListener() {} }, statusEl, piwiseBtn, _ik, _kl);
 
 function fakeFile(p) {
   const b = fs.readFileSync(p);

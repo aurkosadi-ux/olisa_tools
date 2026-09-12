@@ -9,10 +9,11 @@ function lift(startMark,endMark,ret,extra){
     .replace(/^\s*\w+\.addEventListener\([\s\S]*?\n\}\);\n/gm,'')
     .replace(/^\s*\['drag[^\n]*\n/gm,'').replace(/^\s*\w+\.addEventListener\([^\n]*\n/gm,'')
     .replace(/^refreshDefaultDate\(\);\n/m,'');
-  return new Function('XLSX','ExcelJS','snapToLocalMidnight','escHtml','dateInput','document','buyerInput','deliveryDateInput',
-    b+'\nreturn {'+ret+'};')(XLSX,ExcelJS,snap,x=>String(x),{value:'31st August 2026'},{addEventListener(){}},{value:'B'},{value:''});
+  const { itemKind: _ik, KIND_LABEL: _kl } = require('./shared_kind.js');
+  return new Function('XLSX','ExcelJS','snapToLocalMidnight','escHtml','dateInput','document','buyerInput','deliveryDateInput','itemKind','KIND_LABEL',
+    b+'\nreturn {'+ret+'};')(XLSX,ExcelJS,snap,x=>String(x),{value:'31st August 2026'},{addEventListener(){}},{value:'B'},{value:''},_ik,_kl);
 }
-const U=lift('(function() { // Undelivered Report Generator','(function() { // Ask — style lookup','readWorkbookRows,buildGroups,buildOutputRows,deliverySortKey,itemKind,findCrossFileOverlaps');
+const U=lift('(function() { // Undelivered Report Generator','(function() { // Ask — style lookup','readWorkbookRows,buildGroups,buildOutputRows,deliverySortKey,findCrossFileOverlaps');
 const P=lift('(function() { // PO Summary Generator','(function() { // Undelivered Report Generator','readOrderRows,groupByDeliveryDate,anyToDate,dateSuffix');
 
 function mk(aoa,name){ const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(aoa),'Rpt');

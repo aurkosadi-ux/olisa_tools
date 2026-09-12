@@ -140,6 +140,7 @@ console.log('\n9. The workbook really does hold one row per match (real ExcelJS)
     challanDisp: r => r.challanNo,
     combinedRemarks: r => r.remarks || '',
     extractMeasurement: d => String(d || ''),
+    itemLabel: r => String((r && r.item) || ''),   // real one lives at top level now
     piDateFor: () => '',
     piLinesForStyle: () => [],
     dimKey: () => '', dimsFromMasterText: () => null, uqExtractDimsAny: () => null,
