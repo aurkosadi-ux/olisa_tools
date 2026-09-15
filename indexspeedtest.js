@@ -35,7 +35,18 @@ t('subfolder recursion (e.g. one folder per month) runs through runPool', /await
 t('reading and parsing every PDF runs through runPool', /await runPool\(pdfs, 5,/.test(bci));
 t('a file that fails to download does not stop the rest from being read',
   /catch \(e\) \{ failed\+\+; done\+\+; return; \}/.test(bci));
-t('an already-parsed, unchanged file is still reused instead of re-parsed', /const reused = Object\.values\(challanIndex\)/.test(bci));
+// Was pinned to `const reused = Object.values(challanIndex).filter(...)`, which is the O(n x n)
+// scan that used to run inside the per-file loop. The reuse itself is the point, not the
+// expression: assert the behaviour and, separately, that the quadratic form has not come back.
+t('an already-parsed, unchanged file is still reused instead of re-parsed',
+  /byFp\.get\(fp\)/.test(bci) && /byFp\.set\(/.test(bci));
+t('the reuse lookup is built once, not rebuilt per file',
+  bci.indexOf('byFp.set(') < bci.indexOf('await runPool(pdfs'));
+// Checked against CODE, not prose: the comment above the fix names the old expression, and a test
+// that greps the raw text cannot tell an explanation of a bug from the bug itself.
+const codeOnly = t => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+t('no per-file scan of the whole index has crept back in',
+  !/Object\.values\(challanIndex\)[\s\S]{0,40}\.filter/.test(codeOnly(bci)));
 
 console.log('\n3. Nothing about WHAT gets indexed changed — only HOW FAST');
 t('style tokens are still extracted the same way', /extractStyleTokens\(text\)/.test(bsi));

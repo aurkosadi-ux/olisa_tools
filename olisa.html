@@ -1123,7 +1123,7 @@ document.addEventListener('click', function (e) {
       <button id="askBackupBtn" class="secondary hidden" style="flex:0 0 auto;" title="Download the current Master File (with your Update column written in) as &quot;Olisa Inventory Master File.xlsx&quot; — the exact name the tool looks for">⬇ Download Master File</button>
       <button id="askBuildIndexBtn" class="secondary hidden" style="flex:0 0 auto;">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h7" stroke-linecap="round"/></svg>
-        Build style index
+        Index PI + challans
       </button>
     </div>
     <div class="hint hidden" id="askFolderHint"></div>
@@ -1259,7 +1259,7 @@ function switchTab(which) {
 // immediately, so the whole script threw on load. Evaluation stopped there, which meant every
 // `let` below it never initialised either, and the first thing to notice was an unrelated
 // "cannot access 'piIndex' before initialization". One misplaced constant, entire tool dead.
-const APP_VERSION = 128;
+const APP_VERSION = 129;
 // ==================== WHAT KIND OF CARTON IS THIS LINE? ====================
 // This lived inside the Undelivered Report's IIFE, so the Ask tab could not reach it and simply
 // printed the Master File's Item column as-is. That column says "Master Carton" on punch lines
@@ -4946,7 +4946,43 @@ function extractStyleTokens(text) {
 // Throttled rather than per-folder because each write serialises the whole index — cheap at one
 // write per few seconds, wasteful at one per file.
 const CHECKPOINT_MS = 4000;
-let lastCheckpoint = { style: 0, pi: 0 };
+let lastCheckpoint = { style: 0, pi: 0, fileCache: 0 };
+// ==================== WHY A FULL REBUILD USED TO RE-READ EVERYTHING ====================
+// The PI-quantity phase has skipped unchanged files by fingerprint for a while. The STYLE phase
+// never did: it downloaded and XLSX-parsed every work order in every folder on every build, which
+// is both the bulk of the time AND the frozen page, since XLSX.read is synchronous.
+//
+// This is the missing half. One entry per work-order FILE, keyed by path|size|modifiedTime, whose
+// value is the style tokens that file produced. A file that has not changed since it was last read
+// contributes its tokens from here — no download, no parse, no blocked thread. So the second build
+// only pays for what genuinely changed, which is what "it should never rescan unless something
+// changed" actually means in practice.
+//
+// Capped because it must never grow without limit on a phone: at the cap the oldest-seen entries
+// go first, and losing one only costs re-reading that one file.
+const STYLE_FILE_CACHE_MAX = 20000;
+let styleFileCache = {};        // "path|size|mtime" -> { t: [tokens], at: lastSeenMs }
+let styleFileCacheDirty = false;
+async function checkpointStyleFileCache(force) {
+  if (!styleFileCacheDirty) return;
+  const now = Date.now();
+  if (!force && now - lastCheckpoint.fileCache < CHECKPOINT_MS) return;
+  lastCheckpoint.fileCache = now;
+  const keys = Object.keys(styleFileCache);
+  if (keys.length > STYLE_FILE_CACHE_MAX) {
+    keys.sort((a, b) => (styleFileCache[a].at || 0) - (styleFileCache[b].at || 0))
+        .slice(0, keys.length - STYLE_FILE_CACHE_MAX)
+        .forEach(k => { delete styleFileCache[k]; });
+  }
+  styleFileCacheDirty = false;
+  try { await idbSet('styleFileCache', { data: styleFileCache, at: now }); } catch (e) { /* quota — only costs a re-read */ }
+}
+(async function initStyleFileCache() {
+  try {
+    const c = await idbGet('styleFileCache');
+    if (c && c.data && typeof c.data === 'object') styleFileCache = c.data;
+  } catch (e) { /* first run — nothing banked yet */ }
+})();
 async function checkpointStyleIndex(index, force) {
   const now = Date.now();
   if (!force && now - lastCheckpoint.style < CHECKPOINT_MS) return;
@@ -4992,6 +5028,15 @@ async function buildStyleIndex() {
   // needs reading (fast, list-only), phase 2 reads all of it in parallel lanes regardless of which
   // folder each file came from — so a folder with one small file finishes just as fast as it should,
   // instead of waiting behind a slow neighbour that happened to be scanned first.
+  // One bulk sweep first: forty folders per Drive request instead of one. Everything the
+  // per-folder loop below asks for is already in the listing cache by the time it runs, so that
+  // loop stops being network-bound entirely. See driveListChildrenBulk for the arithmetic.
+  // Depth 3 because the PI-quantity phase below searches three levels down for the invoice; doing
+  // it here means that phase never waits on a listing at all.
+  await prefetchDriveTree(piFolders, 3, (level, n, total) => {
+    setProgress(progressText, `Listing PI folders in bulk (level ${level}): ${n} / ${total}\u2026`);
+  });
+
   const LIST_CONCURRENCY = 8;
   const listStart = newEtaClock();
   let foldersListed = 0;
@@ -5000,11 +5045,14 @@ async function buildStyleIndex() {
     const files = [];
     try {
       for await (const [fname, fhandle] of handle.entries()) {
-        if (fhandle.kind === 'file' && /\.(xlsx|xls)$/i.test(fname)) files.push(fhandle);
+        // isSpreadsheetName, not a bare extension test: "~$14-09-2026 Inventory.xlsx" is Excel's
+        // 165-byte lock artifact, created whenever a workbook is open and left behind in folder
+        // uploads. Reading those wasted a download and a parse each and could never yield a style.
+        if (fhandle.kind === 'file' && isSpreadsheetName(fname)) files.push({ fhandle, path: name + '/' + fname });
       }
     } catch (e) { /* this folder is unreadable — its files are simply absent, the rest continue */ }
     foldersListed++;
-    progressText.textContent = `Listing PI folders: ${foldersListed} / ${piFolders.length}${etaText(listStart, foldersListed, piFolders.length)}`;
+    setProgress(progressText, `Listing PI folders: ${foldersListed} / ${piFolders.length}${etaText(listStart, foldersListed, piFolders.length)}`);
     return { piRef, files };
   });
   foldersScanned = foldersListed;
@@ -5012,40 +5060,71 @@ async function buildStyleIndex() {
   const readTasks = [];
   perFolder.forEach(entry => {
     if (!entry || entry.__err) return;   // a runPool task that threw is skipped, not fatal to the rest
-    entry.files.forEach(fhandle => readTasks.push({ piRef: entry.piRef, fhandle }));
+    entry.files.forEach(f => readTasks.push({ piRef: entry.piRef, fhandle: f.fhandle, path: f.path }));
   });
   progressBar.style.width = '0%';
-  progressText.textContent = `Found ${readTasks.length} work-order file(s) across ${piFolders.length} PI folder(s). Reading\u2026`;
+  setProgress(progressText, `Found ${readTasks.length} work-order file(s) across ${piFolders.length} PI folder(s). Reading\u2026`, true);
 
   const READ_CONCURRENCY = 8;
   const scanStart = newEtaClock();
-  let filesDone = 0;
-  await runPool(readTasks, READ_CONCURRENCY, async ({ piRef, fhandle }) => {
+  let filesDone = 0, filesReused = 0;
+  // The index is assembled from token lists, whether they came off the wire or out of the cache,
+  // so there is exactly one place that writes into it and reuse can never drift from a fresh read.
+  const addTokens = (tokens, piRef) => {
+    tokens.forEach(t => {
+      if (!index[t]) index[t] = [];
+      if (!index[t].includes(piRef)) index[t].push(piRef);
+    });
+  };
+  await runPool(readTasks, READ_CONCURRENCY, async ({ piRef, fhandle, path }) => {
     try {
-      const file = await fhandle.getFile();
-      const buf = await file.arrayBuffer();
-      const wb = XLSX.read(buf, { type: 'array' });
-      let text = '';
-      wb.SheetNames.forEach(sn => {
-        text += XLSX.utils.sheet_to_csv(wb.Sheets[sn]) + '\n';
-      });
-      const tokens = extractStyleTokens(text);
-      tokens.forEach(t => {
-        if (!index[t]) index[t] = [];
-        if (!index[t].includes(piRef)) index[t].push(piRef);
-      });
-      filesScanned++;
+      // Unchanged since the last build? Then its styles are already known. No download, no parse,
+      // no frozen thread — this is the whole reason a second build finishes in seconds.
+      const fp0 = metaFp(path, fhandle);
+      if (fp0 && styleFileCache[fp0]) {
+        styleFileCache[fp0].at = Date.now();
+        styleFileCacheDirty = true;
+        addTokens(styleFileCache[fp0].t, piRef);
+        filesScanned++; filesReused++;
+      } else {
+        const file = await fhandle.getFile();
+        const fp = fp0 || `${path}|${file.size}|${file.lastModified}`;
+        if (styleFileCache[fp]) {
+          styleFileCache[fp].at = Date.now();
+          styleFileCacheDirty = true;
+          addTokens(styleFileCache[fp].t, piRef);
+          filesScanned++; filesReused++;
+        } else {
+          const buf = await file.arrayBuffer();
+          // Formulas, styles, HTML and blank stubs are all work this scan throws away — turning
+          // them off is a straight cut to the time the main thread spends frozen inside XLSX.read.
+          const wb = XLSX.read(buf, { type: 'array', cellFormula: false, cellHTML: false, cellStyles: false, cellDates: false, sheetStubs: false });
+          let text = '';
+          for (const sn of wb.SheetNames) {
+            text += XLSX.utils.sheet_to_csv(wb.Sheets[sn]) + '\n';
+            await yieldSoon();          // between sheets, so one fat workbook cannot hold the page
+          }
+          const tokens = extractStyleTokens(text);
+          styleFileCache[fp] = { t: tokens, at: Date.now() };
+          styleFileCacheDirty = true;
+          addTokens(tokens, piRef);
+          filesScanned++;
+        }
+      }
     } catch (e) { /* skip unreadable file */ }
     filesDone++;
     const pct = readTasks.length ? Math.round((filesDone / readTasks.length) * 100) : 100;
     progressBar.style.width = pct + '%';
-    progressText.textContent = `Scanning work orders: ${filesDone} / ${readTasks.length} file(s) across ${piFolders.length} PI folder(s) (${filesScanned} read)${etaText(scanStart, filesDone, readTasks.length)}`;
+    setProgress(progressText, `Scanning work orders: ${filesDone} / ${readTasks.length} file(s) across ${piFolders.length} PI folder(s) (${filesScanned} read${filesReused ? `, ${filesReused} unchanged` : ''})${etaText(scanStart, filesDone, readTasks.length)}`);
     styleIndex = index;                 // searchable as it grows, not only when the whole scan ends
     await checkpointStyleIndex(index);  // banked every few seconds — see CHECKPOINT_MS
+    await checkpointStyleFileCache();
+    await yieldSoon();                  // hand the thread back: eight lanes must not block as one
   });
 
   styleIndex = index;
   await checkpointStyleIndex(index, true);
+  await checkpointStyleFileCache(true);
 
   // Also read each PI's Proforma-Invoice PDF to capture PI Qty per style.
   progressText.textContent = `Style index ready. Now reading PI quantities from invoice PDFs...`;
@@ -5053,7 +5132,7 @@ async function buildStyleIndex() {
   const piResult = await buildPiQtyIndex(piFolders, (d, total, wd, eta) => {
     const pct = Math.round((d / total) * 100);
     progressBar.style.width = pct + '%';
-    progressText.textContent = `Reading PI quantities: ${d} / ${total} folder(s) (${wd} with invoice data)${eta || '...'}`;
+    setProgress(progressText, `Reading PI quantities: ${d} / ${total} folder(s) (${wd} with invoice data)${eta || '...'}`);
   });
 
   // Second chance: the invoice may not be filed inside the PI's work-order folder at all. Search
@@ -5110,10 +5189,18 @@ async function buildStyleIndex() {
   const chCount = Object.keys(challanIndex).length;
   if (typeof notify === 'function') notify('build', `Index built: ${withPi} PI(s), ${Object.keys(index).length} style(s)${chCount ? `, ${chCount} challan copies` : ''}.`);
   if (typeof uploadIndexToDrive === 'function') uploadIndexToDrive(); // fire-and-forget; notifies on its own
-  progressText.textContent = `Done \u2014 indexed ${Object.keys(index).length} style(s) across ${foldersScanned} PI folder(s); PI Qty read for ${withPi} PI(s); `
+  // Say plainly how much of this build was reused rather than re-read. Without it an incremental
+  // build that finished in twenty seconds looks like one that silently skipped the work.
+  const reuseNote = filesReused
+    ? ` ${filesReused} of ${readTasks.length} work-order file(s) were unchanged and reused, not re-read.`
+    : '';
+  const chNote = challanResult && (challanResult.reusedFiles || challanResult.skippedKnownBad)
+    ? ` ${challanResult.readNow} challan document(s) needed reading; ${challanResult.reusedFiles} were unchanged${challanResult.skippedKnownBad ? ` and ${challanResult.skippedKnownBad} already known unreadable` : ''}.`
+    : '';
+  setProgress(progressText, `Done \u2014 indexed ${Object.keys(index).length} style(s) across ${foldersScanned} PI folder(s); PI Qty read for ${withPi} PI(s); `
     + (challanError ? `challan copies NOT read (${challanError})`
        : challanResult ? `${challanResult.challans} challan copies read from ${challanResult.files} document(s)`
-       : 'no challan copies found') + '.';
+       : 'no challan copies found') + '.' + reuseNote + chNote, true);
   renderPiIndexDiagnostics(piFolders.length, withPi, b, sweep);
   indexBuilding = false;
   releaseBuildWakeLock();
@@ -6053,6 +6140,10 @@ function currentIndexPayload() {
     // phone quietly had nothing to search. It is the same build, so it travels with the same file.
     challanIndex: challanIndex || {},
     challanCount: Object.keys(challanIndex || {}).length,
+    // Only the FAILURES ride along, never the per-file token cache: these are small (a handful of
+    // unreadable files) where that one is a second copy of the whole style index by another name.
+    challanMisses,
+    piPdfDuds,
     acceptedShorts, // travel with the index so a decision made on the laptop reaches the phone
     remarkOverrides
   };
@@ -6135,8 +6226,23 @@ function adoptIndexPayload(data, sourceLabel) {
   // perfectly good local copy — worse than the bug this fixes.
   if (data.challanIndex && Object.keys(data.challanIndex).length) {
     challanIndex = data.challanIndex;
-    idbSet('challanIndex', { data: challanIndex, builtAt: incoming }).catch(() => {});
+    challanIndexBuiltAt = incoming;
+    // ==================== "IT ASKS ME TO RESCAN THE CHALLANS EVERY TIME" ====================
+    // THE version STAMP WAS MISSING HERE. initChallanIndex refuses any cached challan index whose
+    // version is not CHALLAN_CACHE_VERSION, and undefined is not 2 — so this write was thrown away
+    // on the very next app open, every time, without a word. The index was adopted from Drive
+    // perfectly, saved to IndexedDB, and silently discarded seconds later; the tool then said the
+    // challan copies had never been read and offered a full rescan. Doing that rescan wrote a
+    // PROPERLY stamped record, which is why it sometimes seemed to stick, until the next sync
+    // adopted an index over the top of it and dropped the stamp again.
+    //
+    // One missing property, and it cost a full re-read of every challan on every launch.
+    idbSet('challanIndex', { data: challanIndex, builtAt: incoming, version: CHALLAN_CACHE_VERSION }).catch(() => {});
   }
+  // The failure memories travel too, so the phone does not repeat work the laptop already proved
+  // was hopeless. Merged rather than replaced: each device may have seen files the other has not.
+  if (data.challanMisses) { Object.assign(challanMisses, data.challanMisses); saveChallanMisses(); }
+  if (data.piPdfDuds) { Object.assign(piPdfDuds, data.piPdfDuds); piPdfDudsDirty = true; savePiPdfDuds(); }
   piIndexBuiltAt = incoming;
   piIndexRestoredAt = incoming;
   piQtyMisses.clear();
@@ -6708,6 +6814,20 @@ let challanIndex = {};          // "32021081" -> { path, pages:[4,5], date, piRe
 let challanIndexBuiltAt = null;
 let challanIndexBuilding = false;
 const CHALLAN_CACHE_VERSION = 2;   // v2 adds per-challan line items — v1 caches must be rebuilt
+// Files that were read and could NOT be turned into a challan, keyed by the same path|size|mtime
+// fingerprint the index uses. This is not a blacklist: change the file in any way and its
+// fingerprint changes with it, so the very next build reads it properly. What it prevents is the
+// build spending its time re-proving, every single time, that a photo is still a photo.
+let challanMisses = {};
+async function saveChallanMisses() {
+  try { await idbSet('challanMisses', { data: challanMisses, at: Date.now() }); } catch (e) { /* quota */ }
+}
+(async function initChallanMisses() {
+  try {
+    const c = await idbGet('challanMisses');
+    if (c && c.data && typeof c.data === 'object') challanMisses = c.data;
+  } catch (e) { /* first run */ }
+})();
 // ==================== READING WHAT IS ACTUALLY ON THE CHALLAN ====================
 // The system challans (PDF) and the .doc ones (RTF) flatten to the SAME grammar:
 //   Line Item Description Qty Unit Other Information
@@ -6958,20 +7078,41 @@ async function buildChallanIndex(onProgress) {
   // Every PDF underneath, however deeply filed. The real folder has loose PDFs at the top AND a
   // "June - 2026" subfolder, and more months will follow.
   const pdfs = [];
+  // List the whole Challans tree in batched requests before walking a single folder of it, exactly
+  // as the PI phase does. A folder-per-month tree is otherwise one round trip per month, per build.
+  await prefetchDriveTree([root], 5);
   async function walk(dir, prefix, depth) {
     if (depth > 4) return;
     const subs = [];
+    const here = [];
     for await (const [name, handle] of dir.entries()) {
       if (handle.kind === 'directory') subs.push([name, handle]);
       // ".doc" is included on purpose: those are the hand challans, and they exist in no other form.
-      // A "-Original" is the same challan as its "-Improved" twin, already read. Skipping it here
-      // is what stops one dispatch appearing twice, and keeps the rebuild fast.
+      else if (/^~\$/.test(name)) { /* Office lock artifact, never a challan */ }
       else if (isOcrOriginal(name)) { /* superseded by its -Improved twin */ }
-      else if (/\.(pdf|docx?|rtf|png|jpe?g)$/i.test(name)) pdfs.push({ name, path: prefix + name, handle });
+      else if (/\.(pdf|docx?|rtf|png|jpe?g)$/i.test(name)) here.push({ name, path: prefix + name, handle });
     }
+    // ==================== THE SAME CHALLAN READ TWICE, EVERY BUILD ====================
+    // The rule was "skip anything ending -Original, because its -Improved twin supersedes it". That
+    // only holds if the rename to -Original actually happened. When the OCR pass creates
+    // "X-Improved.pdf" but the rename of "X.pdf" fails — a permission blip, a lost connection, the
+    // page closed in between — the folder is left holding BOTH "X.pdf" and "X-Improved.pdf" under
+    // names that neither rule catches. Every build after that downloads both, fails to read the
+    // unreadable original, and sends it through Drive's OCR all over again, producing yet more
+    // files and minutes of work for a challan that was already recovered.
+    //
+    // So the test is the one that is actually true: if an -Improved twin is sitting right here, the
+    // plain file is the superseded one, whatever it happens to be called.
+    const improvedBases = new Set(here.filter(f => /-Improved\.[^.]+$/i.test(f.name))
+      .map(f => f.name.replace(/-Improved\.[^.]+$/i, '').toLowerCase()));
+    here.forEach(f => {
+      const base = f.name.replace(/\.[^.]+$/, '').toLowerCase();
+      if (!/-Improved\.[^.]+$/i.test(f.name) && improvedBases.has(base)) return;  // already recovered
+      pdfs.push(f);
+    });
     // A "Challans" folder with a subfolder per month used to walk them one at a time — each an
-    // extra Drive round trip waiting on the last. Concurrency 6 matches the folder-walk elsewhere
-    // in this file (the local-disk PI scan uses the same number for the same reason).
+    // extra Drive round trip waiting on the last. With the tree pre-listed above these are cache
+    // hits, but the concurrency still matters on a local disk folder.
     await runPool(subs, 6, async ([name, handle]) => {
       try { await walk(handle, prefix + name + '/', depth + 1); } catch (e) { /* unreadable subfolder */ }
     });
@@ -6991,56 +7132,105 @@ async function buildChallanIndex(onProgress) {
   // one document after another. Concurrency 5 matches buildPiQtyIndex, which parses PDFs of a
   // similar size right above this function — that number is already proven not to overload Drive
   // or make the page feel stuck while it runs.
+  // ==================== O(n) REUSE, NOT O(n x n) ====================
+  // The reuse test used to be Object.values(challanIndex).filter(...) INSIDE the per-file loop:
+  // every file walked every challan ever indexed. At a few hundred challans that is invisible; at
+  // the thousands this has to scale to it is millions of comparisons on the thread that is also
+  // trying to keep the page alive. Build the lookup once, use it in constant time per file.
+  const byFp = new Map();
+  Object.values(challanIndex).forEach(e => {
+    if (!e || !e.fp) return;
+    if (!byFp.has(e.fp)) byFp.set(e.fp, []);
+    byFp.get(e.fp).push(e);
+  });
+  let reusedFiles = 0, skippedKnownBad = 0;
+  const freshMisses = {};
   await runPool(pdfs, 5, async f => {
-    let file = null, fp = '';
+    // Step one is NOT a download. The Drive listing already told us this file's size and
+    // modifiedTime, so the question "did it change?" is answered before a single byte moves.
+    let fp = metaFp(f.path, f.handle);
+    let file = null;
+    const useCached = () => {
+      const hits = byFp.get(fp);
+      if (hits && hits.length) { hits.forEach(e => { next[normChallanKey(e.no)] = e; challans++; }); reusedFiles++; return true; }
+      // Known-bad, remembered by fingerprint. Re-downloading a photo of a challan to discover for
+      // the ninth time that it is still a photo — and then paying for another round of Drive OCR
+      // on it — is the single most expensive thing this build used to do.
+      const bad = challanMisses[fp];
+      if (bad) {
+        skippedKnownBad++;
+        freshMisses[fp] = bad;
+        if (bad.why === 'binary') binaryDoc.push(f.path);
+        else if (bad.why === 'scanned') scanned.push(f.path);
+        else if (bad.why === 'nofont') noFont.push(f.path);
+        else if (bad.why === 'nochallan') skipped.push(f.path);
+        if (bad.why !== 'nochallan') failed++;
+        return true;
+      }
+      return false;
+    };
+    if (fp && useCached()) {
+      done++;
+      if (onProgress) onProgress(done, pdfs.length, challans, etaText(clock, done, pdfs.length));
+      await yieldSoon();
+      return;
+    }
     try {
       file = await f.handle.getFile();
-      fp = `${f.path}|${file.size}|${file.lastModified}`;
+      if (!fp) { fp = `${f.path}|${file.size}|${file.lastModified}`; if (useCached()) { done++; await yieldSoon(); return; } }
     } catch (e) { failed++; done++; return; }
-    // Unchanged file: reuse what was read last time instead of parsing every page again. This is
-    // what keeps a rebuild after one new challan to seconds rather than minutes.
-    const reused = Object.values(challanIndex).filter(e => e && e.fp === fp);
-    if (reused.length) {
-      reused.forEach(e => { next[normChallanKey(e.no)] = e; challans++; });
-    } else {
-      try {
-        const found = await scanChallanDoc(file, f.path, f.handle.meta && f.handle.meta.id);
-        found.forEach(c => { next[c.no] = { ...c, fp }; challans++; });
-        if (!found.length) skipped.push(f.path);
-      } catch (e) {
-        failed++;
-        if (/binary Word/.test(e.message)) binaryDoc.push(f.path);
-        // A challan that cannot be read is a delivery the tool will never mention. Naming the file
-        // and saying WHY is the difference between a fixable problem and a silent hole: a scanned
-        // manual challan needs a typed copy, a broken font needs re-printing from the system.
-        else if (/no text layer/.test(e.message)) { scanned.push(f.path); needOcr.push(f); }
-        else if (/unreadable text layer/.test(e.message)) { noFont.push(f.path); needOcr.push(f); }
-      }
+    try {
+      const found = await scanChallanDoc(file, f.path, f.handle.meta && f.handle.meta.id);
+      found.forEach(c => { next[c.no] = { ...c, fp }; challans++; });
+      if (!found.length) { skipped.push(f.path); freshMisses[fp] = { path: f.path, why: 'nochallan', at: Date.now() }; }
+    } catch (e) {
+      failed++;
+      if (/binary Word/.test(e.message)) { binaryDoc.push(f.path); freshMisses[fp] = { path: f.path, why: 'binary', at: Date.now() }; }
+      // A challan that cannot be read is a delivery the tool will never mention. Naming the file
+      // and saying WHY is the difference between a fixable problem and a silent hole: a scanned
+      // manual challan needs a typed copy, a broken font needs re-printing from the system.
+      else if (/no text layer/.test(e.message)) { scanned.push(f.path); needOcr.push({ f, fp, why: 'scanned' }); }
+      else if (/unreadable text layer/.test(e.message)) { noFont.push(f.path); needOcr.push({ f, fp, why: 'nofont' }); }
     }
     done++;
     await checkpointChallanIndex(next);
     if (onProgress) onProgress(done, pdfs.length, challans, etaText(clock, done, pdfs.length));
+    await yieldSoon();
   });
   // Anything that could not be read gets one attempt through Drive's OCR, producing an
   // "-Improved.pdf" beside it. Offline, or on the office machine where the folder is a local disk
   // rather than Drive, this is skipped and the files are simply reported as before.
   const improved = [], improveFailed = [];
   if (needOcr.length && savedRootHandle && savedRootHandle.isDrive && navigator.onLine) {
-    for (const f of needOcr) {
-      if (onProgress) onProgress(done, pdfs.length, challans, ` — reading ${f.name} through Drive`);
+    for (const { f, fp, why } of needOcr) {
+      if (onProgress) onProgress(done, pdfs.length, challans, ` \u2014 reading ${f.name} through Drive`);
       try {
         const r = await improveOneChallanFile(f);
         r.found.forEach(c => { next[c.no] = { ...c, fp: `${r.improved}|ocr|${Date.now()}`, viaOcr: true }; challans++; });
         improved.push(r);
-      } catch (e) { improveFailed.push({ name: f.name, why: e.message }); }
+      } catch (e) {
+        improveFailed.push({ name: f.name, why: e.message });
+        // Drive read it and still could not make a challan out of it. Record that against this
+        // exact version of the file so the next build does not spend minutes proving it again.
+        // Edit or re-save the file and its fingerprint changes, so a genuine fix is picked up at
+        // once — this remembers a failure, it does not give up on the file.
+        if (fp) freshMisses[fp] = { path: f.path, why, ocrTried: true, at: Date.now() };
+      }
+      await yieldSoon(true);
     }
+  } else {
+    // Offline, on a local disk folder, or OCR otherwise unavailable: these are still misses, but
+    // they are NOT recorded as OCR-tried, so the next online build will give each one its chance.
+    needOcr.forEach(({ f, fp, why }) => { if (fp) freshMisses[fp] = { path: f.path, why, at: Date.now() }; });
   }
+  challanMisses = freshMisses;   // rebuilt from this run: a file deleted or fixed leaves no trace
+  await saveChallanMisses();
   challanIndex = next;
   challanIndexBuiltAt = Date.now();
   await checkpointChallanIndex(next, true);
   const unverified = Object.values(next).filter(c => Array.isArray(c.lines) && c.lines.length && !c.verified).map(c => c.no);
   const withLines = Object.values(next).filter(c => Array.isArray(c.lines) && c.lines.length).length;
-  return { files: pdfs.length, challans, failed, skipped, binaryDoc, scanned, noFont, unverified, withLines, improved, improveFailed, folder: root.name };
+  return { files: pdfs.length, challans, failed, skipped, binaryDoc, scanned, noFont, unverified, withLines, improved, improveFailed, folder: root.name, reusedFiles, skippedKnownBad, readNow: pdfs.length - reusedFiles - skippedKnownBad };
 }
 let lastChallanCheckpoint = 0;
 // ==================== MAKING AN UNREADABLE CHALLAN READABLE ====================
@@ -7256,6 +7446,47 @@ function unbookedBlockHtml(styleNorm) {
   }
   return h;
 }
+// ==================== "LOOK FOR CHANGES, DON'T RE-READ EVERYTHING" ====================
+// Listing a folder and downloading its contents are two completely different costs. Listing the
+// whole Challans tree is now a handful of batched requests and no file transfer at all — seconds,
+// even at thousands of files. That is enough to answer "is there anything new?" exactly, because
+// every file's size and modifiedTime come back with the listing and the index already records the
+// same fingerprint for every file it has read.
+//
+// So the tool can check for new challans as often as it likes, and only ever offer a scan when
+// there is genuinely something to scan — and that scan then reads ONLY the files named here,
+// because buildChallanIndex reuses everything whose fingerprint it recognises.
+async function challanTreeDelta() {
+  const root = await findChallanRoot();
+  if (!root) throw new Error('The Challans folder could not be found.');
+  await prefetchDriveTree([root], 5);
+  const known = new Set();
+  Object.values(challanIndex).forEach(e => { if (e && e.fp) known.add(e.fp); });
+  Object.keys(challanMisses).forEach(fp => known.add(fp));
+  const unknown = [];
+  let total = 0, unfingerprinted = 0;
+  async function walk(dir, prefix, depth) {
+    if (depth > 4) return;
+    const subs = [];
+    for await (const [name, h] of dir.entries()) {
+      if (h.kind === 'directory') { subs.push([name, h]); continue; }
+      if (/^~\$/.test(name) || isOcrOriginal(name)) continue;
+      if (!/\.(pdf|docx?|rtf|png|jpe?g)$/i.test(name)) continue;
+      total++;
+      const fp = metaFp(prefix + name, h);
+      // No metadata means a local disk folder, where this check cannot be done from a listing.
+      // Counted separately and reported honestly rather than guessed at either way.
+      if (!fp) { unfingerprinted++; continue; }
+      if (!known.has(fp)) unknown.push(prefix + name);
+    }
+    for (const [name, h] of subs) {
+      try { await walk(h, prefix + name + '/', depth + 1); } catch (e) { /* unreadable subfolder */ }
+    }
+    await yieldSoon();
+  }
+  await walk(root, '', 0);
+  return { total, unknown, unfingerprinted, folder: root.name };
+}
 async function checkpointChallanIndex(data, force) {
   const now = Date.now();
   if (!force && now - lastChallanCheckpoint < CHECKPOINT_MS) return;
@@ -7272,16 +7503,34 @@ async function checkpointChallanIndex(data, force) {
 })();
 // Pull one challan out of its file as a standalone PDF: only its own pages, nothing else.
 // Locate the file an index entry points at, wherever it now sits in the Challans tree.
+// ==================== "THE FILE IS NO LONGER IN THE CHALLANS FOLDER" ====================
+// This used to find the file by PATH and nothing else, so any of the ordinary things that happen
+// to a Drive folder broke it: renaming a challan, filing it into a month subfolder, or the OCR
+// pass renaming the original out from under its own index entry. The file was still right there;
+// only its path had moved, and the tool answered "rebuild the challan index" — a several-minute
+// job to fix a lookup that should not have failed.
+//
+// A Drive file id survives renames and moves. The index already records one. Try it first, fall
+// back to the path, and fall back again to the bare file name anywhere in the tree, so a challan
+// opens whenever the file exists at all. Only when all three miss is a rebuild genuinely needed.
 async function challanFileHandle(entry) {
+  if (entry && entry.driveId && savedRootHandle && savedRootHandle.isDrive) {
+    try {
+      const meta = await driveApi(`https://www.googleapis.com/drive/v3/files/${entry.driveId}?fields=id,name,size,modifiedTime,trashed&supportsAllDrives=true`);
+      if (meta && meta.id && !meta.trashed) return new DriveFileHandle(meta);
+    } catch (e) { /* deleted, or not ours any more — the path search below still has a chance */ }
+  }
   const root = await findChallanRoot();
   if (!root) throw new Error('The Challans folder could not be found.');
-  let handle = null;
+  const wantName = String(entry.path || '').split('/').pop().toLowerCase();
+  let handle = null, byName = null;
   async function find(dir, prefix, depth) {
     if (handle || depth > 4) return;
     const subs = [];
     for await (const [name, h] of dir.entries()) {
       if (h.kind === 'directory') subs.push([name, h]);
       else if (prefix + name === entry.path) { handle = h; return; }
+      else if (!byName && name.toLowerCase() === wantName) byName = h;   // same file, different folder
     }
     for (const [name, h] of subs) {
       if (handle) return;
@@ -7289,6 +7538,7 @@ async function challanFileHandle(entry) {
     }
   }
   await find(root, '', 0);
+  if (!handle && byName) handle = byName;
   if (!handle) throw new Error(`The file "${entry.path}" is no longer in the Challans folder — rebuild the challan index.`);
   return handle;
 }
@@ -7315,8 +7565,11 @@ async function openChallanCopy(challanNo) {
       : challanBuildError
         ? `The challan copies could not be read: ${escHtml(challanBuildError)}`
         : `The challan copies have not been read yet. This is a one-off scan of every PDF in your Challans folder; after it, opening a challan is instant.`;
-    const b = addBubble(`${reason}<br><button class="secondary chBuildBtn" style="margin-top:8px;padding:7px 12px;font-size:12.5px;">${n ? 'Rebuild challan index' : 'Read my challan copies now'}</button>`, 'askA');
-    b.querySelectorAll('.chBuildBtn').forEach(btn => btn.addEventListener('click', () => runChallanIndexBuild(key)));
+    // With an index already in place the right first move is the cheap one: list the folder and
+    // see whether anything is actually new. A full re-read is offered only when it is warranted,
+    // instead of being the only thing on offer.
+    const b = addBubble(`${reason}<br><button class="secondary chCheckBtn" style="margin-top:8px;padding:7px 12px;font-size:12.5px;">${n ? 'Check for new challans' : 'Read my challan copies now'}</button>`, 'askA');
+    b.querySelectorAll('.chCheckBtn').forEach(btn => btn.addEventListener('click', () => (n ? checkChallansForChanges(key) : runChallanIndexBuild(key))));
     return;
   }
   const label = `Challan ${key}${entry.piRef ? ` (PI ${entry.piRef})` : ''}`;
@@ -7346,6 +7599,29 @@ async function openChallanCopy(challanNo) {
     note.innerHTML = `Couldn't open challan <b>${escHtml(key)}</b> \\u2014 ${escHtml(e.message)}`;
   }
 }
+// The listing-only check, wired to a button. Seconds, no downloads, and it either says "nothing
+// has changed" — which is an answer, not a chore — or names exactly what is new and offers to read
+// just that. This is the loop Sadi asked for: scan once, then only ever look for changes.
+async function checkChallansForChanges(retryChallan) {
+  if (challanIndexBuilding) { addBubble('The challan index is already being read \\u2014 one moment.', 'askA'); return; }
+  if (!savedRootHandle) { addBubble('Connect your Olisa Group folder first.', 'askA'); return; }
+  const bubble = addBubble('Checking the Challans folder for anything new\\u2026', 'askA');
+  let d;
+  try { d = await challanTreeDelta(); }
+  catch (e) { bubble.innerHTML = `Couldn't check the Challans folder \\u2014 ${escHtml(e.message)}`; return; }
+  if (!d.unknown.length) {
+    bubble.innerHTML = `Nothing new in "<b>${escHtml(d.folder)}</b>" \\u2014 all <b>${d.total}</b> challan document(s) there have already been read.` +
+      (d.unfingerprinted ? `<br><span class="sub-note">${d.unfingerprinted} file(s) sit on a folder that reports no size or date, so those can only be confirmed by reading them.</span>` : '') +
+      (retryChallan ? `<br><span class="sub-note">Challan <b>${escHtml(retryChallan)}</b> is therefore not printed on any document in that folder \\u2014 check the number, or that its copy was filed.</span>` : '');
+    return;
+  }
+  const list = d.unknown.slice(0, 10).map(escHtml).join('<br>');
+  bubble.innerHTML = `<b>${d.unknown.length}</b> new or changed document(s) in "<b>${escHtml(d.folder)}</b>" (of ${d.total}):<br>` +
+    `<span class="sub-note">${list}${d.unknown.length > 10 ? `<br>\\u2026and ${d.unknown.length - 10} more` : ''}</span>` +
+    `<br><button class="secondary chBuildBtn" style="margin-top:8px;padding:7px 12px;font-size:12.5px;">Read the ${d.unknown.length} new document(s)</button>` +
+    `<br><span class="sub-note">Only these are read \\u2014 everything already scanned is reused untouched.</span>`;
+  bubble.querySelectorAll('.chBuildBtn').forEach(btn => btn.addEventListener('click', () => runChallanIndexBuild(retryChallan)));
+}
 async function runChallanIndexBuild(retryChallan) {
   if (challanIndexBuilding) { addBubble('The challan index is already being read \\u2014 one moment.', 'askA'); return; }
   if (!savedRootHandle) { addBubble('Connect your Olisa Group folder first.', 'askA'); return; }
@@ -7358,6 +7634,9 @@ async function runChallanIndexBuild(retryChallan) {
     });
     challanBuildError = '';   // this run worked; any previous reason no longer applies
     bubble.innerHTML = `Challan copies ready \\u2014 <b>${res.challans}</b> challan(s) across ${res.files} PDF(s) in "${escHtml(res.folder)}", <b>${res.withLines}</b> with readable item lines.` +
+      (res.reusedFiles || res.skippedKnownBad
+        ? `<br><span class="sub-note" style="color:var(--ok);">${res.readNow} file(s) actually needed reading this time \\u2014 ${res.reusedFiles} were unchanged since the last scan${res.skippedKnownBad ? ` and ${res.skippedKnownBad} were already known to be unreadable` : ''}, so they were not downloaded at all.</span>`
+        : '') +
       (res.improved.length ? `<br><span class="sub-note" style="color:var(--ok);">Drive read <b>${res.improved.length}</b> file(s) that had no readable text. Each one now has an <b>-Improved.pdf</b> beside it and the original was renamed to <b>-Original</b>:<br>${res.improved.slice(0, 6).map(r => escHtml(r.improved)).join('<br>')}</span>` : '') +
       (res.improveFailed.length ? `<br><span class="sub-note" style="color:var(--bad);">${res.improveFailed.length} file(s) could not be recovered even through Drive. Nothing was renamed for these:<br>${res.improveFailed.slice(0, 6).map(r => escHtml(r.name + ' \\u2014 ' + r.why)).join('<br>')}</span>` : '') +
       (res.scanned.length && !res.improved.length ? `<br><span class="sub-note" style="color:var(--bad);">${res.scanned.length} file(s) are pictures of a challan with no text in them. Connect Drive and go online to have them read automatically:<br>${res.scanned.slice(0, 6).map(escHtml).join('<br>')}</span>` : '') +
@@ -8469,6 +8748,58 @@ function looksLikeInvoiceFile(name) {
 // paints. Full Web-Worker offloading was considered and rejected: it means restructuring the whole
 // single-file tool around message passing for a dataset (155 PIs, ~2.6k rows) that doesn't need it.
 const uiTick = () => new Promise(r => setTimeout(r, 0));
+// ==================== "THE PAGE IS NOT RESPONDING" ====================
+// uiTick above is the right tool used too rarely. XLSX.read() and sheet_to_csv() are SYNCHRONOUS:
+// while one workbook is being parsed nothing else on the page can run, not a repaint, not a tap.
+// Eight parallel lanes made that worse, not better — the moment one lane's await resolved the next
+// lane's parse began, so the main thread was blocked CONTINUOUSLY for the length of the whole
+// scan. Chrome shows its "wait / kill the page" dialog after a few seconds of that, and on a phone
+// the page is often killed outright, losing the build.
+//
+// yieldSoon() breaks the chain. It hands the thread back to the browser — but only when at least
+// YIELD_EVERY_MS of solid work has gone by, so a fast loop is not paying for a setTimeout on every
+// item. scheduler.yield() is used where it exists (Chrome 129+, which is what the phone runs)
+// because it resumes ahead of unrelated timers instead of queueing behind them.
+const YIELD_EVERY_MS = 45;
+let lastYieldAt = 0;
+function yieldSoon(force) {
+  const now = Date.now();
+  if (!force && now - lastYieldAt < YIELD_EVERY_MS) return Promise.resolve();
+  lastYieldAt = now;
+  if (typeof scheduler !== 'undefined' && scheduler && typeof scheduler.yield === 'function') {
+    try { return scheduler.yield(); } catch (e) { /* fall through to the timer */ }
+  }
+  return new Promise(r => setTimeout(r, 0));
+}
+// ==================== FINGERPRINT WITHOUT DOWNLOADING ====================
+// A Drive folder listing already carries every file's size and modifiedTime. Those two numbers are
+// the whole fingerprint — so "has this file changed since I last read it?" can be answered from
+// the listing alone, for free. The challan scan used to answer it by calling getFile(), which
+// DOWNLOADS THE ENTIRE PDF, and only then compared. That is why "Read my challan copies now" took
+// just as long on the tenth run as on the first: every byte of every challan came down the wire
+// every single time, even when not one file had changed.
+//
+// Returns '' when there is no metadata (a local disk folder, where reading is cheap anyway) so
+// callers can tell "unchanged" from "unknown" and fall back to the old download-then-compare path.
+function metaFp(path, handle) {
+  const m = handle && handle.meta;
+  if (!m) return '';
+  const size = (m.size === undefined || m.size === null) ? '' : m.size;
+  const mt = m.modifiedTime ? Date.parse(m.modifiedTime) : 0;
+  if (size === '' && !mt) return '';
+  return `${path}|${size}|${mt}`;
+}
+// Progress text repainted on every one of thousands of files is thousands of forced layouts, on
+// the same thread that is trying to parse. Once every 120ms reads identically to a human and costs
+// nothing. force=true is for the final line of a phase, which must never be the one that got eaten.
+const progressPaint = { at: 0 };
+function setProgress(el, text, force) {
+  if (!el) return;
+  const now = Date.now();
+  if (!force && now - progressPaint.at < 120) return;
+  progressPaint.at = now;
+  el.textContent = text;
+}
 // Run jobs with limited parallelism. Cloud reads are latency-bound: five invoices in flight finish
 // ~5x sooner than one-by-one, without tripping Drive's rate limits (backoff still guards bursts).
 async function runPool(items, limit, worker) {
@@ -8559,26 +8890,35 @@ if (typeof document !== 'undefined') {
   });
 }
 // Every PDF under the connected root, with its relative path.
+// ==================== THE OTHER SERIAL WALK ====================
+// This walked the entire connected folder to depth 6 one folder at a time, each `entries()` a
+// Drive round trip that waited on the one before it. On a tree of any size that alone is minutes,
+// and it runs inside the index build. Breadth-first instead: gather a whole level, list it in
+// batched requests (forty folders per request), then descend. Same files found, same order of
+// results, a fraction of the waiting.
 async function sweepRootForPdfs(rootHandle, maxDepth, onProgress) {
   const out = [];
   let foldersSeen = 0;
-  async function walk(dir, depth, prefix) {
-    const subs = [];
-    try {
-      for await (const [name, handle] of dir.entries()) {
-        if (handle.kind === 'file') {
-          if (/\.pdf$/i.test(name)) out.push({ name, path: prefix + name, handle });
-        } else if (handle.kind === 'directory') subs.push({ name, handle });
-      }
-    } catch (e) { /* unreadable folder - carry on with the rest of the tree */ }
-    foldersSeen++;
-    if (onProgress) onProgress(foldersSeen, out.length);
-    if (foldersSeen % 20 === 0) await uiTick();
-    if (depth < maxDepth) {
-      for (const s of subs) await walk(s.handle, depth + 1, prefix + s.name + '/');
-    }
+  let level = [{ handle: rootHandle, prefix: '' }];
+  for (let depth = 0; depth <= maxDepth && level.length; depth++) {
+    await prefetchDriveChildren(level.map(l => l.handle));
+    const nextLevel = [];
+    // Concurrency still matters on a local disk folder, where there is no bulk listing to warm.
+    await runPool(level, 8, async ({ handle, prefix }) => {
+      const subs = [];
+      try {
+        for await (const [name, h] of handle.entries()) {
+          if (h.kind === 'file') { if (/\.pdf$/i.test(name)) out.push({ name, path: prefix + name, handle: h }); }
+          else if (h.kind === 'directory') subs.push({ handle: h, prefix: prefix + name + '/' });
+        }
+      } catch (e) { /* unreadable folder - carry on with the rest of the tree */ }
+      foldersSeen++;
+      if (onProgress) onProgress(foldersSeen, out.length);
+      if (depth < maxDepth) subs.forEach(s => nextLevel.push(s));
+      await yieldSoon();
+    });
+    level = nextLevel;
   }
-  await walk(rootHandle, 0, '');
   return out;
 }
 async function tryInvoiceCandidate(ref, cand) {
@@ -8638,6 +8978,18 @@ async function fillPiQtyFromRoot(rootHandle, missingRefs, onProgress) {
   // Pass B - open PDFs and read the PI NO off the page. This is the authoritative match: it works
   // no matter how the file is named. Invoice-looking files with no number in the name go first,
   // then any other non-challan PDF, under a shared budget so a huge tree can't stall the build.
+  //
+  // ==================== WHERE THE FIVE MINUTES WENT ====================
+  // This was a plain `for` loop: up to 400 PDFs downloaded IN FULL and text-extracted one after
+  // the other, nothing overlapping, on a phone connection. At roughly a second each that is the
+  // five minutes on its own, and it ran in full on every build because nothing here remembered
+  // anything. A PDF opened last time and found to be a packing list, a drawing, a scanned letter
+  // — opened again, from scratch, every single build.
+  //
+  // Two changes. It runs eight at a time like every other read phase in this file; and every file
+  // it opens and rejects is recorded by fingerprint, so the next build skips it outright. The
+  // fingerprint carries the file's size and date, so replacing or re-saving a file makes the tool
+  // look at it again: this remembers a result, it does not give up on a file.
   if (need.size) {
     const usedPaths = new Set(Object.keys(res.foundAt).map(k => res.foundAt[k]));
     const others = pdfs.filter(p =>
@@ -8645,11 +8997,12 @@ async function fillPiQtyFromRoot(rootHandle, missingRefs, onProgress) {
       !/challan|chalan|gate\s*pass|delivery\s*note/i.test(p.name) &&
       unnamed.indexOf(p) === -1);
     const queue = unnamed.concat(others);
-    let budget = 400;
-    for (const cand of queue) {
-      if (!need.size) break;
-      if (budget-- <= 0) { res.budgetExhausted = queue.length; break; }
-      if (res.opened % 4 === 3) await uiTick();
+    let budget = 400, skippedKnown = 0;
+    await runPool(queue, 8, async cand => {
+      if (!need.size || budget <= 0) return;
+      const fp = metaFp(cand.path, cand.handle);
+      if (fp && piPdfDuds[fp]) { skippedKnown++; return; }
+      if (budget-- <= 0) { res.budgetExhausted = queue.length; return; }
       try {
         const file = await getFileWithRetry(cand.handle);
         const lines = await extractPdfLines(file);
@@ -8657,15 +9010,22 @@ async function fillPiQtyFromRoot(rootHandle, missingRefs, onProgress) {
         if (ref && need.has(ref)) {
           const parsed = parsePiLines(lines);
           if (parsed.rowCount > 0) {
-            piIndex[ref] = { ...parsed, fileName: cand.path, builtAt: Date.now() };
+            piIndex[ref] = { ...parsed, fileName: cand.path, srcFp: fp || `${cand.path}|${file.size}|${file.lastModified}`, builtAt: Date.now() };
             res.filled.push(ref); res.foundAt[ref] = cand.path; res.parsedByText++;
             need.delete(ref);
           }
+        } else if (fp) {
+          // Opened, read, and it carries no PI number this build is missing. Worth remembering.
+          piPdfDuds[fp] = Date.now();
+          piPdfDudsDirty = true;
         }
       } catch (e) { /* unreadable — keep going */ }
       res.opened++;
       if (onProgress) onProgress(`Reading PI numbers from inside invoices: ${res.opened} opened, ${res.filled.length} recovered\u2026`);
-    }
+      await yieldSoon();
+    });
+    res.skippedKnown = skippedKnown;
+    await savePiPdfDuds();
   }
   res.stillMissing = [...need];
   return res;
@@ -8674,6 +9034,29 @@ async function fillPiQtyFromRoot(rootHandle, missingRefs, onProgress) {
 // Session-only memo of PIs whose invoice cannot be found, so searching 5,000 styles doesn't
 // re-scan the same folders thousands of times. Cleared by rebuilding the index.
 const piQtyMisses = new Map(); // key -> reason
+// PDFs that were opened during the root-wide invoice hunt and turned out to carry no PI number we
+// needed. Keyed by path|size|modifiedTime, persisted, and capped. This is what stops the build
+// re-opening the same few hundred irrelevant PDFs every single time it runs.
+const PI_DUDS_MAX = 5000;
+let piPdfDuds = {};
+let piPdfDudsDirty = false;
+async function savePiPdfDuds() {
+  if (!piPdfDudsDirty) return;
+  piPdfDudsDirty = false;
+  const keys = Object.keys(piPdfDuds);
+  if (keys.length > PI_DUDS_MAX) {
+    keys.sort((a, b) => piPdfDuds[a] - piPdfDuds[b])
+        .slice(0, keys.length - PI_DUDS_MAX)
+        .forEach(k => { delete piPdfDuds[k]; });
+  }
+  try { await idbSet('piPdfDuds', { data: piPdfDuds, at: Date.now() }); } catch (e) { /* quota */ }
+}
+(async function initPiPdfDuds() {
+  try {
+    const c = await idbGet('piPdfDuds');
+    if (c && c.data && typeof c.data === 'object') piPdfDuds = c.data;
+  } catch (e) { /* first run */ }
+})();
 // The root-wide PDF catalog, swept once per session and reused. Building it lazily means a single
 // "PI 138" query gets the same reach as a full index build without paying for it up front.
 let rootPdfCatalog = null;
@@ -8764,7 +9147,10 @@ async function ensurePiQty(piRefRaw, onProgress, opts) {
 async function buildPiQtyIndex(piFolders, onProgress) {
   let done = 0, withData = 0;
   const startMs = newEtaClock();
-  const entries = await runPool(piFolders, 5, async ({ name, handle }) => {
+  // 8 rather than 5, matching the two phases above. With the folder tree already listed in bulk,
+  // what remains here is download-and-parse, which is latency-bound: more lanes in flight is
+  // strictly faster, and driveFetch still backs off by itself if Drive pushes back.
+  const entries = await runPool(piFolders, 8, async ({ name, handle }) => {
     const piRef = normPiKey(parsePiNumber(name)) || parsePiNumber(name);
     let entry;
     try {
@@ -8779,6 +9165,7 @@ async function buildPiQtyIndex(piFolders, onProgress) {
     // fingerprint still matches instead of downloading and parsing all of them again.
     await checkpointPiIndex();
     if (onProgress) onProgress(done, piFolders.length, withData, etaText(startMs, done, piFolders.length));
+    await yieldSoon();   // PDF text extraction is synchronous too — let the page paint between PIs
     return entry;
   });
   return { withData, entries: entries.map(e => e && e.__err ? { name: '?', ok: false, reason: 'error', detail: String(e.__err.message || e.__err) } : e) };
@@ -9744,7 +10131,7 @@ async function renderBulkResults(codes) {
 function showUnbookedList() {
   const n = Object.keys(challanIndex || {}).length;
   if (!n) {
-    addBubble(`No challans have been read yet. Use <b>Build Style Index</b> to read the Challans folder, then ask again.`, 'askA');
+    addBubble(`No challans have been read yet. Use <b>Index PI + challans</b> \u2014 it reads the work orders, the PI quantities and the Challans folder in one pass \u2014 then ask again.`, 'askA');
     return;
   }
   let list;
@@ -10771,9 +11158,85 @@ async function driveListChildren(folderId) {
     (j.files || []).forEach(f => out.push(f));
     pageToken = j.nextPageToken || '';
   } while (pageToken);
-  if (driveListCache.size > 800) driveListCache.clear(); // simple pressure valve for very long sessions
+  // Pressure valve for very long sessions. It must NOT fire during a build: the bulk prefetch has
+  // just filled this cache with the whole folder tree, and throwing that away mid-build sends every
+  // remaining folder back to one-request-at-a-time — the exact cost the prefetch existed to avoid.
+  if (driveListCache.size > 8000 && !indexBuilding) driveListCache.clear();
   driveListCache.set(folderId, out);
   return out;
+}
+// ==================== ONE REQUEST PER FORTY FOLDERS, NOT ONE PER FOLDER ====================
+// driveListChildren asks Drive about ONE folder. At 127 PI folders that was 127 round trips; at
+// the thousands this tool now has to survive it is thousands, and no amount of concurrency saves
+// you — eight lanes still means 125 sequential waves for 1,000 folders, each a full network
+// round trip on a phone connection. That is the five-minutes-for-200-folders problem, whole.
+//
+// Drive's `q` accepts a disjunction: ('a' in parents or 'b' in parents or ...). One request can
+// therefore list forty folders at once, and the `parents` field on each result says which folder
+// it came from. 1,000 folders collapses from 1,000 requests to 25, and with concurrency on top of
+// that it is a handful of waves instead of a hundred and twenty-five.
+//
+// Forty is chosen against Drive's query-length limit, not plucked: each term is ~30 characters, so
+// forty is ~1.2KB of query — comfortable, where two hundred would be refused.
+const DRIVE_PARENT_BATCH = 40;
+async function driveListChildrenBulk(folderIds, onBatch) {
+  const need = [...new Set(folderIds)].filter(id => id && !driveListCache.has(id));
+  const batches = [];
+  for (let i = 0; i < need.length; i += DRIVE_PARENT_BATCH) batches.push(need.slice(i, i + DRIVE_PARENT_BATCH));
+  let doneBatches = 0;
+  await runPool(batches, 6, async batch => {
+    const buckets = new Map(batch.map(id => [id, []]));
+    let pageToken = '';
+    try {
+      do {
+        const q = encodeURIComponent('(' + batch.map(id => `'${id}' in parents`).join(' or ') + ') and trashed=false');
+        const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=nextPageToken,files(id,name,mimeType,size,modifiedTime,parents)&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true${pageToken ? '&pageToken=' + pageToken : ''}`;
+        const j = await driveFetch(url);
+        (j.files || []).forEach(f => {
+          // A file can legitimately sit in more than one parent (a Drive shortcut-style add). File
+          // it under every parent we asked about, so no folder silently loses a file it contains.
+          (f.parents || []).forEach(p => { if (buckets.has(p)) buckets.get(p).push(f); });
+        });
+        pageToken = j.nextPageToken || '';
+      } while (pageToken);
+      // Only cache on a CLEAN batch. Half a folder's contents cached as if complete would make the
+      // tool confidently report files that do not exist and miss ones that do — far worse than a
+      // slow rebuild. A failed batch simply leaves those folders to the per-folder path below.
+      buckets.forEach((files, id) => driveListCache.set(id, files));
+    } catch (e) { /* this batch falls back to one-folder-at-a-time listing, which self-heals */ }
+    doneBatches++;
+    if (onBatch) onBatch(Math.min(doneBatches * DRIVE_PARENT_BATCH, need.length), need.length);
+    await yieldSoon();
+  });
+}
+// Warm the listing cache for a whole set of folders before walking them. Safe to call on a local
+// disk folder or when there is nothing to do: it simply returns.
+async function prefetchDriveChildren(handles, onBatch) {
+  if (!savedRootHandle || !savedRootHandle.isDrive) return;
+  const ids = (handles || []).map(h => (h && h.handle ? h.handle.id : h && h.id)).filter(Boolean);
+  if (!ids.length) return;
+  try { await driveListChildrenBulk(ids, onBatch); } catch (e) { /* listing falls back per folder */ }
+}
+// The PI-quantity phase walks each PI folder three levels deep looking for the invoice, so the
+// subfolders cost just as many round trips as the folders did. Listing the tree breadth-first —
+// every folder at one level in batched requests, then every folder at the next — turns the whole
+// tree into (depth x a handful of requests) instead of one per folder at every level.
+async function prefetchDriveTree(handles, maxDepth, onProgress) {
+  if (!savedRootHandle || !savedRootHandle.isDrive) return 0;
+  let level = (handles || []).map(h => (h && h.handle ? h.handle.id : h && h.id)).filter(Boolean);
+  let total = 0;
+  for (let d = 0; d < (maxDepth || 1) && level.length; d++) {
+    await driveListChildrenBulk(level, (n, t) => { if (onProgress) onProgress(d + 1, n, t); });
+    total += level.length;
+    const nextLevel = [];
+    level.forEach(id => {
+      const kids = driveListCache.get(id);
+      if (kids) kids.forEach(k => { if (k.mimeType === DRIVE_FOLDER_MIME) nextLevel.push(k.id); });
+    });
+    level = [...new Set(nextLevel)];
+    await yieldSoon(true);
+  }
+  return total;
 }
 const DRIVE_FOLDER_MIME = 'application/vnd.google-apps.folder';
 class DriveFileHandle {

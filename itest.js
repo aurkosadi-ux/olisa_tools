@@ -85,7 +85,10 @@ t('challan numbers render as links', /class="ch-link"/.test(html));
 t('links are wired by delegation, not per-render', /closest\('a\.ch-link'\)/.test(html));
 t('pdf-lib is loaded for splitting', /pdf-lib/.test(html));
 t('page grouping treats headerless pages as continuations', /current\.pages\.push\(p\)/.test(html));
-t('challan index is fingerprint-cached', /e\.fp === fp/.test(html));
+// The fingerprint cache moved from a per-file filter to a map built once. What must stay true is
+// that entries carry a fingerprint and that an unchanged file is matched by it without downloading.
+t('challan index is fingerprint-cached', /byFp\.get\(fp\)/.test(html) && /e\.fp/.test(html));
+t('the fingerprint is taken from folder metadata, before any download', /function metaFp\(/.test(html));
 t('plain-text challan uses are untouched', /challanDisp\(r\)/.test(html));
 t('challan index survives a reload', /idbGet\('challanIndex'\)/.test(html));
 t('".doc" hand challans are indexed too', /pdf\|docx\?\|rtf/.test(html));

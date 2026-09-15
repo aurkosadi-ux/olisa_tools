@@ -49,7 +49,12 @@ t('the temp Google Doc is deleted even when the export fails', /finally \{[\s\S]
 
 console.log('\n4. It only runs when it safely can');
 t('needs the Drive connection', /savedRootHandle && savedRootHandle\.isDrive && navigator\.onLine/.test(src));
-t('a failure is collected per file, never aborting the build', /catch \(e\) \{ improveFailed\.push\(\{ name: f\.name, why: e\.message \}\); \}/.test(src));
+// The catch block now also records the failure by fingerprint so the next build does not repeat
+// the OCR. What matters for THIS test is unchanged: the failure is collected, not rethrown.
+const ocrCatch = (src.match(/catch \(e\) \{\s*improveFailed\.push\([\s\S]{0,900}?\n      \}/) || [''])[0];
+t('a failure is collected per file, never aborting the build',
+  /improveFailed\.push\(\{ name: f\.name, why: e\.message \}\)/.test(ocrCatch) && !/throw/.test(ocrCatch));
+t('and the failed file is remembered so OCR is not repeated next build', /ocrTried:\s*true/.test(src));
 t('the build reports what was improved and what was not', /res\.improved\.length/.test(src) && /res\.improveFailed\.length/.test(src));
 t('OCR still needs the Drive connection inside driveOcrText', /OCR needs the Google Drive connection/.test(src));
 
