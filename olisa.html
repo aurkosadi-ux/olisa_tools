@@ -1259,7 +1259,7 @@ function switchTab(which) {
 // immediately, so the whole script threw on load. Evaluation stopped there, which meant every
 // `let` below it never initialised either, and the first thing to notice was an unrelated
 // "cannot access 'piIndex' before initialization". One misplaced constant, entire tool dead.
-const APP_VERSION = 129;
+const APP_VERSION = 130;
 // ==================== WHAT KIND OF CARTON IS THIS LINE? ====================
 // This lived inside the Undelivered Report's IIFE, so the Ask tab could not reach it and simply
 // printed the Master File's Item column as-is. That column says "Master Carton" on punch lines
@@ -5096,6 +5096,7 @@ async function buildStyleIndex() {
           filesScanned++; filesReused++;
         } else {
           const buf = await file.arrayBuffer();
+          await yieldSoon();   // a frame before the parse: XLSX.read cannot be interrupted once it starts
           // Formulas, styles, HTML and blank stubs are all work this scan throws away — turning
           // them off is a straight cut to the time the main thread spends frozen inside XLSX.read.
           const wb = XLSX.read(buf, { type: 'array', cellFormula: false, cellHTML: false, cellStyles: false, cellDates: false, sheetStubs: false });
@@ -6819,6 +6820,9 @@ const CHALLAN_CACHE_VERSION = 2;   // v2 adds per-challan line items — v1 cach
 // fingerprint changes with it, so the very next build reads it properly. What it prevents is the
 // build spending its time re-proving, every single time, that a photo is still a photo.
 let challanMisses = {};
+// Set by a build when the index is full yet not one file matched it. Holds the fingerprint as it
+// is NOW and one as it was STORED, so the two can be shown side by side instead of guessed at.
+let challanFpMismatch = null;
 async function saveChallanMisses() {
   try { await idbSet('challanMisses', { data: challanMisses, at: Date.now() }); } catch (e) { /* quota */ }
 }
@@ -7122,7 +7126,7 @@ async function buildChallanIndex(onProgress) {
 
   const next = {};
   const clock = newEtaClock();
-  let done = 0, challans = 0, failed = 0;
+  let done = 0, readDone = 0, challans = 0, failed = 0;
   const skipped = [];     // opened fine, but no challan header inside — reported, never silent
   const scanned = [];     // a picture of a challan: no text at all, quantities unreadable
   const noFont = [];      // text is there but the PDF carries no usable font encoding
@@ -7145,6 +7149,33 @@ async function buildChallanIndex(onProgress) {
   });
   let reusedFiles = 0, skippedKnownBad = 0;
   const freshMisses = {};
+  // ==================== DECIDE FIRST, READ SECOND ====================
+  // Deciding what needs reading costs nothing: it is pure arithmetic on metadata the folder
+  // listing already handed over. Doing it as a separate pass up front means the progress line can
+  // say "reading 3 new documents" instead of counting to 247 and looking, correctly or not, like
+  // a full re-read. It also means that when reuse ISN'T working, that fact is on screen in the
+  // first second rather than fifteen minutes later.
+  const plan = { reuse: [], bad: [], read: [], noFp: [] };
+  pdfs.forEach(f => {
+    const fp = metaFp(f.path, f.handle);
+    if (!fp) { plan.noFp.push(f); plan.read.push(f); return; }
+    if (byFp.has(fp)) plan.reuse.push(f);
+    else if (challanMisses[fp]) plan.bad.push(f);
+    else plan.read.push(f);
+  });
+  // The smoking gun, when there is one. If every file claims to be new even though the index is
+  // full, the fingerprints are not lining up, and the only useful thing to show is BOTH of them
+  // side by side. Silent re-reading is what made this impossible to diagnose from the outside.
+  const indexedCount = Object.keys(challanIndex).length;
+  if (indexedCount && !plan.reuse.length && plan.read.length) {
+    const sample = plan.read.find(f => metaFp(f.path, f.handle));
+    const anyStored = Object.values(challanIndex).find(e => e && e.fp);
+    challanFpMismatch = sample
+      ? { now: metaFp(sample.path, sample.handle), stored: (anyStored && anyStored.fp) || '(no fingerprint stored)' }
+      : { now: '(no metadata on this folder)', stored: (anyStored && anyStored.fp) || '(none)' };
+  } else challanFpMismatch = null;
+  if (onProgress) onProgress(0, Math.max(plan.read.length, 1), 0,
+    ` \u2014 ${plan.reuse.length} unchanged, ${plan.bad.length} known unreadable, ${plan.read.length} to read`);
   await runPool(pdfs, 5, async f => {
     // Step one is NOT a download. The Drive listing already told us this file's size and
     // modifiedTime, so the question "did it change?" is answered before a single byte moves.
@@ -7171,7 +7202,10 @@ async function buildChallanIndex(onProgress) {
     };
     if (fp && useCached()) {
       done++;
-      if (onProgress) onProgress(done, pdfs.length, challans, etaText(clock, done, pdfs.length));
+      if (onProgress && done % 25 === 0) {
+        onProgress(readDone, Math.max(plan.read.length, 1), challans,
+          ` \u2014 ${done} of ${pdfs.length} document(s) checked, ${reusedFiles} unchanged`);
+      }
       await yieldSoon();
       return;
     }
@@ -7192,9 +7226,12 @@ async function buildChallanIndex(onProgress) {
       else if (/no text layer/.test(e.message)) { scanned.push(f.path); needOcr.push({ f, fp, why: 'scanned' }); }
       else if (/unreadable text layer/.test(e.message)) { noFont.push(f.path); needOcr.push({ f, fp, why: 'nofont' }); }
     }
-    done++;
+    done++; readDone++;
     await checkpointChallanIndex(next);
-    if (onProgress) onProgress(done, pdfs.length, challans, etaText(clock, done, pdfs.length));
+    // Counted against what actually needs reading. Against pdfs.length a fully-reused build still
+    // crawled from 1 to 247 on screen, which reads exactly like a full re-scan even when not one
+    // byte was fetched — the single biggest reason this looked broken when it was not.
+    if (onProgress) onProgress(readDone, Math.max(plan.read.length, 1), challans, etaText(clock, readDone, Math.max(plan.read.length, 1)));
     await yieldSoon();
   });
   // Anything that could not be read gets one attempt through Drive's OCR, producing an
@@ -7230,7 +7267,7 @@ async function buildChallanIndex(onProgress) {
   await checkpointChallanIndex(next, true);
   const unverified = Object.values(next).filter(c => Array.isArray(c.lines) && c.lines.length && !c.verified).map(c => c.no);
   const withLines = Object.values(next).filter(c => Array.isArray(c.lines) && c.lines.length).length;
-  return { files: pdfs.length, challans, failed, skipped, binaryDoc, scanned, noFont, unverified, withLines, improved, improveFailed, folder: root.name, reusedFiles, skippedKnownBad, readNow: pdfs.length - reusedFiles - skippedKnownBad };
+  return { files: pdfs.length, challans, failed, skipped, binaryDoc, scanned, noFont, unverified, withLines, improved, improveFailed, folder: root.name, reusedFiles, skippedKnownBad, readNow: pdfs.length - reusedFiles - skippedKnownBad, fpMismatch: challanFpMismatch, indexedBefore: indexedCount };
 }
 let lastChallanCheckpoint = 0;
 // ==================== MAKING AN UNREADABLE CHALLAN READABLE ====================
@@ -7555,13 +7592,48 @@ async function extractChallanPdf(entry) {
   copied.forEach(p => out.addPage(p));
   return { bytes: await out.save(), pageCount: wanted.length, sourceName: file.name };
 }
+// ==================== "1171160222" IS NOT A CHALLAN NUMBER ====================
+// Row 2661 of the Master File carries 1171160222 \u2014 ten digits, where every real Packmat
+// challan is nine. It is 117116022 with a stray 2, and because it matches nothing that row can
+// never reach its own challan copy. The safe help is to NAME the near match and stop: silently
+// trimming a digit would be guessing with Olisa's data, and a wrong link books the wrong delivery.
+//
+// One digit away means one inserted, one deleted, or one substituted. Offered only when exactly
+// one candidate exists \u2014 two candidates is not a suggestion, it is a coin toss.
+function oneDigitApart(a, b) {
+  if (a === b) return false;
+  if (Math.abs(a.length - b.length) > 1) return false;
+  if (a.length === b.length) {                       // one substitution
+    let diff = 0;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i] && ++diff > 1) return false;
+    return diff === 1;
+  }
+  const long = a.length > b.length ? a : b, short = a.length > b.length ? b : a;
+  let j = 0, skipped = 0;
+  for (let i = 0; i < long.length; i++) {            // one insertion / deletion
+    if (long[i] === short[j]) j++;
+    else if (++skipped > 1) return false;
+  }
+  return j === short.length;
+}
+function nearMissChallans(key) {
+  const k = String(key || '');
+  if (!/^\d{4,20}$/.test(k)) return [];
+  return Object.keys(challanIndex).filter(c => oneDigitApart(k, String(c))).slice(0, 12);
+}
 async function openChallanCopy(challanNo) {
   const key = normChallanKey(challanNo);
   const entry = challanIndex[key];
   if (!entry) {
     const n = Object.keys(challanIndex).length;
+    const near = nearMissChallans(key);
+    const nearNote = near.length === 1
+      ? `<br><span class="sub-note">The only challan on file that is one digit away is <b>${escHtml(near[0])}</b>${challanIndex[near[0]] && challanIndex[near[0]].date ? `, dated ${escHtml(challanIndex[near[0]].date)}` : ''}. If the Master File number has a typo, correct it there \\u2014 nothing is linked automatically, because matching the wrong delivery is worse than matching none.</span>`
+      : near.length > 1
+        ? `<br><span class="sub-note">${near.length} challans on file are one digit away (${escHtml(near.slice(0, 6).join(', '))}), so none can be picked safely \\u2014 check the number against the paper copy.</span>`
+        : '';
     const reason = n
-      ? `Challan <b>${escHtml(String(challanNo))}</b> is not in the challan index (${n} challan(s) indexed${challanIndexBuiltAt ? `, read ${dmyFromMs(challanIndexBuiltAt)}` : ''}). If its PDF was added since, rebuild below.`
+      ? `Challan <b>${escHtml(String(challanNo))}</b> is not in the challan index (${n} challan(s) indexed${challanIndexBuiltAt ? `, read ${dmyFromMs(challanIndexBuiltAt)}` : ''}). If its PDF was added since, rebuild below.${nearNote}`
       : challanBuildError
         ? `The challan copies could not be read: ${escHtml(challanBuildError)}`
         : `The challan copies have not been read yet. This is a one-off scan of every PDF in your Challans folder; after it, opening a challan is instant.`;
@@ -7636,6 +7708,12 @@ async function runChallanIndexBuild(retryChallan) {
     bubble.innerHTML = `Challan copies ready \\u2014 <b>${res.challans}</b> challan(s) across ${res.files} PDF(s) in "${escHtml(res.folder)}", <b>${res.withLines}</b> with readable item lines.` +
       (res.reusedFiles || res.skippedKnownBad
         ? `<br><span class="sub-note" style="color:var(--ok);">${res.readNow} file(s) actually needed reading this time \\u2014 ${res.reusedFiles} were unchanged since the last scan${res.skippedKnownBad ? ` and ${res.skippedKnownBad} were already known to be unreadable` : ''}, so they were not downloaded at all.</span>`
+        : '') +
+      // When the index was full and still nothing matched, say so loudly and show BOTH
+      // fingerprints. A silent full re-read is what wasted fifteen minutes with no clue as to why;
+      // this turns it into one line that can be read, and sent on.
+      (res.fpMismatch
+        ? `<br><span class="sub-note" style="color:var(--bad);">Every document had to be re-read even though ${res.indexedBefore} challan(s) were already indexed \\u2014 the file fingerprints no longer match.<br>now: <code>${escHtml(res.fpMismatch.now)}</code><br>stored: <code>${escHtml(res.fpMismatch.stored)}</code></span>`
         : '') +
       (res.improved.length ? `<br><span class="sub-note" style="color:var(--ok);">Drive read <b>${res.improved.length}</b> file(s) that had no readable text. Each one now has an <b>-Improved.pdf</b> beside it and the original was renamed to <b>-Original</b>:<br>${res.improved.slice(0, 6).map(r => escHtml(r.improved)).join('<br>')}</span>` : '') +
       (res.improveFailed.length ? `<br><span class="sub-note" style="color:var(--bad);">${res.improveFailed.length} file(s) could not be recovered even through Drive. Nothing was renamed for these:<br>${res.improveFailed.slice(0, 6).map(r => escHtml(r.name + ' \\u2014 ' + r.why)).join('<br>')}</span>` : '') +
@@ -8760,15 +8838,20 @@ const uiTick = () => new Promise(r => setTimeout(r, 0));
 // YIELD_EVERY_MS of solid work has gone by, so a fast loop is not paying for a setTimeout on every
 // item. scheduler.yield() is used where it exists (Chrome 129+, which is what the phone runs)
 // because it resumes ahead of unrelated timers instead of queueing behind them.
-const YIELD_EVERY_MS = 45;
-let lastYieldAt = 0;
-function yieldSoon(force) {
-  const now = Date.now();
-  if (!force && now - lastYieldAt < YIELD_EVERY_MS) return Promise.resolve();
-  lastYieldAt = now;
-  if (typeof scheduler !== 'undefined' && scheduler && typeof scheduler.yield === 'function') {
-    try { return scheduler.yield(); } catch (e) { /* fall through to the timer */ }
-  }
+// ==================== A YIELD THAT MOSTLY DID NOT YIELD ====================
+// The first version of this gated on a single shared clock: yield only if 45ms had passed since
+// the LAST yield, by anyone. With eight lanes running, one lane's yield reset the clock for all
+// eight, so seven of them got Promise.resolve() \u2014 a microtask, which does NOT let the browser
+// paint or respond. The net effect was close to no yielding at all during the busiest stretch,
+// which is exactly when it was needed, and the page locked harder than before the "fix".
+//
+// setTimeout(0) costs a few microseconds against PDF and workbook parses measured in seconds, so
+// there was never anything to optimise here. Always yield, really yield, every time.
+//
+// scheduler.yield() is deliberately NOT used. It resumes at a priority that can keep running
+// ahead of rendering, which is the opposite of what is wanted: the whole point is to hand the
+// frame back. A plain task boundary is predictable on every browser this runs on.
+function yieldSoon() {
   return new Promise(r => setTimeout(r, 0));
 }
 // ==================== FINGERPRINT WITHOUT DOWNLOADING ====================

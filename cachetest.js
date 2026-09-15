@@ -150,5 +150,39 @@ const swV = (fs.readFileSync(path.join(__dirname, 'sw.js'), 'utf8').match(/olisa
 ok('olisa.html carries a version', !!appV);
 ok('sw.js cache name matches it', appV === swV, `page v${appV}, sw v${swV}`);
 
+section('11. The yield actually yields, and near-misses are only suggested');
+// The 45ms shared gate made seven of eight lanes get a microtask instead of a task. A microtask
+// does not let the browser paint, so the page locked harder than before the fix went in.
+const ys = fnBody('yieldSoon');
+// Checked against code, not prose: the comment above the fix names the old gate, and a grep of
+// raw text cannot tell an explanation of a bug from the bug itself.
+const codeOnly = t => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+ok('yieldSoon has no shared time gate', !/lastYieldAt|YIELD_EVERY_MS/.test(codeOnly(SRC)));
+ok('and always crosses a real task boundary', /setTimeout\(r, 0\)/.test(ys) && !/Promise\.resolve\(\)/.test(ys));
+ok('a frame is given BEFORE the workbook parse too',
+  bsi.indexOf('await yieldSoon()') < bsi.indexOf('XLSX.read'));
+ok('the challan scan plans from metadata before reading', /const plan = \{ reuse: \[\]/.test(bci));
+ok('progress counts what needs reading, not every file', /plan\.read\.length, 1\)/.test(bci));
+ok('a full re-read despite a full index is reported', /challanFpMismatch/.test(SRC));
+
+// One digit apart, exactly: the rule behind suggesting 117116022 for 1171160222.
+function oneDigitApart(a, b) {
+  if (a === b) return false;
+  if (Math.abs(a.length - b.length) > 1) return false;
+  if (a.length === b.length) { let d = 0; for (let i = 0; i < a.length; i++) if (a[i] !== b[i] && ++d > 1) return false; return d === 1; }
+  const long = a.length > b.length ? a : b, short = a.length > b.length ? b : a;
+  let j = 0, skipped = 0;
+  for (let i = 0; i < long.length; i++) { if (long[i] === short[j]) j++; else if (++skipped > 1) return false; }
+  return j === short.length;
+}
+ok('1171160222 is one digit from 117116022', oneDigitApart('1171160222', '117116022'));
+ok('a substitution counts', oneDigitApart('117116022', '117116023'));
+ok('an identical number is not a near miss', !oneDigitApart('117116022', '117116022'));
+ok('two digits apart does not count', !oneDigitApart('117116022', '117116099'));
+ok('two digits longer does not count', !oneDigitApart('11711602299', '117116022'));
+ok('a completely different number does not count', !oneDigitApart('117116022', '320210810'));
+ok('nothing is linked automatically \u2014 the suggestion is text only',
+  /nothing is linked automatically/.test(SRC));
+
 console.log('\n' + (fail ? `FAILED — ${pass} passed, ${fail} failed` : `PASSED — ${pass} passed, 0 failed`));
 process.exit(fail ? 1 : 0);
