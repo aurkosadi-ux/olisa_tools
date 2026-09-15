@@ -1259,7 +1259,7 @@ function switchTab(which) {
 // immediately, so the whole script threw on load. Evaluation stopped there, which meant every
 // `let` below it never initialised either, and the first thing to notice was an unrelated
 // "cannot access 'piIndex' before initialization". One misplaced constant, entire tool dead.
-const APP_VERSION = 130;
+const APP_VERSION = 131;
 // ==================== WHAT KIND OF CARTON IS THIS LINE? ====================
 // This lived inside the Undelivered Report's IIFE, so the Ask tab could not reach it and simply
 // printed the Master File's Item column as-is. That column says "Master Carton" on punch lines
@@ -7082,6 +7082,7 @@ async function buildChallanIndex(onProgress) {
   // Every PDF underneath, however deeply filed. The real folder has loose PDFs at the top AND a
   // "June - 2026" subfolder, and more months will follow.
   const pdfs = [];
+  const ocrJunk = [];   // intermediate -Improved-Improved... copies: machine-made, safe to delete
   // List the whole Challans tree in batched requests before walking a single folder of it, exactly
   // as the PI phase does. A folder-per-month tree is otherwise one round trip per month, per build.
   await prefetchDriveTree([root], 5);
@@ -7107,12 +7108,25 @@ async function buildChallanIndex(onProgress) {
     //
     // So the test is the one that is actually true: if an -Improved twin is sitting right here, the
     // plain file is the superseded one, whatever it happens to be called.
-    const improvedBases = new Set(here.filter(f => /-Improved\.[^.]+$/i.test(f.name))
-      .map(f => f.name.replace(/-Improved\.[^.]+$/i, '').toLowerCase()));
+    // Group every file by the name it descends from, then keep at most two per family: the
+    // original, and the most-improved copy. Everything between them is a failed OCR attempt on a
+    // failed OCR attempt, and reading it can only ever produce what its child already produced.
+    // The original is kept rather than dropped because it may be the one that is actually
+    // readable \u2014 and if it is not, its fingerprint is already on the known-bad list, so it
+    // costs nothing.
+    const families = new Map();
     here.forEach(f => {
-      const base = f.name.replace(/\.[^.]+$/, '').toLowerCase();
-      if (!/-Improved\.[^.]+$/i.test(f.name) && improvedBases.has(base)) return;  // already recovered
-      pdfs.push(f);
+      const root = ocrFamilyRoot(f.name);
+      if (!families.has(root)) families.set(root, []);
+      families.get(root).push(f);
+    });
+    families.forEach(members => {
+      if (members.length === 1) { pdfs.push(members[0]); return; }
+      const deepest = members.reduce((a, b) => (ocrChainDepth(b.name) > ocrChainDepth(a.name) ? b : a));
+      const plain = members.find(f => ocrChainDepth(f.name) === 0);
+      const keep = new Set([deepest, plain].filter(Boolean));
+      keep.forEach(f => pdfs.push(f));
+      members.forEach(f => { if (!keep.has(f) ) ocrJunk.push(f.path); });
     });
     // A "Challans" folder with a subfolder per month used to walk them one at a time — each an
     // extra Drive round trip waiting on the last. With the tree pre-listed above these are cache
@@ -7241,6 +7255,15 @@ async function buildChallanIndex(onProgress) {
   if (needOcr.length && savedRootHandle && savedRootHandle.isDrive && navigator.onLine) {
     for (const { f, fp, why } of needOcr) {
       if (onProgress) onProgress(done, pdfs.length, challans, ` \u2014 reading ${f.name} through Drive`);
+      // isOcrImproved has existed all along, with a comment promising "an Improved file is never
+      // fed back through OCR", and it was never once called. This is that promise, enforced. If
+      // Drive has already read a file and the result still cannot be parsed, reading it again
+      // produces the same result and one more file \u2014 the loop, in one line.
+      if (isOcrImproved(f.name) || ocrChainDepth(f.name) > 0) {
+        improveFailed.push({ name: f.name, why: 'already an OCR result \u2014 re-reading it would only make another copy' });
+        if (fp) freshMisses[fp] = { path: f.path, why, ocrTried: true, at: Date.now() };
+        continue;
+      }
       try {
         const r = await improveOneChallanFile(f);
         r.found.forEach(c => { next[c.no] = { ...c, fp: `${r.improved}|ocr|${Date.now()}`, viaOcr: true }; challans++; });
@@ -7267,7 +7290,7 @@ async function buildChallanIndex(onProgress) {
   await checkpointChallanIndex(next, true);
   const unverified = Object.values(next).filter(c => Array.isArray(c.lines) && c.lines.length && !c.verified).map(c => c.no);
   const withLines = Object.values(next).filter(c => Array.isArray(c.lines) && c.lines.length).length;
-  return { files: pdfs.length, challans, failed, skipped, binaryDoc, scanned, noFont, unverified, withLines, improved, improveFailed, folder: root.name, reusedFiles, skippedKnownBad, readNow: pdfs.length - reusedFiles - skippedKnownBad, fpMismatch: challanFpMismatch, indexedBefore: indexedCount };
+  return { files: pdfs.length, challans, failed, skipped, binaryDoc, scanned, noFont, unverified, withLines, improved, improveFailed, folder: root.name, reusedFiles, skippedKnownBad, readNow: pdfs.length - reusedFiles - skippedKnownBad, fpMismatch: challanFpMismatch, indexedBefore: indexedCount, ocrJunk };
 }
 let lastChallanCheckpoint = 0;
 // ==================== MAKING AN UNREADABLE CHALLAN READABLE ====================
@@ -7300,7 +7323,26 @@ async function ocrFetch(url, opts, ms) {
   catch (e) { throw new Error(e.name === 'AbortError' ? 'Drive did not answer within 2 minutes' : e.message); }
   finally { clearTimeout(timer); }
 }
-function ocrBaseName(name) { return String(name).replace(/\.[^.]+$/, ''); }
+// ==================== "-Improved-Improved-Improved-Improved.pdf" ====================
+// ocrBaseName used to strip only the extension. So OCR-ing "X-Improved.pdf" produced
+// ocrBaseName("X-Improved.pdf") + "-Improved.pdf" = "X-Improved-Improved.pdf" \u2014 a NEW file, on
+// every build, for ever. Each one is unreadable in the same way its parent was, so each one gets
+// sent through Drive OCR next time, and the Challans folder grows without limit. That is why the
+// scan crept up to fifteen minutes and got worse each run: it was not re-reading old work, it was
+// reading junk it had generated itself.
+//
+// Stripping every trailing -Improved / -Original group means the name can never gain a second
+// suffix, whatever it is fed.
+function ocrBaseName(name) {
+  return String(name).replace(/\.[^.]+$/, '').replace(/(?:-(?:Improved|Original))+$/i, '');
+}
+// How many -Improved suffixes a name carries, and the name it all descends from. Used to collapse
+// an existing runaway chain down to the one file worth reading.
+function ocrChainDepth(name) {
+  const m = String(name).replace(/\.[^.]+$/, '').match(/(?:-Improved)+$/i);
+  return m ? m[0].split(/-/i).filter(Boolean).length : 0;
+}
+function ocrFamilyRoot(name) { return ocrBaseName(name).toLowerCase(); }
 function ocrOriginalName(name) { return ocrBaseName(name) + '-Original' + (String(name).match(/\.[^.]+$/) || ['.pdf'])[0]; }
 function ocrImprovedName(name) { return ocrBaseName(name) + '-Improved.pdf'; }
 // The Improved file is the one worth reading; the Original is the same challan again and is skipped
@@ -7714,6 +7756,11 @@ async function runChallanIndexBuild(retryChallan) {
       // this turns it into one line that can be read, and sent on.
       (res.fpMismatch
         ? `<br><span class="sub-note" style="color:var(--bad);">Every document had to be re-read even though ${res.indexedBefore} challan(s) were already indexed \\u2014 the file fingerprints no longer match.<br>now: <code>${escHtml(res.fpMismatch.now)}</code><br>stored: <code>${escHtml(res.fpMismatch.stored)}</code></span>`
+        : '') +
+      // Name the files the old runaway loop left behind. Not deleted automatically: they are in
+      // YOUR Drive, and a tool that quietly removes files is a tool you cannot trust with a folder.
+      (res.ocrJunk && res.ocrJunk.length
+        ? `<br><span class="sub-note" style="color:var(--warn);"><b>${res.ocrJunk.length}</b> leftover "-Improved-Improved\u2026" copies were skipped. Older builds re-read their own OCR output and made a new copy each time; that is fixed, but the files it already made are still in your Challans folder and can be deleted:<br>${res.ocrJunk.slice(0, 8).map(escHtml).join('<br>')}${res.ocrJunk.length > 8 ? `<br>\u2026and ${res.ocrJunk.length - 8} more` : ''}</span>`
         : '') +
       (res.improved.length ? `<br><span class="sub-note" style="color:var(--ok);">Drive read <b>${res.improved.length}</b> file(s) that had no readable text. Each one now has an <b>-Improved.pdf</b> beside it and the original was renamed to <b>-Original</b>:<br>${res.improved.slice(0, 6).map(r => escHtml(r.improved)).join('<br>')}</span>` : '') +
       (res.improveFailed.length ? `<br><span class="sub-note" style="color:var(--bad);">${res.improveFailed.length} file(s) could not be recovered even through Drive. Nothing was renamed for these:<br>${res.improveFailed.slice(0, 6).map(r => escHtml(r.name + ' \\u2014 ' + r.why)).join('<br>')}</span>` : '') +

@@ -178,6 +178,49 @@ const api = new Function('__root', `
   // here \u2014 what this section proves is the re-read behaviour above, which it does.
   t('the build still returns a full report', Array.isArray(r5.skipped) && typeof r5.readNow === 'number');
 
+  console.log('\n5. The OCR chain cannot grow');
+  // The real folder ended up holding "...-Improved-Improved-Improved-Improved.pdf". Three separate
+  // things had to be wrong for that: the name builder appended a suffix to a name that already had
+  // one, the guard against re-OCR-ing an OCR result was never called, and the walk kept every link
+  // of the chain. All three are checked here against the shipped source.
+  const nameFns = new Function(`
+    ${['ocrBaseName', 'ocrImprovedName', 'ocrOriginalName', 'ocrChainDepth', 'ocrFamilyRoot', 'isOcrImproved']
+      .map(n => fns[n]).join('\n')}
+    return { ocrBaseName, ocrImprovedName, ocrOriginalName, ocrChainDepth, ocrFamilyRoot, isOcrImproved };
+  `)();
+  t('OCR-ing a plain file names it -Improved',
+    nameFns.ocrImprovedName('31-8-26 Challan.pdf') === '31-8-26 Challan-Improved.pdf',
+    nameFns.ocrImprovedName('31-8-26 Challan.pdf'));
+  t('OCR-ing an -Improved file does NOT make -Improved-Improved',
+    nameFns.ocrImprovedName('31-8-26 Challan-Improved.pdf') === '31-8-26 Challan-Improved.pdf',
+    nameFns.ocrImprovedName('31-8-26 Challan-Improved.pdf'));
+  t('even a four-deep chain collapses back to one suffix',
+    nameFns.ocrImprovedName('X-Improved-Improved-Improved-Improved.pdf') === 'X-Improved.pdf',
+    nameFns.ocrImprovedName('X-Improved-Improved-Improved-Improved.pdf'));
+  t('chain depth is counted correctly',
+    nameFns.ocrChainDepth('X-Improved-Improved-Improved-Improved.pdf') === 4 &&
+    nameFns.ocrChainDepth('X.pdf') === 0, nameFns.ocrChainDepth('X-Improved-Improved-Improved-Improved.pdf'));
+  t('every link of a chain shares one family root',
+    ['X.pdf', 'X-Improved.pdf', 'X-Improved-Improved.pdf'].every(n => nameFns.ocrFamilyRoot(n) === 'x'));
+  t('an -Original name does not gain -Improved as well',
+    nameFns.ocrOriginalName('X-Improved.pdf') === 'X-Original.pdf', nameFns.ocrOriginalName('X-Improved.pdf'));
+  t('an OCR result is recognised so it is never re-OCR-ed', nameFns.isOcrImproved('X-Improved.pdf'));
+  // And the guard is actually CALLED this time, not just declared.
+  const bciSrc = fns['buildChallanIndex'];
+  t('the re-OCR guard is wired into the OCR loop, not just declared',
+    /isOcrImproved\(f\.name\)/.test(bciSrc));
+
+  console.log('\n6. A real runaway folder is collapsed');
+  const w2 = makeWorld();
+  ['X.pdf', 'X-Improved.pdf', 'X-Improved-Improved.pdf', 'X-Improved-Improved-Improved.pdf'].forEach((n, i) => {
+    w2.files[n] = { id: 'X' + i, name: n, size: String(700 + i), modifiedTime: '2026-09-0' + (i + 1) + 'T09:00:00.000Z', challan: '321000' + i };
+  });
+  const A3 = api(dirHandle(w2));
+  const r6 = await A3.build();
+  t('only the original and the deepest copy were read', r6.files === 42, r6.files + ' (40 + 2)');
+  t('the two middle copies were reported as leftovers', r6.ocrJunk.length === 2, r6.ocrJunk.join(', '));
+  t('and they are named so they can be deleted', r6.ocrJunk.every(p => /-Improved/.test(p)));
+
   console.log('\n' + (fail ? `FAILED — ${pass} passed, ${fail} failed` : `PASSED — ${pass} passed, 0 failed`));
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error('HARNESS ERROR:', e); process.exit(1); });

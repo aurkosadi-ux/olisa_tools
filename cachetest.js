@@ -126,7 +126,14 @@ section('7. Files that are not challans are not treated as challans');
 ok('Office lock files are skipped in the challan walk', /\^~\\\$/.test(bci) || /\/\^~\\\$\//.test(bci));
 ok('the style scan uses the spreadsheet-name guard, not a bare extension test',
   /isSpreadsheetName\(fname\)/.test(bsi) && !/\/\\\.\(xlsx\|xls\)\$\/i\.test\(fname\)/.test(bsi));
-ok('an original superseded by an -Improved twin is skipped', /improvedBases/.test(bci));
+// Was pinned to an `improvedBases` set that only ever looked one level deep, which is why a
+// four-deep -Improved chain sailed straight past it. The rule is now family-based: group by the
+// name everything descends from, keep the original and the deepest copy, skip what is between.
+ok('OCR copies are grouped into families, not matched one level deep',
+  /ocrFamilyRoot\(/.test(bci) && /families/.test(bci));
+ok('the intermediate copies are collected for reporting', /ocrJunk/.test(bci));
+ok('and the name builder cannot append a second -Improved',
+  /\(\?:-\(\?:Improved\|Original\)\)\+\$/.test(SRC));
 
 section('8. A challan still opens when its file has been renamed or moved');
 const cfh = fnBody('challanFileHandle');
