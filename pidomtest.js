@@ -74,6 +74,18 @@ w.HTMLAnchorElement.prototype.click = function () {
   check('two rows are drawn', d.querySelectorAll('#tbody tr').length === 2);
   check('the party cell spans both rows',
     d.querySelector('#tbody td.party').getAttribute('rowspan') === '2');
+  check('rows are ordered by Pending Days, longest wait first',
+    [...d.querySelectorAll('#tbody td.days .daycell')].map(e => e.textContent.trim()).join(',') === '128,109',
+    [...d.querySelectorAll('#tbody td.days .daycell')].map(e => e.textContent.trim()).join(','));
+  check('buyers are shown in capitals',
+    d.querySelectorAll('#tbody tr')[0].querySelector('td.buyer').textContent === 'GILDAN',
+    d.querySelectorAll('#tbody tr')[0].querySelector('td.buyer').textContent);
+  check('the as-of date is echoed day-month-year',
+    d.getElementById('asofShown').textContent === '19-09-2026', d.getElementById('asofShown').textContent);
+  check('the ageing legend uses fifteen-day bands',
+    /Over 90 days/.test(d.getElementById('legend').textContent), d.getElementById('legend').textContent);
+  check('the legend gives a share as well as a value', /%/.test(d.getElementById('legend').textContent));
+  check('one party needs no split panel', d.getElementById('partyAge').hidden === true);
   check('the total reads $20,900.50',
     d.getElementById('figValue').textContent === '$20,900.50', d.getElementById('figValue').textContent);
   check('pending days were counted', d.querySelector('#tbody td.days .daycell').textContent.trim() === '128',
@@ -105,17 +117,33 @@ w.HTMLAnchorElement.prototype.click = function () {
     saved.every(s => s.blob.size > 1000), saved.map(s => s.blob.size).join(','));
   check('no errors while downloading', errors.length === 0, errors.join(' | '));
 
+  console.log('\n== Two parties split the panel ==');
+  w.eval(`
+    state.rows.push({id:3,party:'Beximco Textiles Ltd.',buyer:'zara',pi:'PI-99/2026',value:3000,
+      date:new Date(Date.UTC(2026,8,1)),concern:'Shuvo',file:'c.pdf',issues:[],confidence:'high',touched:{},text:'x'});
+    render();
+  `);
+  check('the split panel appears', d.getElementById('partyAge').hidden === false);
+  check('there is one panel per party', d.querySelectorAll('#partyAge .pa').length === 2);
+  check('each panel is named', [...d.querySelectorAll('#partyAge .pah b')].map(e => e.textContent).sort().join('|') ===
+    'A One Polar|Beximco Textiles Ltd.', [...d.querySelectorAll('#partyAge .pah b')].map(e => e.textContent).join('|'));
+  check('each panel draws its own bar', d.querySelectorAll('#partyAge .pa .agebar i').length >= 2);
+  check('the panels sit two across',
+    /\.partyage \{ display: grid; grid-template-columns: 1fr 1fr;/.test(d.querySelector('style').textContent));
+  w.eval("state.rows = state.rows.filter(function(r){return r.id!==3;}); render();");
+  check('removing the party folds the panel away', d.getElementById('partyAge').hidden === true);
+
   console.log('\n== Editing still works ==');
   const buyerCell = d.querySelectorAll('#tbody tr')[0].querySelector('td.buyer');
   buyerCell.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   const input = buyerCell.querySelector('input.cellin');
   check('clicking a cell opens an editor', !!input);
   if (input) {
-    input.value = 'Gildan Activewear';
+    input.value = 'gildan activewear';
     input.dispatchEvent(new w.FocusEvent('blur'));
     await new Promise(r => setTimeout(r, 40));
-    check('the edit sticks',
-      d.querySelectorAll('#tbody tr')[0].querySelector('td.buyer').textContent === 'Gildan Activewear',
+    check('a typed buyer is capitalised too',
+      d.querySelectorAll('#tbody tr')[0].querySelector('td.buyer').textContent === 'GILDAN ACTIVEWEAR',
       d.querySelectorAll('#tbody tr')[0].querySelector('td.buyer').textContent);
   }
 
@@ -127,6 +155,11 @@ w.HTMLAnchorElement.prototype.click = function () {
   check('the new party name reaches the file name',
     w.__saved[0] && w.__saved[0].name === 'Beximco Textiles Ltd. - PI Pending Summary.xlsx',
     w.__saved[0] && w.__saved[0].name);
+
+  console.log('\n== Dates are never second-guessed ==');
+  check('no "could be read either way" warning survives', !/could be read either way/.test(html));
+  check('the page still lets you state the format', !!d.getElementById('dfmt'));
+  check('day-month-year is what it starts on', d.getElementById('dfmt').value === 'DMY');
 
   console.log('\n== Sorting and filtering ==');
   d.querySelectorAll('#headRow th')[3].dispatchEvent(new w.MouseEvent('click', { bubbles: true }));

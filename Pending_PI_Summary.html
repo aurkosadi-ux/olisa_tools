@@ -279,6 +279,9 @@
   /* ---------- fields ---------- */
   label.field-label { display: block; font-size: 11.5px; color: var(--sub); margin-bottom: 6px;
     font-weight: 700; text-transform: uppercase; letter-spacing: .07em; }
+  /* the date box shows whatever format the browser feels like; this says what the
+     tool will actually write into the files */
+  label.field-label .dmy { color: var(--accent-dark); font-family: var(--font-mono); letter-spacing: 0; }
   input[type="text"], input[type="date"], input[type="search"], select {
     width: 100%; padding: 11px 13px; border: 1.5px solid var(--line); border-radius: 10px;
     font-size: 13.5px; font-family: var(--font-mono); background: #fff; color: var(--ink);
@@ -344,6 +347,17 @@
   .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; color: var(--sub); }
   .legend span { display: inline-flex; align-items: center; gap: 6px; }
   .legend u { width: 9px; height: 9px; border-radius: 3px; text-decoration: none; }
+  /* with more than one party the panel splits down the middle, one summary each */
+  .partyage { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 20px;
+    padding-top: 18px; border-top: 1px solid var(--line); }
+  @media (max-width: 760px) { .partyage { grid-template-columns: 1fr; } }
+  .partyage .pa { background: linear-gradient(150deg, #FBFDFF, #F6FAFF); border: 1px solid #E4F0FB;
+    border-radius: 13px; padding: 13px 15px; }
+  .partyage .pah { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+  .partyage .pah b { font-size: 13px; font-weight: 800; color: var(--ink); }
+  .partyage .pah span { font-size: 11.5px; color: var(--sub); font-family: var(--font-mono); margin-left: auto; }
+  .partyage .agebar { margin-top: 0; height: 10px; }
+  .partyage .legend { font-size: 11.5px; gap: 6px 13px; }
 
   /* ---------- the ledger ---------- */
   .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
@@ -553,7 +567,7 @@
         <input type="file" id="dirIn" webkitdirectory directory multiple class="vh">
       </div>
       <div>
-        <label class="field-label" for="asof">Pending as of</label>
+        <label class="field-label" for="asof">Pending as of <span id="asofShown" class="dmy"></span></label>
         <input type="date" id="asof">
       </div>
       <div>
@@ -578,6 +592,7 @@
     </div>
     <div class="agebar" id="ageBar"></div>
     <div class="legend" id="legend"></div>
+    <div class="partyage" id="partyAge" hidden></div>
   </div>
 
   <div class="card" id="ledgerCard" hidden>
@@ -595,9 +610,10 @@
       </table>
     </div>
     <p class="hint" id="hint">
-      Every figure is read from the PDF and cross-checked against the amount written in words. Anything the tool could not
-      read with confidence is marked in red — click any cell to correct it by hand. In the Excel file, Pending Days stays a
-      live <code>=TODAY()-PI Date</code> formula, so the sheet ages itself.
+      Dates in a PI are read as <b>day-month-year</b> and written the same way everywhere. Rows are ordered by Pending
+      Days, longest wait first. Every figure is cross-checked against the amount written in words; anything the tool could
+      not read with confidence is marked in red — click any cell to correct it by hand. In the Excel file, Pending Days
+      stays a live <code>=TODAY()-PI Date</code> formula, so the sheet ages itself.
     </p>
   </div>
 
@@ -792,6 +808,9 @@ function extractDate(text,order){
   }
   return null;
 }
+/* A buyer reads as a heading in the summary, so it is set in capitals wherever it
+   appears — on screen, in the workbook and in the PDF — whatever the PI had. */
+function upperBuyer(s){ return String(s==null?'':s).toUpperCase(); }
 function looksLikeCompany(s){
   if(!s)return false;
   var v=normSpace(s);
@@ -883,10 +902,9 @@ function extractRecord(text,opts){
   if(!dateRes)issues.push('PI date not found.');
   if(!concern)issues.push('Concern person not found.');
   if(value==null)issues.push('PI value not found.');
-  if(dateRes&&dateRes.ambiguous)issues.push('The date "'+dateRes.raw+'" could be read either way. Reading it as '+(order==='MDY'?'Month/Day/Year':'Day/Month/Year')+'.');
   if(dateRes&&dateRes.date&&dateRes.date.getTime()>Date.now()+86400000)issues.push('The PI date is in the future.');
   return{
-    party:party?party.value:'', buyer:buyer?buyer.value:'', pi:pi?pi.value:'',
+    party:party?party.value:'', buyer:upperBuyer(buyer?buyer.value:''), pi:pi?pi.value:'',
     value:value, date:dateRes?dateRes.date:null, dateRaw:dateRes?dateRes.dateRaw||dateRes.raw:'',
     concern:concern?concern.value:'', valueSource:valueSource, confidence:confidence, issues:issues
   };
@@ -917,6 +935,66 @@ function extractBest(lineText,flowText,opts){
     return true;
   });
   return out;
+}
+
+/* ============================================================
+   1b. AGEING BANDS   (shared by the screen, the workbook and the PDF)
+   ============================================================ */
+/* Day-month-year, one format, everywhere: on screen, in the workbook and in the PDF. */
+function fmtDate(d){
+  if(!d)return '';
+  var mm=String(d.getUTCMonth()+1).padStart(2,'0'),dd=String(d.getUTCDate()).padStart(2,'0');
+  return dd+'-'+mm+'-'+d.getUTCFullYear();
+}
+/* the as-of box hands back an ISO string; nobody outside this file should see one */
+function fmtISO(iso){
+  var p=String(iso||'').split('-');
+  return p.length===3?p[2]+'-'+p[1]+'-'+p[0]:String(iso||'');
+}
+function fmtMoney(n){
+  if(n==null)return '';
+  return '$'+n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+/* Fifteen-day ageing bands. One table drives the colour on screen, the fill in the
+   workbook and the ink in the PDF, so the three can never drift apart. */
+var BANDS=[
+  {max:15,       label:'0-15 days',    web:'#1B8252', xl:'FF1B8252', pdf:[.106,.510,.322], dark:0},
+  {max:30,       label:'16-30 days',   web:'#5C9A2E', xl:'FF5C9A2E', pdf:[.361,.604,.180], dark:1},
+  {max:45,       label:'31-45 days',   web:'#B8860B', xl:'FFB8860B', pdf:[.722,.525,.043], dark:1},
+  {max:60,       label:'46-60 days',   web:'#D97706', xl:'FFD97706', pdf:[.851,.467,.024], dark:1},
+  {max:75,       label:'61-75 days',   web:'#C2560F', xl:'FFC2560F', pdf:[.761,.337,.059], dark:0},
+  {max:90,       label:'76-90 days',   web:'#B02A2A', xl:'FFB02A2A', pdf:[.690,.165,.165], dark:0},
+  {max:Infinity, label:'Over 90 days', web:'#7F1D2D', xl:'FF7F1D2D', pdf:[.498,.114,.176], dark:0}
+];
+var NO_DATE={label:'No PI date', web:'#8B98A9', xl:'FF8B98A9', pdf:[.545,.596,.663], dark:1};
+/* the ink a chip can actually carry: amber and olive cannot hold white text at this
+   size, so those bands take near-black instead. Every pairing clears 4.5:1. */
+var CHIP_DARK_XL='FF16261C', CHIP_DARK_PDF=[.086,.149,.110];
+function band(d){
+  if(d==null)return null;
+  for(var i=0;i<BANDS.length;i++)if(d<=BANDS[i].max)return i;
+  return BANDS.length-1;
+}
+function bandColor(i){ return i==null?NO_DATE.web:BANDS[i].web; }
+var BAND_LABEL=BANDS.map(function(b){return b.label;});
+/* the ageing of a set of export rows: how much money is sitting in each band */
+function ageing(rows){
+  var out=BANDS.map(function(b){return {label:b.label,web:b.web,xl:b.xl,pdf:b.pdf,dark:b.dark,count:0,value:0};});
+  var undated={label:NO_DATE.label,web:NO_DATE.web,xl:NO_DATE.xl,pdf:NO_DATE.pdf,dark:NO_DATE.dark,count:0,value:0};
+  var total=0,count=0,oldest=null;
+  (rows||[]).forEach(function(r){
+    var v=r.value||0,b=band(r.pendingDays);
+    total+=v; count++;
+    if(b==null)
+      { undated.count++; undated.value+=v; }
+    else {
+      out[b].count++; out[b].value+=v;
+      if(oldest==null||r.pendingDays>oldest)oldest=r.pendingDays;
+    }
+  });
+  var lines=out.filter(function(x){return x.count>0;});
+  if(undated.count)lines.push(undated);
+  return {lines:lines,all:out,undated:undated,total:total,count:count,oldest:oldest};
 }
 
 /* ============================================================
@@ -953,34 +1031,71 @@ function zipStore(files){
 function xmlEsc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&apos;').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g,'');}
 function colLetter(n){var s='';while(n>0){var m=(n-1)%26;s=String.fromCharCode(65+m)+s;n=(n-m-1)/26;}return s;}
 function excelSerial(d){return Math.round((Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate())-Date.UTC(1899,11,30))/86400000);}
-var STYLES_XML='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'+
-'<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'+
-'<numFmts count="2"><numFmt numFmtId="164" formatCode="&quot;$&quot;#,##0.00"/><numFmt numFmtId="165" formatCode="mm\\-dd\\-yy"/></numFmts>'+
-'<fonts count="4"><font><sz val="11"/><name val="Times New Roman"/></font>'+
-'<font><b/><sz val="11"/><name val="Times New Roman"/></font>'+
-'<font><b/><sz val="16"/><name val="Times New Roman"/></font>'+
-'<font><b/><sz val="14"/><color rgb="FF102A6E"/><name val="Times New Roman"/></font></fonts>'+
-'<fills count="4"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>'+
-'<fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/><bgColor indexed="64"/></patternFill></fill>'+
-'<fill><patternFill patternType="solid"><fgColor rgb="FFEAF2FF"/><bgColor indexed="64"/></patternFill></fill></fills>'+
-'<borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border>'+
-'<border><left style="thin"><color indexed="64"/></left><right style="thin"><color indexed="64"/></right>'+
-'<top style="thin"><color indexed="64"/></top><bottom style="thin"><color indexed="64"/></bottom><diagonal/></border></borders>'+
-'<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'+
-'<cellXfs count="11">'+
-'<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'+
-'<xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>'+
-'<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>'+
-'<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'+
-'<xf numFmtId="164" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'+
-'<xf numFmtId="165" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'+
-'<xf numFmtId="1" fontId="0" fillId="2" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'+
-'<xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'+
-'<xf numFmtId="164" fontId="2" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'+
-'<xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>'+
-/* 10 — the party name, sitting across the top of its block */
-'<xf numFmtId="0" fontId="3" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>'+
-'</cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>';
+var STYLE_BAND_0, STYLE_NODATE;
+/* The styles are assembled rather than written out flat, because seven ageing bands
+   each need their own solid fill and their own white-on-colour cell format, and
+   keeping the index arithmetic in one place is the only way that stays correct. */
+var STYLES_XML=(function(){
+  var numFmts='<numFmts count="3">'+
+    '<numFmt numFmtId="164" formatCode="&quot;$&quot;#,##0.00"/>'+
+    '<numFmt numFmtId="165" formatCode="dd\\-mm\\-yyyy"/>'+
+    '<numFmt numFmtId="166" formatCode="0.0%"/></numFmts>';
+  var fonts=['<font><sz val="11"/><name val="Times New Roman"/></font>',
+             '<font><b/><sz val="11"/><name val="Times New Roman"/></font>',
+             '<font><b/><sz val="16"/><name val="Times New Roman"/></font>',
+             '<font><b/><sz val="14"/><color rgb="FF102A6E"/><name val="Times New Roman"/></font>',
+             '<font><i/><sz val="10"/><color rgb="FF5B6D89"/><name val="Times New Roman"/></font>',
+             '<font><b/><sz val="10"/><color rgb="FFFFFFFF"/><name val="Times New Roman"/></font>',
+             '<font><b/><sz val="11"/><color rgb="FF102A6E"/><name val="Times New Roman"/></font>',
+             '<font><b/><sz val="10"/><color rgb="'+CHIP_DARK_XL+'"/><name val="Times New Roman"/></font>'];
+  var fills=['<fill><patternFill patternType="none"/></fill>',
+             '<fill><patternFill patternType="gray125"/></fill>'];
+  function solid(rgb){return '<fill><patternFill patternType="solid"><fgColor rgb="'+rgb+'"/><bgColor indexed="64"/></patternFill></fill>';}
+  fills.push(solid('FFFFFF00'));                     /* 2 — the Pending Days column   */
+  fills.push(solid('FFEAF2FF'));                     /* 3 — the party-name band        */
+  fills.push(solid('FFF5F9FE'));                     /* 4 — sub-headings               */
+  var BAND_FILL_0=fills.length;                      /* 5.. — one per ageing band      */
+  BANDS.forEach(function(b){fills.push(solid(b.xl));});
+  var NODATE_FILL=fills.length; fills.push(solid(NO_DATE.xl));
+  var borders='<borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border>'+
+    '<border><left style="thin"><color indexed="64"/></left><right style="thin"><color indexed="64"/></right>'+
+    '<top style="thin"><color indexed="64"/></top><bottom style="thin"><color indexed="64"/></bottom><diagonal/></border></borders>';
+  function xf(o){
+    return '<xf numFmtId="'+(o.fmt||0)+'" fontId="'+(o.font||0)+'" fillId="'+(o.fill||0)+'" borderId="'+(o.border===0?0:1)+
+      '" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1">'+
+      '<alignment horizontal="'+(o.al||'center')+'" vertical="center"'+(o.wrap?' wrapText="1"':'')+'/></xf>';
+  }
+  var xfs=[
+    '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>',   /*  0 plain            */
+    xf({font:1,wrap:1}),                                                /*  1 column heading   */
+    xf({font:1,fill:2,wrap:1}),                                         /*  2 Pending Days head*/
+    xf({}),                                                             /*  3 text             */
+    xf({fmt:164}),                                                      /*  4 money            */
+    xf({fmt:165}),                                                      /*  5 date             */
+    xf({fmt:1,fill:2}),                                                 /*  6 pending days     */
+    xf({font:1}),                                                       /*  7 bold label       */
+    xf({fmt:164,font:2}),                                               /*  8 total money      */
+    xf({font:1,wrap:1}),                                                /*  9 (reserved)       */
+    xf({font:3,fill:3,wrap:1}),                                         /* 10 party name       */
+    xf({font:4,border:0}),                                              /* 11 as-of line       */
+    xf({font:6,fill:4,wrap:1}),                                         /* 12 ageing heading   */
+    xf({fmt:166}),                                                      /* 13 share of value   */
+    xf({fmt:1})                                                         /* 14 plain integer    */
+  ];
+  var BAND_XF_0=xfs.length;                                             /* 15.. band labels    */
+  BANDS.forEach(function(b,i){xfs.push(xf({font:b.dark?7:5,fill:BAND_FILL_0+i}));});
+  var NODATE_XF=xfs.length; xfs.push(xf({font:NO_DATE.dark?7:5,fill:NODATE_FILL}));
+  STYLE_BAND_0=BAND_XF_0; STYLE_NODATE=NODATE_XF;
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'+
+    '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'+
+    numFmts+
+    '<fonts count="'+fonts.length+'">'+fonts.join('')+'</fonts>'+
+    '<fills count="'+fills.length+'">'+fills.join('')+'</fills>'+
+    borders+
+    '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'+
+    '<cellXfs count="'+xfs.length+'">'+xfs.join('')+'</cellXfs>'+
+    '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>';
+})();
 function cellXml(ref,c){
   if(!c)return '';
   var s=c.s?' s="'+c.s+'"':'';
@@ -1033,7 +1148,8 @@ function makeWorkbook(sheetName,sheetXml){
 }
 /* Six columns now: the party name is a title band across the top of its own block
    rather than a merged strip down column A, so the sheet reads top to bottom. */
-var COL_W=[24.00,20.00,15.00,12.50,13.50,20.00];
+/* buyers are set in capitals, which run wider, so column A is given the room */
+var COL_W=[31.00,21.00,15.00,13.00,14.00,22.00];
 function sheetTitle(groups){
   var seen={},list=[];
   (groups||[]).forEach(function(g){
@@ -1048,16 +1164,52 @@ function sheetTitle(groups){
 }
 function buildSummaryWorkbook(groups,opts){
   opts=opts||{};
-  var rows=[],merges=[],heights={},grand=0;
+  var rows=[],merges=[],heights={},grand=0,asOf=fmtISO(opts.asOf);
+  var many=groups.length>1;
+  /* the same block, laid out the same way, whether there is one party or six —
+     a summary emailed to one party looks exactly like its page in the full sheet */
+  function ageingBlock(title,ag){
+    rows.push([]);
+    var h=rows.length+1;
+    rows.push([{t:'s',v:title,s:12},{t:'s',v:'',s:12},{t:'s',v:'',s:12},
+               {t:'s',v:'',s:12},{t:'s',v:'',s:12},{t:'s',v:'',s:12}]);
+    merges.push('A'+h+':F'+h);
+    heights[h]=20;
+    rows.push([{t:'s',v:'Ageing',s:1},{t:'s',v:'Invoices',s:1},{t:'s',v:'Value',s:1},
+               {t:'s',v:'Share of Value',s:1},{t:'s',v:'',s:1},{t:'s',v:'',s:1}]);
+    var hdr=rows.length;
+    merges.push('D'+hdr+':F'+hdr);
+    ag.lines.forEach(function(L){
+      var style=(L.label===NO_DATE.label)?STYLE_NODATE:STYLE_BAND_0+BANDS.map(function(b){return b.label;}).indexOf(L.label);
+      var rn=rows.length+1;
+      rows.push([{t:'s',v:L.label,s:style},{t:'n',v:L.count,s:14},
+                 {t:'n',v:Math.round(L.value*100)/100,s:4},
+                 {t:'n',v:ag.total?Math.round(L.value/ag.total*10000)/10000:0,s:13},
+                 {t:'s',v:'',s:3},{t:'s',v:'',s:3}]);
+      merges.push('D'+rn+':F'+rn);
+    });
+    var tr=rows.length+1;
+    rows.push([{t:'s',v:'TOTAL',s:7},{t:'n',v:ag.count,s:14},
+               {t:'n',v:Math.round(ag.total*100)/100,s:8},
+               {t:'n',v:ag.total?1:0,s:13},{t:'s',v:'',s:3},{t:'s',v:'',s:3}]);
+    merges.push('D'+tr+':F'+tr);
+  }
+
   for(var g=0;g<groups.length;g++){
     var grp=groups[g];
-    if(g>0)rows.push([]);
+    if(g>0){rows.push([]);rows.push([]);}
     /* the party name, right across the width, above its own block */
     var titleRow=rows.length+1;
     rows.push([{t:'s',v:grp.party,s:10},{t:'s',v:'',s:10},{t:'s',v:'',s:10},
                {t:'s',v:'',s:10},{t:'s',v:'',s:10},{t:'s',v:'',s:10}]);
     merges.push('A'+titleRow+':F'+titleRow);
     heights[titleRow]=24;
+    if(asOf){
+      var sub=rows.length+1;
+      rows.push([{t:'s',v:'Pending as of '+asOf+'   \u00b7   All values in USD',s:11}]);
+      merges.push('A'+sub+':F'+sub);
+      heights[sub]=17;
+    }
     var headerRow=rows.length+1;
     rows.push([
       {t:'s',v:'Buyer',s:1},{t:'s',v:'PI',s:1},{t:'s',v:'Value',s:1},
@@ -1068,7 +1220,7 @@ function buildSummaryWorkbook(groups,opts){
       var d=grp.rows[i],rn=rows.length+1;
       var dateCell=d.date?{t:'n',v:excelSerial(d.date),s:5}:{t:'s',v:'',s:3};
       var daysCell=d.date?{t:'f',f:'TODAY()-D'+rn,v:d.pendingDays,s:6}:{t:'s',v:'',s:6};
-      rows.push([{t:'s',v:d.buyer,s:3},{t:'s',v:d.pi,s:3},
+      rows.push([{t:'s',v:upperBuyer(d.buyer),s:3},{t:'s',v:d.pi,s:3},
         d.value==null?{t:'s',v:'',s:4}:{t:'n',v:d.value,s:4},dateCell,daysCell,{t:'s',v:d.concern,s:3}]);
       if(d.value!=null)sum+=d.value;
     }
@@ -1077,13 +1229,24 @@ function buildSummaryWorkbook(groups,opts){
       grp.rows.length?{t:'f',f:'SUM(C'+first+':C'+last+')',v:Math.round(sum*100)/100,s:8}:{t:'n',v:0,s:8},
       null,null,null]);
     merges.push('A'+totalRow+':B'+totalRow);
+    /* each party carries its own ageing, so a single-party summary is complete on its own */
+    ageingBlock(many?('AGEING OF PENDING VALUE \u2014 '+grp.party):'AGEING OF PENDING VALUE',ageing(grp.rows));
     grand+=sum;
   }
-  if(groups.length>1){
-    rows.push([]);
+  if(many){
+    rows.push([]); rows.push([]);
     var gr=rows.length+1;
+    rows.push([{t:'s',v:'ALL PARTIES',s:10},{t:'s',v:'',s:10},{t:'s',v:'',s:10},
+               {t:'s',v:'',s:10},{t:'s',v:'',s:10},{t:'s',v:'',s:10}]);
+    merges.push('A'+gr+':F'+gr);
+    heights[gr]=24;
+    var all=[];
+    groups.forEach(function(x){all=all.concat(x.rows);});
+    ageingBlock('AGEING OF PENDING VALUE \u2014 ALL PARTIES',ageing(all));
+    rows.push([]);
+    var gt=rows.length+1;
     rows.push([{t:'s',v:'GRAND TOTAL - ',s:7},{t:'s',v:'',s:7},{t:'n',v:Math.round(grand*100)/100,s:8},null,null,null]);
-    merges.push('A'+gr+':B'+gr);
+    merges.push('A'+gt+':B'+gt);
   }
   return makeWorkbook(sheetTitle(groups),buildSheet(rows,merges,COL_W,heights));
 }
@@ -1171,29 +1334,17 @@ async function readPdf(file){
    4. STATE + UI
    ============================================================ */
 var STORE='pi-summary-v1';
-var state={rows:[],asOf:todayISO(),dateOrder:'DMY',sort:{key:'pi',dir:1},query:'',onlyAttn:false};
+/* sorted by Pending Days out of the box: the money that has waited longest sits at the top */
+var state={rows:[],asOf:todayISO(),dateOrder:'DMY',sort:{key:'days',dir:-1},query:'',onlyAttn:false};
 var uid=0;
 
 function todayISO(){var d=new Date();return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10);}
 function isoToUTC(iso){if(!iso)return null;var p=iso.split('-');return new Date(Date.UTC(+p[0],+p[1]-1,+p[2]));}
-function fmtDate(d){
-  if(!d)return '';
-  var mm=String(d.getUTCMonth()+1).padStart(2,'0'),dd=String(d.getUTCDate()).padStart(2,'0');
-  return dd+'/'+mm+'/'+d.getUTCFullYear();
-}
-function fmtMoney(n){
-  if(n==null)return '';
-  return '$'+n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
-}
 function pendingDays(row){
   var base=isoToUTC(state.asOf)||isoToUTC(todayISO());
   if(!row.date)return null;
   return Math.round((base-row.date)/86400000);
 }
-function band(d){ if(d==null)return null; if(d<=30)return 0; if(d<=60)return 1; if(d<=90)return 2; return 3; }
-var BAND_COLOR=['var(--fresh)','var(--mid)','var(--late)','var(--late)'];
-var BAND_LABEL=['0–30 days','31–60 days','61–90 days','over 90 days'];
-function bandColor(i){ return i===3?'color-mix(in srgb,var(--late) 100%,#000 22%)':BAND_COLOR[i]; }
 
 function $(id){return document.getElementById(id);}
 function toast(msg){var t=$('toast');t.textContent=msg;t.classList.add('on');clearTimeout(t._t);t._t=setTimeout(function(){t.classList.remove('on');},2600);}
@@ -1346,8 +1497,18 @@ function visibleRows(){
 function sortRows(rows){
   var k=state.sort.key,dir=state.sort.dir;
   return rows.slice().sort(function(a,b){
+    /* Pending Days is sorted on the figure itself rather than on the date behind it,
+       so the default view really is longest wait at the top. A row with no PI date has
+       no wait to compare, so it drops to the bottom whichever way the column is sorted. */
+    if(k==='days'){
+      var pa=pendingDays(a),pb=pendingDays(b);
+      if(pa==null&&pb==null)return 0;
+      if(pa==null)return 1;
+      if(pb==null)return -1;
+      return (pa-pb)*dir;
+    }
     var va,vb;
-    if(k==='days'||k==='date'){ va=a.date?a.date.getTime():-Infinity; vb=b.date?b.date.getTime():-Infinity; if(k==='days'){va=-va;vb=-vb;} }
+    if(k==='date'){ va=a.date?a.date.getTime():-Infinity; vb=b.date?b.date.getTime():-Infinity; }
     else if(k==='value'){ va=a.value==null?-Infinity:a.value; vb=b.value==null?-Infinity:b.value; }
     else { va=(a[k]||'').toLowerCase(); vb=(b[k]||'').toLowerCase(); }
     if(va<vb)return -1*dir; if(va>vb)return 1*dir; return 0;
@@ -1370,6 +1531,7 @@ function render(){
   $('ghost').hidden=has;
   $('trayTitle').textContent=has?'Drop more PI PDFs anywhere on this page':'Drop your PI PDFs here';
   $('trayCount').textContent=has?state.rows.length+(state.rows.length>1?' invoices read':' invoice read'):'';
+  $('asofShown').textContent=fmtISO(state.asOf);
   $('summary').hidden=!has; $('ledgerCard').hidden=!has; $('foot').hidden=!has;
   $('asof').value=state.asOf; $('dfmt').value=state.dateOrder;
   $('btnAttn').textContent=state.onlyAttn?'Show all rows':'Show only rows to check';
@@ -1455,7 +1617,8 @@ function cell(r,key){
   var td=document.createElement('td');
   var col=COLS.filter(function(c){return c.key===key;})[0];
   td.className=col.cls+' ed'+(r.touched&&r.touched[key]?' touched':'');
-  var txt = key==='value'?fmtMoney(r.value) : key==='date'?fmtDate(r.date) : (r[key]||'');
+  var txt = key==='value'?fmtMoney(r.value) : key==='date'?fmtDate(r.date)
+          : key==='buyer'?upperBuyer(r.buyer) : (r[key]||'');
   if(!txt){ td.classList.add('miss'); }
   else td.textContent=txt;
   td.tabIndex=0;
@@ -1527,7 +1690,7 @@ function startEdit(td,r,key){
         r.date=p.date;
       }
     } else {
-      r[key]=v;
+      r[key]=(key==='buyer')?upperBuyer(v):v;
     }
     r.touched=r.touched||{}; r.touched[key]=true;
     /* an edited field settles its own complaint */
@@ -1535,7 +1698,7 @@ function startEdit(td,r,key){
       var map={party:'Party name',buyer:'Buyer',pi:'PI number',date:'PI date',concern:'Concern person',value:'PI value'};
       if(i===map[key]+' not found.')return false;
       if(key==='value'&&/amount in words|TOTAL row|line items/i.test(i))return false;
-      if(key==='date'&&/could be read either way|in the future/i.test(i))return false;
+      if(key==='date'&&/in the future/i.test(i))return false;
       return true;
     });
     render(); save();
@@ -1548,34 +1711,50 @@ function startEdit(td,r,key){
   inp.oninput=function(){inp.classList.remove('bad');};
 }
 function renderSummary(){
-  var rows=state.rows;
-  var total=rows.reduce(function(n,r){return n+(r.value||0);},0);
-  $('figValue').textContent=fmtMoney(total);
-  $('figCount').textContent=rows.length;
-  var days=rows.map(pendingDays).filter(function(d){return d!=null;});
-  $('figOldest').textContent=days.length?Math.max.apply(null,days):'—';
-  var buckets=[0,0,0,0],counts=[0,0,0,0];
-  rows.forEach(function(r){
-    var b=band(pendingDays(r));
-    if(b==null)return;
-    buckets[b]+=(r.value||0); counts[b]++;
+  var ag=ageing(exportGroups().reduce(function(a,g){return a.concat(g.rows);},[]));
+  $('figValue').textContent=fmtMoney(ag.total);
+  $('figCount').textContent=ag.count;
+  $('figOldest').textContent=ag.oldest==null?'\u2014':ag.oldest;
+  $('figOver60').textContent=fmtMoney(ag.all.slice(4).reduce(function(n,b){return n+b.value;},0));
+  drawAge($('ageBar'),$('legend'),ag);
+
+  /* more than one party, so each gets its own panel side by side — the same split
+     the PDF makes, so what is on screen is what gets emailed */
+  var groups=exportGroups(),wrap=$('partyAge');
+  wrap.innerHTML='';
+  wrap.hidden=groups.length<2;
+  if(groups.length<2)return;
+  groups.forEach(function(g){
+    var pa=ageing(g.rows);
+    var card=document.createElement('div');
+    card.className='pa';
+    var h=document.createElement('div');
+    h.className='pah';
+    h.innerHTML='<b>'+esc(g.party)+'</b><span>'+esc(fmtMoney(pa.total))+' \u00b7 '+pa.count+(pa.count>1?' PIs':' PI')+'</span>';
+    card.appendChild(h);
+    var bar=document.createElement('div'); bar.className='agebar';
+    var lg=document.createElement('div'); lg.className='legend';
+    card.appendChild(bar); card.appendChild(lg);
+    drawAge(bar,lg,pa);
+    wrap.appendChild(card);
   });
-  $('figOver60').textContent=fmtMoney(buckets[2]+buckets[3]);
-  var sum=buckets.reduce(function(a,b){return a+b;},0)||1;
-  var bar=$('ageBar'); bar.innerHTML='';
-  buckets.forEach(function(v,i){
-    if(v<=0)return;
+}
+/* one drawing routine for the overall strip and for every party panel */
+function drawAge(bar,lg,ag){
+  bar.innerHTML=''; lg.innerHTML='';
+  var total=ag.total||1;
+  ag.lines.forEach(function(L){
+    if(L.value<=0)return;
     var el=document.createElement('i');
-    el.style.width=(v/sum*100)+'%';
-    el.style.background=bandColor(i);
-    el.title=BAND_LABEL[i]+': '+fmtMoney(v);
+    el.style.width=(L.value/total*100)+'%';
+    el.style.background=L.web;
+    el.title=L.label+': '+fmtMoney(L.value);
     bar.appendChild(el);
   });
-  var lg=$('legend'); lg.innerHTML='';
-  buckets.forEach(function(v,i){
-    if(!counts[i])return;
+  ag.lines.forEach(function(L){
     var s=document.createElement('span');
-    s.innerHTML='<u style="background:'+bandColor(i)+'"></u>'+BAND_LABEL[i]+' · '+counts[i]+' · '+esc(fmtMoney(v));
+    s.innerHTML='<u style="background:'+L.web+'"></u>'+esc(L.label)+' \u00b7 '+L.count+' \u00b7 '+esc(fmtMoney(L.value))+
+      ' \u00b7 '+(ag.total?(L.value/ag.total*100).toFixed(1):'0.0')+'%';
     lg.appendChild(s);
   });
 }
@@ -1608,7 +1787,8 @@ var HELVB=[278,333,474,556,556,889,722,238,333,333,389,584,278,333,278,278,556,5
 function pdfAscii(s){
   s=String(s==null?'':s)
     .replace(/[\u2018\u2019\u201b]/g,"'").replace(/[\u201c\u201d]/g,'"')
-    .replace(/[\u2010-\u2015\u2212]/g,'-').replace(/\u2026/g,'...').replace(/\u00a0/g,' ');
+    .replace(/[\u2010-\u2015\u2212]/g,'-').replace(/\u2026/g,'...').replace(/\u00a0/g,' ')
+    .replace(/[\u00b7\u2022]/g,'-');
   try{ s=s.normalize('NFD').replace(/[\u0300-\u036f]/g,''); }catch(e){}
   return s.replace(/[^\x20-\x7e]/g,'?');
 }
@@ -1642,19 +1822,25 @@ Page.prototype.text=function(s,x,y,size,bold,rgb,align,boxW){
     r2(tx)+' '+r2(this.h-y)+' Td ('+pdfEsc(str)+') Tj ET');
 };
 function r2(n){return Math.round(n*100)/100;}
-function makePdfFile(pages,w,h){
+function makePdfFile(pages,w,h,meta){
+  meta=meta||{};
   var n=pages.length,pageIds=[],contentIds=[],objs={},i;
-  for(i=0;i<n;i++){pageIds.push(5+i*2);contentIds.push(6+i*2);}
+  for(i=0;i<n;i++){pageIds.push(6+i*2);contentIds.push(7+i*2);}
   objs[1]='<< /Type /Catalog /Pages 2 0 R >>';
   objs[2]='<< /Type /Pages /Kids ['+pageIds.map(function(id){return id+' 0 R';}).join(' ')+'] /Count '+n+' >>';
   objs[3]='<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>';
   objs[4]='<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>';
+  /* a document sent on to a bank or a buyer should say what it is when its
+     properties are opened, not read "untitled" */
+  objs[5]='<< /Title ('+pdfEsc(meta.title||'PI Pending Summary')+') '+
+    '/Subject (Pending proforma invoices'+(meta.asOf?' as of '+pdfEsc(meta.asOf):'')+') '+
+    '/Creator (Sadi\'s Universe - Pending PI Summary) /Producer (Sadi\'s Universe) >>';
   for(i=0;i<n;i++){
     objs[pageIds[i]]='<< /Type /Page /Parent 2 0 R /MediaBox [0 0 '+w+' '+h+'] '+
       '/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents '+contentIds[i]+' 0 R >>';
     objs[contentIds[i]]={stream:pages[i].ops.join('\n')};
   }
-  var out='%PDF-1.4\n',offsets={},maxId=4+n*2;
+  var out='%PDF-1.4\n',offsets={},maxId=5+n*2;
   for(var id=1;id<=maxId;id++){
     offsets[id]=out.length;
     var o=objs[id];
@@ -1664,81 +1850,193 @@ function makePdfFile(pages,w,h){
   var xref=out.length;
   out+='xref\n0 '+(maxId+1)+'\n0000000000 65535 f \n';
   for(id=1;id<=maxId;id++)out+=('0000000000'+offsets[id]).slice(-10)+' 00000 n \n';
-  out+='trailer\n<< /Size '+(maxId+1)+' /Root 1 0 R >>\nstartxref\n'+xref+'\n%%EOF';
+  out+='trailer\n<< /Size '+(maxId+1)+' /Root 1 0 R /Info 5 0 R >>\nstartxref\n'+xref+'\n%%EOF';
   var bytes=new Uint8Array(out.length);
   for(i=0;i<out.length;i++)bytes[i]=out.charCodeAt(i)&0xff;
   return bytes;
 }
-/* the same six columns as the Excel file, laid out on A4 portrait */
+/* the same six columns as the workbook, laid out on A4 portrait */
 var PDF_COLS=[
-  {label:'Buyer',          w:118, al:'l', key:'buyer'},
-  {label:'PI',             w:105, al:'l', key:'pi'},
-  {label:'Value',          w: 82, al:'r', key:'value'},
+  {label:'Buyer',          w:132, al:'l', key:'buyer'},
+  {label:'PI',             w:100, al:'l', key:'pi'},
+  {label:'Value',          w: 80, al:'r', key:'value'},
   {label:'PI Date',        w: 62, al:'c', key:'date'},
-  {label:'Pending Days',   w: 54, al:'c', key:'days'},
-  {label:'Concern Person', w: 94, al:'l', key:'concern'}
+  {label:'Pending Days',   w: 51, al:'c', key:'days'},
+  {label:'Concern Person', w: 90, al:'l', key:'concern'}
 ];
 var INK=[.06,.15,.25], SUB=[.36,.43,.54], NAVY=[.06,.16,.43], WHITE=[1,1,1],
-    RULE=[.87,.90,.94], BAND=[.918,.949,1], HEADFILL=[.961,.976,.996],
-    FLAGFILL=[1,.953,.69], ZEBRA=[.98,.988,1];
+    RULE=[.84,.88,.93], BAND=[.918,.949,1], HEADFILL=[.961,.976,.996],
+    FLAGFILL=[1,.953,.69], ZEBRA=[.981,.988,1];
+
 function buildSummaryPdf(groups,opts){
   opts=opts||{};
-  var W=595,H=842,M=40,TOP=48,BOT=54;
+  var W=595,H=842,M=40,TOP=46,BOT=52;
   var tableW=PDF_COLS.reduce(function(n,c){return n+c.w;},0);
   var x0=M+(W-M*2-tableW)/2;
+  var asOf=fmtISO(opts.asOf);
+  var many=groups.length>1;
+  var everyRow=[]; groups.forEach(function(g){everyRow=everyRow.concat(g.rows);});
+  var overall=ageing(everyRow);
+
   var pages=[],pg=null,y=0;
   function newPage(){ pg=new Page(W,H); pages.push(pg); y=TOP; }
   function room(h){ return y+h<=H-BOT; }
+  function need(h){ if(!room(h))newPage(); }
   function cellX(i){var x=x0;for(var k=0;k<i;k++)x+=PDF_COLS[k].w;return x;}
+  function box(p,x,yy,w,h,fill){
+    if(fill)p.fill(x,yy,w,h,fill);
+    p.line(x,yy,x+w,yy,RULE,.5); p.line(x,yy+h,x+w,yy+h,RULE,.5);
+    p.line(x,yy,x,yy+h,RULE,.5); p.line(x+w,yy,x+w,yy+h,RULE,.5);
+  }
+
+  /* ---------- the letterhead ---------- */
+  newPage();
+  pg.text('PI PENDING SUMMARY',x0,y+15,18,true,NAVY,'l',tableW);
+  if(asOf)pg.text('Pending as of '+asOf,x0,y+7,9,false,SUB,'r',tableW);
+  pg.text('All values in USD',x0,y+18,8,false,SUB,'r',tableW);
+  y+=26;
+  pg.line(x0,y,x0+tableW,y,NAVY,1.2);
+  y+=20;
+
+  /* ---------- what it comes to ---------- */
+  var kpis=[
+    {k:'Total Pending',   v:fmtMoney(Math.round(overall.total*100)/100)},
+    {k:'Invoices',        v:String(overall.count)},
+    {k:'Oldest Pending',  v:(overall.oldest==null?'\u2014':overall.oldest+' days')},
+    {k:'Over 60 Days',    v:fmtMoney(Math.round(overall.all.slice(4).reduce(function(n,b){return n+b.value;},0)*100)/100)}
+  ];
+  var kw=(tableW-3*8)/4;
+  kpis.forEach(function(kp,i){
+    var kx=x0+i*(kw+8);
+    box(pg,kx,y,kw,46,HEADFILL);
+    pg.text(kp.k.toUpperCase(),kx+9,y+16,6.8,true,SUB,'l',kw-18);
+    pg.text(kp.v,kx+9,y+35,13,true,NAVY,'l',kw-18);
+  });
+  y+=46+22;
+
+  /* ---------- the ageing, drawn to a fixed shape ---------- */
+  function ageingHeight(ag,w){
+    return 20 + 6 + 12 + 8 + 16 + ag.lines.length*15 + 17;
+  }
+  function drawAgeing(px,py,w,title,ag){
+    var yy=py;
+    box(pg,px,yy,w,20,BAND);
+    pg.text(title,px+10,yy+13.5,w<300?8:9.5,true,NAVY,'l',w-20);
+    yy+=20+6;
+    /* the stacked bar: the whole exposure at a glance, before any numbers are read */
+    var bx=px,total=ag.total||1;
+    ag.lines.forEach(function(L){
+      var seg=Math.max(L.value/total*w,L.value>0?1.5:0);
+      if(seg<=0)return;
+      pg.fill(bx,yy,seg,12,L.pdf);
+      bx+=seg;
+    });
+    if(bx<px+w-0.5)pg.fill(bx,yy,px+w-bx,12,[.91,.93,.96]);
+    yy+=12+8;
+    /* and the same thing as a table, because a bar is not evidence */
+    var small=w<300;
+    var c1=small?0.44:0.33, c2=small?0.16:0.17, c3=small?0.24:0.28;
+    var wA=w*c1, wB=w*c2, wC=w*c3, wD=w-wA-wB-wC;
+    var cols=[{x:px,w:wA},{x:px+wA,w:wB},{x:px+wA+wB,w:wC},{x:px+wA+wB+wC,w:wD}];
+    var fs=small?6.8:7.6;
+    box(pg,px,yy,w,16,HEADFILL);
+    ['Ageing','Invoices','Value','Share'].forEach(function(t,i){
+      pg.text(t.toUpperCase(),cols[i].x+5,yy+11,fs-.4,true,SUB,i?'r':'l',cols[i].w-10);
+      if(i)pg.line(cols[i].x,yy,cols[i].x,yy+16,RULE,.5);
+    });
+    yy+=16;
+    ag.lines.forEach(function(L){
+      pg.fill(cols[0].x,yy,wA,15,L.pdf);
+      pg.text(L.label,cols[0].x+6,yy+10.4,fs,true,L.dark?CHIP_DARK_PDF:WHITE,'l',wA-12);
+      pg.text(String(L.count),cols[1].x+5,yy+10.4,fs,false,INK,'r',wB-10);
+      pg.text(fmtMoney(Math.round(L.value*100)/100),cols[2].x+5,yy+10.4,fs,false,INK,'r',wC-10);
+      pg.text((ag.total?(L.value/ag.total*100).toFixed(1):'0.0')+'%',cols[3].x+5,yy+10.4,fs,false,INK,'r',wD-10);
+      for(var i=1;i<4;i++)pg.line(cols[i].x,yy,cols[i].x,yy+15,RULE,.5);
+      pg.line(px,yy+15,px+w,yy+15,RULE,.5);
+      pg.line(px,yy,px,yy+15,RULE,.5); pg.line(px+w,yy,px+w,yy+15,RULE,.5);
+      yy+=15;
+    });
+    box(pg,px,yy,w,17,HEADFILL);
+    pg.text('TOTAL',cols[0].x+6,yy+11.6,fs+.4,true,INK,'l',wA-12);
+    pg.text(String(ag.count),cols[1].x+5,yy+11.6,fs+.4,true,INK,'r',wB-10);
+    pg.text(fmtMoney(Math.round(ag.total*100)/100),cols[2].x+5,yy+11.6,fs+.4,true,INK,'r',wC-10);
+    pg.text((ag.total?'100.0':'0.0')+'%',cols[3].x+5,yy+11.6,fs+.4,true,INK,'r',wD-10);
+    for(var i=1;i<4;i++)pg.line(cols[i].x,yy,cols[i].x,yy+17,RULE,.5);
+    return yy+17;
+  }
+
+  var mainTitle=many?'AGEING OF PENDING VALUE \u2014 ALL PARTIES':'AGEING OF PENDING VALUE';
+  need(ageingHeight(overall,tableW));
+  y=drawAgeing(x0,y,tableW,mainTitle,overall)+(many?16:24);
+
+  /* more than one party, so the page is split down the middle and each gets its own */
+  if(many){
+    var halfW=(tableW-16)/2;
+    for(var i=0;i<groups.length;i+=2){
+      var pair=groups.slice(i,i+2).map(function(g){return {party:g.party,ag:ageing(g.rows)};});
+      var tall=Math.max.apply(null,pair.map(function(q){return ageingHeight(q.ag,halfW);}));
+      need(tall);
+      var rowY=y,bottom=y;
+      pair.forEach(function(q,k){
+        var end=drawAgeing(x0+k*(halfW+16),rowY,halfW,q.party.toUpperCase(),q.ag);
+        if(end>bottom)bottom=end;
+      });
+      y=bottom+14;
+    }
+    y+=8;
+  }
+
+  /* ---------- the invoices themselves ---------- */
   function drawHead(){
-    var h=20;
+    var h=19;
     pg.fill(x0,y,tableW,h,HEADFILL);
     pg.fill(cellX(4),y,PDF_COLS[4].w,h,FLAGFILL);
     PDF_COLS.forEach(function(c,i){
-      pg.text(c.label,cellX(i)+5,y+13.5,7.5,true,SUB,'c',c.w-10);
+      pg.text(c.label.toUpperCase(),cellX(i)+5,y+12.8,6.6,true,SUB,'c',c.w-10);
       if(i)pg.line(cellX(i),y,cellX(i),y+h,RULE,.5);
     });
-    pg.line(x0,y,x0+tableW,y,RULE,.5);
-    pg.line(x0,y+h,x0+tableW,y+h,RULE,.5);
-    pg.line(x0,y,x0,y+h,RULE,.5); pg.line(x0+tableW,y,x0+tableW,y+h,RULE,.5);
+    box(pg,x0,y,tableW,h,null);
     y+=h;
   }
-  function drawTitle(party){
-    var h=24;
-    pg.fill(x0,y,tableW,h,BAND);
-    pg.text(party,x0+10,y+16,11.5,true,NAVY,'c',tableW-20);
-    pg.line(x0,y,x0+tableW,y,RULE,.5); pg.line(x0,y,x0,y+h,RULE,.5);
-    pg.line(x0+tableW,y,x0+tableW,y+h,RULE,.5);
-    y+=h;
+  function drawPartyBand(label){
+    box(pg,x0,y,tableW,23,BAND);
+    pg.text(label,x0+10,y+15.5,11,true,NAVY,'c',tableW-20);
+    y+=23;
   }
-  newPage();
-  pg.text('PI Pending Summary',x0,y+4,17,true,INK,'l',tableW);
-  if(opts.asOf)pg.text('Pending as of '+opts.asOf,x0,y+4,9,false,SUB,'r',tableW);
-  y+=18;
-  pg.line(x0,y,x0+tableW,y,RULE,1);
-  y+=20;
 
   var grand=0;
+  if(many){
+    need(34);
+    pg.text('INVOICE DETAIL BY PARTY',x0,y+9,9,true,NAVY,'l',tableW);
+    y+=13;
+    pg.line(x0,y,x0+tableW,y,NAVY,.8);
+    y+=16;
+  }
   groups.forEach(function(grp,gi){
-    if(gi>0)y+=14;
-    if(!room(24+20+18*2))newPage();
-    drawTitle(grp.party);
+    if(gi>0)y+=16;
+    /* keep the band, the headings and a useful run of rows together: a party
+       introduced by two lines at the foot of a page reads as an accident */
+    need(23+19+16*Math.min(grp.rows.length,6)+20);
+    drawPartyBand(grp.party);
     drawHead();
     var sum=0,alt=0;
     grp.rows.forEach(function(d){
-      var h=17;
-      if(!room(h+18)){ newPage(); drawTitle(grp.party+'  (continued)'); drawHead(); alt=0; }
+      var h=16;
+      if(!room(h+19)){ newPage(); drawPartyBand(grp.party+'  (continued)'); drawHead(); alt=0; }
       if(alt%2)pg.fill(x0,y,tableW,h,ZEBRA);
       pg.fill(cellX(4),y,PDF_COLS[4].w,h,FLAGFILL);
-      var vals={buyer:d.buyer||'', pi:d.pi||'',
+      var b=band(d.pendingDays);
+      var vals={buyer:upperBuyer(d.buyer), pi:d.pi||'',
         value:d.value==null?'':fmtMoney(d.value),
         date:d.date?fmtDate(d.date):'',
         days:d.pendingDays==null?'':String(d.pendingDays),
         concern:d.concern||''};
       PDF_COLS.forEach(function(c,i){
-        var pad=5,box=c.w-pad*2,t=clipText(vals[c.key],8,false,box);
-        var ax=c.al==='l'?'l':(c.al==='r'?'r':'c');
-        pg.text(t,cellX(i)+pad,y+11.5,8,false,INK,ax,box);
+        var pad=5,bw=c.w-pad*2,t=clipText(vals[c.key],7.6,false,bw);
+        /* the pending-days figure is inked in its ageing colour, which is the only
+           thread tying a single row back to the band table above it */
+        var ink=(c.key==='days'&&b!=null)?BANDS[b].pdf:INK;
+        pg.text(t,cellX(i)+pad,y+10.8,7.6,c.key==='days',ink,c.al,bw);
         if(i)pg.line(cellX(i),y,cellX(i),y+h,RULE,.5);
       });
       pg.line(x0,y+h,x0+tableW,y+h,RULE,.5);
@@ -1747,32 +2045,31 @@ function buildSummaryPdf(groups,opts){
       if(d.value!=null)sum+=d.value;
     });
     var th=20;
-    if(!room(th)){ newPage(); }
-    pg.fill(x0,y,tableW,th,HEADFILL);
-    pg.text('TOTAL -',cellX(0)+5,y+13.5,9,true,INK,'l',PDF_COLS[0].w+PDF_COLS[1].w-10);
-    pg.text(fmtMoney(Math.round(sum*100)/100),cellX(2)+5,y+13.5,9.5,true,INK,'r',PDF_COLS[2].w-10);
-    pg.line(x0,y,x0+tableW,y,RULE,.5); pg.line(x0,y+th,x0+tableW,y+th,RULE,.5);
-    pg.line(x0,y,x0,y+th,RULE,.5); pg.line(x0+tableW,y,x0+tableW,y+th,RULE,.5);
+    need(th);
+    box(pg,x0,y,tableW,th,HEADFILL);
+    pg.text('TOTAL -',cellX(0)+6,y+13.5,9,true,INK,'l',PDF_COLS[0].w+PDF_COLS[1].w-12);
+    pg.text(fmtMoney(Math.round(sum*100)/100),cellX(2)+5,y+13.5,10,true,INK,'r',PDF_COLS[2].w-10);
     pg.line(cellX(2),y,cellX(2),y+th,RULE,.5); pg.line(cellX(3),y,cellX(3),y+th,RULE,.5);
     y+=th;
     grand+=sum;
   });
-  if(groups.length>1){
-    y+=14;
-    if(!room(24))newPage();
-    pg.fill(x0,y,tableW,24,BAND);
-    pg.text('GRAND TOTAL -',cellX(0)+5,y+16,10,true,NAVY,'l',PDF_COLS[0].w+PDF_COLS[1].w-10);
-    pg.text(fmtMoney(Math.round(grand*100)/100),cellX(2)+5,y+16,11,true,NAVY,'r',PDF_COLS[2].w-10);
-    pg.line(x0,y,x0+tableW,y,RULE,.5); pg.line(x0,y+24,x0+tableW,y+24,RULE,.5);
-    pg.line(x0,y,x0,y+24,RULE,.5); pg.line(x0+tableW,y,x0+tableW,y+24,RULE,.5);
-    y+=24;
+
+  if(many){
+    y+=16;
+    need(26);
+    box(pg,x0,y,tableW,26,BAND);
+    pg.text('GRAND TOTAL -',cellX(0)+6,y+17,11,true,NAVY,'l',PDF_COLS[0].w+PDF_COLS[1].w-12);
+    pg.text(fmtMoney(Math.round(grand*100)/100),cellX(2)+5,y+17,12,true,NAVY,'r',PDF_COLS[2].w-10);
+    pg.line(cellX(2),y,cellX(2),y+26,RULE,.5); pg.line(cellX(3),y,cellX(3),y+26,RULE,.5);
+    y+=26;
   }
-  if(pages.length>1){
-    pages.forEach(function(p,i){
-      p.text('Page '+(i+1)+' of '+pages.length,x0,H-30,8,false,SUB,'r',tableW);
-    });
-  }
-  return makePdfFile(pages,W,H);
+
+  pages.forEach(function(p,i){
+    p.line(x0,H-40,x0+tableW,H-40,RULE,.5);
+    p.text('PI Pending Summary'+(asOf?'   |   as of '+asOf:''),x0,H-28,7,false,SUB,'l',tableW);
+    if(pages.length>1)p.text('Page '+(i+1)+' of '+pages.length,x0,H-28,7,false,SUB,'r',tableW);
+  });
+  return makePdfFile(pages,W,H,{title:opts.title||'PI Pending Summary',asOf:asOf});
 }
 
 /* ---- exports ---- */
@@ -1837,14 +2134,14 @@ async function download(blob,name){
 }
 async function doXlsx(){
   var name=exportBaseName()+'.xlsx',bytes;
-  try{ bytes=buildSummaryWorkbook(exportGroups()); }
+  try{ bytes=buildSummaryWorkbook(exportGroups(),{asOf:state.asOf}); }
   catch(e){ flash('The Excel file could not be built: '+(e&&e.message||e),true); return; }
   var ok=await download(new Blob([bytes],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),name);
   if(ok)toast('Saved ' + name);
 }
 async function doPdf(){
   var name=exportBaseName()+'.pdf',bytes;
-  try{ bytes=buildSummaryPdf(exportGroups(),{asOf:state.asOf}); }
+  try{ bytes=buildSummaryPdf(exportGroups(),{asOf:state.asOf,title:exportBaseName()}); }
   catch(e){ flash('The PDF could not be built: '+(e&&e.message||e),true); return; }
   var ok=await download(new Blob([bytes],{type:'application/pdf'}),name);
   if(ok)toast('Saved ' + name);
