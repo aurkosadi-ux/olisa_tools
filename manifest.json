@@ -1,7 +1,7 @@
 {
   "name": "Sadi’s Universe",
   "short_name": "Sadi’s Universe",
-  "description": "Olisa reporting tools and carton price calculator",
+  "description": "Olisa reporting tools, carton price calculator, DC Bypass bill maker and pending PI summary",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

@@ -1,0 +1,1919 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#102A6E">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<title>Pending PI Summary</title>
+
+<!-- Each page wears its own mark, so a row of tabs is readable at a glance.
+     Inline data URI on purpose: it can never 404 and needs no cache entry. -->
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'>%20<defs><linearGradient%20id='pg'%20x1='6'%20y1='4'%20x2='58'%20y2='60'%20gradientUnits='userSpaceOnUse'>%20<stop%20offset='0'%20stop-color='%23102A6E'/><stop%20offset='1'%20stop-color='%231565D8'/></linearGradient></defs>%20<rect%20width='64'%20height='64'%20rx='15'%20fill='url(%23pg)'/>%20<path%20d='M16%2012h20l12%2012v26a3%203%200%200%201-3%203H16a3%203%200%200%201-3-3V15a3%203%200%200%201%203-3z'%20fill='%23fff'%20opacity='.97'/>%20<path%20d='M36%2012l12%2012h-9a3%203%200%200%201-3-3z'%20fill='%23C9DDF7'/>%20<g%20fill='%231565D8'>%20<rect%20x='19'%20y='29'%20width='17'%20height='3'%20rx='1.5'/><rect%20x='19'%20y='36'%20width='20'%20height='3'%20rx='1.5'/><rect%20x='19'%20y='43'%20width='13'%20height='3'%20rx='1.5'/></g>%20<circle%20cx='46'%20cy='45'%20r='11'%20fill='%23F7B93E'%20stroke='%23fff'%20stroke-width='3'/>%20<path%20d='M46%2039v6l4%203'%20stroke='%23fff'%20stroke-width='3'%20stroke-linecap='round'%20fill='none'/></svg>">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+
+  /* ============================================================
+     PENDING PI SUMMARY — "Fresh Air" theme, same as Olisa Tools
+     and the DC Bypass Bill Maker. Light · aqua -> sky -> violet
+     grades · white cards · drifting washes, floating shapes,
+     animated gradient headline, marching-ants drop zone,
+     shimmering buttons.
+     ============================================================ */
+  * { box-sizing: border-box; }
+  :root {
+    --ink: #0F2540;
+    --sub: #5B6D89;
+    --line: #E5ECF5;
+    --teal: #14B8A6;
+    --sky: #38BDF8;
+    --blue: #3B82F6;
+    --violet: #8B5CF6;
+    --accent: #0EA5E9;
+    --accent-dark: #0369A1;
+    --accent-soft: #E6F6FE;
+    --grad: linear-gradient(120deg, #14B8A6 0%, #0EA5E9 45%, #6366F1 100%);
+    --amber: #f59e0b;
+    --amber-soft: #fff4dd;
+    --good: #0E9F6E;
+    --bad: #E14D4D;
+    --bad-soft: #FDECEC;
+    --flag: #FFF3B0;           /* the yellow of the Pending Days column */
+    --flagline: #F0DCAE;
+    --fresh: #0E9F6E; --mid: #C7881A; --late: #D63B58;
+    --card-shadow: 0 2px 6px rgba(15,37,64,.04), 0 24px 60px -28px rgba(14,116,233,.22);
+    --font-body: 'Outfit', 'Segoe UI', Arial, sans-serif;
+    --font-mono: 'IBM Plex Mono', Consolas, monospace;
+  }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: var(--font-body);
+    background: #F4F9FD;
+    color: var(--ink);
+    margin: 0; padding: 0; min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ---------- living background ---------- */
+  .bg-scene { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; }
+  .bg-scene .wash { position: absolute; border-radius: 50%; filter: blur(80px); opacity: .55; will-change: transform; }
+  .bg-scene .wash.w1 { width: 640px; height: 640px; left: -180px; top: -220px;
+    background: radial-gradient(circle, #B9F4E8, transparent 65%); animation: drift1 14s ease-in-out infinite alternate; }
+  .bg-scene .wash.w2 { width: 720px; height: 720px; right: -260px; top: -120px;
+    background: radial-gradient(circle, #CBE7FF, transparent 65%); animation: drift2 18s ease-in-out infinite alternate; }
+  .bg-scene .wash.w3 { width: 560px; height: 560px; left: 30%; bottom: -320px;
+    background: radial-gradient(circle, #E7DEFF, transparent 65%); animation: drift3 16s ease-in-out infinite alternate; }
+  @keyframes drift1 { to { transform: translate(140px, 100px) scale(1.15); } }
+  @keyframes drift2 { to { transform: translate(-160px, 120px) scale(.9); } }
+  @keyframes drift3 { to { transform: translate(120px, -90px) scale(1.1); } }
+
+  .bg-scene .shape { position: absolute; border-radius: 30%; border: 2.5px solid rgba(14,165,233,.18);
+    animation: bob 9s ease-in-out infinite alternate; }
+  .bg-scene .shape.ring { border-radius: 50%; border-color: rgba(20,184,166,.2); }
+  .bg-scene .shape.s1 { width: 46px; height: 46px; left: 6%; top: 34%; animation-duration: 5.5s; }
+  .bg-scene .shape.s2 { width: 26px; height: 26px; left: 12%; top: 72%; animation-duration: 7s; animation-delay: -3s; }
+  .bg-scene .shape.s3 { width: 34px; height: 34px; right: 7%; top: 28%; animation-duration: 6s; animation-delay: -5s; border-color: rgba(139,92,246,.18); }
+  .bg-scene .shape.s4 { width: 20px; height: 20px; right: 13%; top: 64%; animation-duration: 4.5s; animation-delay: -2s; }
+  .bg-scene .shape.tri { border: none; width: 0; height: 0; border-radius: 0;
+    border-left: 15px solid transparent; border-right: 15px solid transparent; border-bottom: 25px solid rgba(20,184,166,.16); }
+  .bg-scene .shape.s5 { left: 22%; top: 18%; animation-duration: 6.5s; animation-delay: -2s; }
+  .bg-scene .shape.s6 { width: 30px; height: 30px; right: 24%; bottom: 14%; animation-duration: 5s; animation-delay: -1s; border-color: rgba(99,102,241,.18); }
+  @keyframes bob { from { transform: translateY(-16px) rotate(-8deg); } to { transform: translateY(16px) rotate(10deg); } }
+
+  .bg-scene .mdot { position: absolute; width: 9px; height: 9px; border-radius: 50%;
+    background: linear-gradient(135deg, #14B8A6, #0EA5E9); opacity: .35;
+    animation: mdot-float 7s ease-in-out infinite alternate, mdot-pulse 2.6s ease-in-out infinite; }
+  .bg-scene .mdot.d1 { left: 9%;  top: 52%; animation-delay: -1s, 0s; }
+  .bg-scene .mdot.d2 { left: 30%; top: 84%; animation-delay: -3s, -.6s; background: linear-gradient(135deg,#0EA5E9,#8B5CF6); }
+  .bg-scene .mdot.d3 { right: 8%; top: 44%; animation-delay: -5s, -1.2s; }
+  .bg-scene .mdot.d4 { right: 30%; top: 8%; animation-delay: -2s, -1.8s; background: linear-gradient(135deg,#8B5CF6,#14B8A6); }
+  .bg-scene .mdot.d5 { left: 55%; top: 12%; animation-delay: -4s, -.3s; }
+  @keyframes mdot-float { from { transform: translate(-14px, -20px); } to { transform: translate(14px, 20px); } }
+  @keyframes mdot-pulse { 0%,100% { opacity: .2; } 50% { opacity: .55; } }
+
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 26px 18px 48px; position: relative; z-index: 1; }
+
+  /* ---------- app switcher ---------- */
+  .appswitch { position:sticky; top:0; z-index:9500; display:flex; gap:6px; align-items:center;
+    padding:7px 10px; background:rgba(255,255,255,.94); backdrop-filter:blur(6px);
+    border-bottom:1px solid #E5ECF5; font-family:'Outfit','Segoe UI',Arial,sans-serif; overflow-x:auto; }
+  .appswitch a { text-decoration:none; font-size:12.5px; font-weight:700; color:#5B6D89;
+    padding:5px 11px; border-radius:999px; border:1px solid transparent; white-space:nowrap; }
+  .appswitch a.on { color:#102A6E; background:#EAF2FF; border-color:#C9DDF7; }
+  .appswitch .home { margin-left:auto; font-size:12px; color:#5B6D89; }
+
+  /* ---------- hero ---------- */
+  .hero {
+    position: relative;
+    background: rgba(255,255,255,.75);
+    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    border: 1px solid rgba(255,255,255,.9);
+    border-radius: 24px;
+    padding: 34px 36px 30px;
+    margin-bottom: 22px;
+    overflow: hidden;
+    box-shadow: var(--card-shadow);
+    animation: rise .4s cubic-bezier(.2,.8,.3,1) both;
+  }
+  .hero::before {
+    content: ''; position: absolute; left: 0; right: 0; top: 0; height: 6px;
+    background: linear-gradient(90deg, #14B8A6, #0EA5E9, #6366F1, #14B8A6);
+    background-size: 300% 100%; animation: slide-grad 4s linear infinite;
+  }
+  @keyframes slide-grad { to { background-position: 300% 0; } }
+  .hero-badge {
+    display: inline-flex; align-items: center; gap: 7px;
+    background: var(--accent-soft); border: 1px solid #CBEBFC;
+    color: var(--accent-dark); font-size: 11.5px; font-weight: 700; letter-spacing: .08em;
+    padding: 6px 13px; border-radius: 999px; margin-bottom: 14px; text-transform: uppercase;
+  }
+  .hero-badge .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--teal);
+    animation: pulse-dot 1.8s ease-in-out infinite; }
+  @keyframes pulse-dot {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(20,184,166,.45); }
+    50% { box-shadow: 0 0 0 7px rgba(20,184,166,0); }
+  }
+  h1 { font-size: clamp(30px, 5vw, 46px); font-weight: 800; margin: 0 0 12px;
+       letter-spacing: -.02em; line-height: 1.05; color: var(--ink); }
+  h1 .grad {
+    background: linear-gradient(90deg, #14B8A6, #0EA5E9, #8B5CF6, #14B8A6);
+    background-size: 280% 100%;
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: transparent;
+    animation: slide-grad 5s linear infinite;
+  }
+  .hero-chips { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+  .hero-chips span {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12.5px; font-weight: 600; color: var(--ink);
+    background: #fff; border: 1px solid var(--line); border-radius: 999px; padding: 7px 14px;
+    box-shadow: 0 4px 12px -6px rgba(15,37,64,.12);
+    animation: rise .6s cubic-bezier(.2,.8,.3,1) both;
+  }
+  .hero-chips span:nth-child(1) { animation-delay: .15s; }
+  .hero-chips span:nth-child(2) { animation-delay: .25s; }
+  .hero-chips span:nth-child(3) { animation-delay: .35s; }
+  .hero-chips svg { width: 14px; height: 14px; color: var(--accent); }
+  .hero-art {
+    position: absolute; right: 34px; top: 50%; margin-top: -64px;
+    width: 128px; height: 128px;
+    animation: floaty 5s ease-in-out infinite alternate;
+    filter: drop-shadow(0 16px 22px rgba(14,116,233,.28));
+    overflow: visible;
+  }
+  @keyframes floaty { from { transform: translateY(-10px) rotate(-3deg); } to { transform: translateY(10px) rotate(3deg); } }
+  @media (max-width: 860px) { .hero-art { display: none; } }
+  @keyframes rise { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: none; } }
+
+  /* ---------- the ledger mark, animated a piece at a time ----------
+     The sheet breathes, the four ruled lines sweep out one after another like rows
+     being filled in, the gold pending-days pill pulses, and the clock keeps its own
+     time with two hands at different speeds. Nothing moves as a single flat picture.
+     transform-box: fill-box makes each piece turn about its own centre. */
+  .pi-logo .pi-sheet, .pi-logo .pi-rw, .pi-logo .pi-pill,
+  .pi-logo .pi-clock, .pi-logo .pi-hand { transform-box: fill-box; will-change: transform; }
+  .pi-logo .pi-sheet { transform-origin: 50% 50%; animation: pi-breath 4.6s ease-in-out infinite alternate; }
+  @keyframes pi-breath { from { transform: rotate(-1.1deg) scale(.988); }
+                         to   { transform: rotate(1.1deg)  scale(1.012); } }
+  .pi-logo .pi-rw { transform-origin: 0% 50%; animation: pi-fill 3.2s ease-in-out infinite; }
+  .pi-logo .w1 { animation-delay: 0s; }
+  .pi-logo .w2 { animation-delay: -.34s; }
+  .pi-logo .w3 { animation-delay: -.68s; }
+  .pi-logo .w4 { animation-delay: -1.02s; }
+  @keyframes pi-fill { 0%, 100% { transform: scaleX(.42); opacity: .35; }
+                       46%      { transform: scaleX(1);   opacity: 1; } }
+  .pi-logo .pi-pill { transform-origin: 50% 50%; animation: pi-pulse 2.2s ease-in-out infinite; }
+  @keyframes pi-pulse { 0%, 100% { transform: scale(.94); opacity: .72; }
+                        50%      { transform: scale(1.06); opacity: 1; } }
+  .pi-logo .pi-clock { transform-origin: 50% 50%; animation: pi-tick 4s ease-in-out infinite alternate; }
+  @keyframes pi-tick { from { transform: translateY(2px) scale(.97); } to { transform: translateY(-2px) scale(1.03); } }
+  /* each hand is drawn with its foot on the dial centre, so 50% 100% spins it correctly */
+  .pi-logo .pi-hand { transform-origin: 50% 100%; }
+  .pi-logo .pi-min { animation: pi-spin 4.5s linear infinite; }
+  .pi-logo .pi-hr  { animation: pi-spin 27s linear infinite; }
+  @keyframes pi-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+  /* ---------- cards ---------- */
+  .card {
+    background: #ffffff; border: 1px solid var(--line); border-radius: 18px;
+    padding: 22px 24px; margin-bottom: 18px; box-shadow: var(--card-shadow);
+    transition: transform .16s cubic-bezier(.2,.8,.3,1), box-shadow .16s;
+    animation: rise .32s cubic-bezier(.2,.8,.3,1) both;
+  }
+  .card:hover { transform: translateY(-3px);
+    box-shadow: 0 4px 10px rgba(15,37,64,.05), 0 30px 70px -28px rgba(14,116,233,.3); }
+  /* the ledger is worked in, not admired: a card that lifts the moment the pointer
+     lands on it would move the very cell you were reaching for */
+  #ledgerCard:hover { transform: none; box-shadow: var(--card-shadow); }
+  .card h2 {
+    font-size: 14px; font-weight: 800; margin: 0 0 14px; color: var(--ink);
+    display: flex; align-items: center; gap: 10px; letter-spacing: .01em; flex-wrap: wrap;
+  }
+  .card h2 .note { margin-left: auto; font-weight: 600; font-size: 12px; color: var(--sub);
+    font-family: var(--font-mono); }
+  .step-num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px; border-radius: 9px; font-size: 12.5px; font-weight: 800;
+    background: var(--grad); color: #fff; flex-shrink: 0;
+    box-shadow: 0 5px 12px -4px rgba(14,116,233,.55);
+  }
+
+  /* ---------- drop zone ---------- */
+  .drop {
+    position: relative; border: none; border-radius: 14px; padding: 30px 22px;
+    text-align: center; color: var(--sub); font-size: 13.5px; cursor: pointer;
+    background:
+      linear-gradient(#FAFDFF, #FAFDFF) padding-box,
+      repeating-linear-gradient(90deg, #9AD6F5 0 10px, transparent 10px 20px) top / 100% 2px no-repeat,
+      repeating-linear-gradient(180deg, #9AD6F5 0 10px, transparent 10px 20px) right / 2px 100% no-repeat,
+      repeating-linear-gradient(90deg, #9AD6F5 0 10px, transparent 10px 20px) bottom / 100% 2px no-repeat,
+      repeating-linear-gradient(180deg, #9AD6F5 0 10px, transparent 10px 20px) left / 2px 100% no-repeat;
+    background-color: #FAFDFF;
+    transition: background-color .2s, color .2s, transform .15s, box-shadow .25s, padding .2s;
+  }
+  .drop::before {
+    content: ''; position: absolute; inset: 0; border-radius: 14px; pointer-events: none;
+    background:
+      repeating-linear-gradient(90deg, var(--accent) 0 10px, transparent 10px 20px) top / 200% 2px no-repeat,
+      repeating-linear-gradient(180deg, var(--accent) 0 10px, transparent 10px 20px) right / 2px 200% no-repeat,
+      repeating-linear-gradient(90deg, var(--accent) 0 10px, transparent 10px 20px) bottom / 200% 2px no-repeat,
+      repeating-linear-gradient(180deg, var(--accent) 0 10px, transparent 10px 20px) left / 2px 200% no-repeat;
+    opacity: 0; transition: opacity .2s; animation: ants 1.2s linear infinite paused;
+  }
+  .drop:hover::before, .tray.drag .drop::before { opacity: 1; animation-play-state: running; }
+  @keyframes ants { to { background-position: 20px top, right 20px, -20px bottom, left -20px; } }
+  .drop svg.up { width: 32px; height: 32px; margin-bottom: 8px; color: var(--accent);
+    animation: bounce-up 1s ease-in-out infinite alternate; }
+  .drop:hover svg.up, .tray.drag .drop svg.up { animation-duration: .4s; }
+  @keyframes bounce-up { from { transform: translateY(2px); } to { transform: translateY(-6px); } }
+  .drop:hover, .tray.drag .drop {
+    background-color: var(--accent-soft); color: var(--accent-dark);
+    box-shadow: 0 0 0 5px rgba(14,165,233,.08), 0 16px 40px -16px rgba(14,165,233,.35);
+  }
+  .tray.drag .drop { transform: scale(1.012); }
+  .drop .dt { font-weight: 700; color: var(--ink); font-size: 13.5px; }
+  .drop .dd { font-size: 12.5px; margin-top: 3px; }
+  /* once invoices are in, the tray gets out of the way */
+  .tray.slim .drop { padding: 13px 16px; }
+  .tray.slim .drop svg.up { width: 20px; height: 20px; margin: 0 8px 0 0; vertical-align: -4px; animation: none; }
+  .tray.slim .drop .dd { display: none; }
+  .tray.slim .drop .dt { font-size: 12.5px; font-weight: 600; color: var(--sub); display: inline; }
+
+  /* preview of the destination, shown while the tray is empty */
+  .ghost { margin: 14px 0 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; opacity: .6; }
+  .ghost div { display: grid; grid-template-columns: 1fr 1.1fr .8fr .7fr .6fr .9fr; font-size: 11px; color: var(--sub); }
+  .ghost div span { padding: 7px 8px; border-right: 1px solid var(--line); text-align: center;
+    white-space: nowrap; overflow: hidden; }
+  .ghost div span:last-child { border-right: 0; }
+  .ghost .hd { background: #F5F9FE; font-weight: 700; }
+  .ghost .hd span:nth-child(5) { background: var(--flag); }
+  .ghost .rw span { border-top: 1px solid var(--line); height: 25px; }
+
+  .prog { height: 3px; background: #EDF3F9; border-radius: 3px; overflow: hidden; margin-top: 12px; }
+  .prog i { display: block; height: 100%; width: 0; background: var(--grad); transition: width .2s; }
+
+  /* ---------- fields ---------- */
+  label.field-label { display: block; font-size: 11.5px; color: var(--sub); margin-bottom: 6px;
+    font-weight: 700; text-transform: uppercase; letter-spacing: .07em; }
+  input[type="text"], input[type="date"], input[type="search"], select {
+    width: 100%; padding: 11px 13px; border: 1.5px solid var(--line); border-radius: 10px;
+    font-size: 13.5px; font-family: var(--font-mono); background: #fff; color: var(--ink);
+    transition: border-color .18s, box-shadow .18s;
+  }
+  select { font-family: var(--font-body); cursor: pointer; }
+  input::placeholder { color: #9FB0C6; }
+  input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 4px rgba(14,165,233,.14); }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 16px; }
+  .row > div { flex: 1; min-width: 190px; }
+
+  /* ---------- buttons ---------- */
+  button {
+    position: relative; overflow: hidden;
+    background: var(--grad); background-size: 200% 100%;
+    color: #fff; border: none; border-radius: 11px;
+    padding: 12px 22px; font-size: 13.5px; font-weight: 700; font-family: var(--font-body);
+    cursor: pointer; box-shadow: 0 8px 20px -8px rgba(14,116,233,.55);
+    transition: transform .12s, box-shadow .2s, background-position .4s, opacity .2s;
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  button::after {
+    content: ''; position: absolute; top: 0; bottom: 0; left: -60%; width: 40%;
+    background: linear-gradient(100deg, transparent, rgba(255,255,255,.45), transparent);
+    transform: skewX(-18deg); transition: left .5s ease;
+  }
+  button:hover:not(:disabled) { transform: translateY(-2px); background-position: 100% 0;
+    box-shadow: 0 14px 30px -10px rgba(14,116,233,.65); }
+  button:hover:not(:disabled)::after { left: 130%; }
+  button:active:not(:disabled) { transform: translateY(0); }
+  button:disabled { background: #E3E9F2; color: #9AA8BC; box-shadow: none; cursor: not-allowed; }
+  button:disabled::after { display: none; }
+  button svg { width: 15px; height: 15px; }
+  button.secondary { background: #fff; color: var(--accent-dark); border: 1.5px solid #C9E8FB;
+    box-shadow: 0 4px 12px -6px rgba(14,116,233,.2); }
+  button.secondary:hover:not(:disabled) { background: var(--accent-soft); }
+  button.ghost { background: #fff; color: var(--sub); border: 1px solid var(--line); box-shadow: none; }
+  button.ghost:hover:not(:disabled) { background: #F3F8FE; color: var(--ink); border-color: #C9DDF7; }
+  button.tiny { padding: 6px 12px; font-size: 12px; border-radius: 9px; box-shadow: none; }
+  button:focus-visible { outline: 3px solid rgba(14,165,233,.4); outline-offset: 2px; }
+
+  /* ---------- notices ---------- */
+  .notice { display: flex; gap: 11px; align-items: flex-start; padding: 12px 15px; border-radius: 12px;
+    font-size: 13px; margin-bottom: 14px; background: var(--amber-soft); border: 1px solid #F0DCAE;
+    color: #7a5307; line-height: 1.55; animation: rise .3s cubic-bezier(.2,.8,.3,1) both; }
+  .notice.bad { background: var(--bad-soft); border-color: #F3C2BD; color: #99271a; }
+  .notice .dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--amber); margin-top: 6px; }
+  .notice.bad .dot { background: var(--bad); }
+  .notice b { font-weight: 800; }
+  .notice ul { margin: 6px 0 0; padding-left: 18px; }
+
+  /* ---------- exposure figures ---------- */
+  .sumgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .sumgrid .s { background: linear-gradient(150deg, #F7FCFF, #F2F8FF); border: 1px solid #E4F0FB;
+    border-radius: 13px; padding: 13px 15px; }
+  .sumgrid .s .k { font-size: 10.5px; font-weight: 800; letter-spacing: .07em;
+    text-transform: uppercase; color: var(--sub); }
+  .sumgrid .s .v { font-family: var(--font-mono); font-size: 20px; font-weight: 700;
+    color: var(--ink); margin-top: 3px; }
+  .agebar { display: flex; height: 12px; border-radius: 999px; overflow: hidden; margin-top: 16px; background: #EDF3F9; }
+  .agebar i { display: block; transition: width .3s; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; color: var(--sub); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend u { width: 9px; height: 9px; border-radius: 3px; text-decoration: none; }
+
+  /* ---------- the ledger ---------- */
+  .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+  .toolbar .grow { flex: 1 1 200px; }
+  /* A sticky <thead> can only stick to its own scrolling box, and this box scrolls
+     sideways, so on a wide screen it is given a height to scroll within and the head
+     sticks to the top of it. On a phone the table just scrolls with the page —
+     a nested vertical scroller there is a trap, not a help. */
+  .scroll { overflow: auto; border: 1px solid var(--line); border-radius: 14px; }
+  @media (min-width: 900px) { .scroll { max-height: min(70vh, 720px); } }
+  table.ledger { border-collapse: collapse; width: 100%; min-width: 900px; font-size: 13px; }
+  table.ledger th, table.ledger td { border-right: 1px solid var(--line); border-bottom: 1px solid var(--line);
+    padding: 9px 11px; text-align: center; vertical-align: middle; }
+  table.ledger th:last-child, table.ledger td:last-child { border-right: 0; }
+  table.ledger tbody tr:last-child td { border-bottom: 0; }
+  table.ledger thead th { background: #F5F9FE; font-weight: 800; font-size: 10.5px; color: var(--sub);
+    text-transform: uppercase; letter-spacing: .06em; position: sticky; top: 0;
+    z-index: 10; white-space: nowrap; cursor: pointer; user-select: none; }
+  table.ledger thead th.flag { background: var(--flag); color: #7a5307; }
+  table.ledger thead th .ar { opacity: .35; font-size: 9px; margin-left: 3px; }
+  table.ledger thead th.on { color: var(--accent-dark); }
+  table.ledger thead th.on .ar { opacity: 1; }
+  table.ledger tbody tr:nth-child(even) td:not(.party) { background: #FAFCFF; }
+  table.ledger tbody tr.attn td:not(.party) { background: #FDF3F2; }
+  table.ledger tbody tr:hover td:not(.party) { background: #F1F8FE; }
+  table.ledger td.party { background: #F5F9FE; font-weight: 800; font-size: 13px; text-align: left;
+    vertical-align: top; border-right: 1.5px solid #DCE8F5; width: 165px; line-height: 1.35; padding-top: 12px; }
+  table.ledger td.party .sub { display: block; font-weight: 500; font-size: 11.5px; color: var(--sub); margin-top: 5px; }
+  table.ledger td.days { background: var(--flag); }
+  table.ledger tbody tr:nth-child(even) td.days { background: #FBEFA8; }
+  table.ledger td.val, table.ledger td.pi, table.ledger td.date, table.ledger td.days { white-space: nowrap; }
+  table.ledger td.val { text-align: right; font-weight: 700; }
+  table.ledger td.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  .daycell { display: inline-flex; align-items: center; gap: 7px; font-weight: 700; }
+  .daycell u { width: 7px; height: 7px; border-radius: 50%; text-decoration: none; flex: 0 0 auto; }
+  table.ledger tfoot td { background: #EEF5FC; font-weight: 800; border-bottom: 0; }
+  table.ledger tfoot td.val { font-size: 16px; font-family: var(--font-mono); }
+
+  /* editable cells */
+  table.ledger td.ed { cursor: text; position: relative; }
+  table.ledger td.ed:hover { box-shadow: inset 0 0 0 1.5px #C9E8FB; }
+  table.ledger td.ed.touched::after { content: ''; position: absolute; top: 4px; right: 4px;
+    width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
+  table.ledger td.miss { color: var(--bad); }
+  table.ledger td.miss::before { content: '—'; }
+  td input.cellin { width: 100%; min-width: 60px; font: inherit; font-family: var(--font-mono);
+    text-align: inherit; background: #fff; border: 1.5px solid var(--accent); border-radius: 7px;
+    padding: 5px 7px; color: var(--ink); }
+  td input.cellin.bad { border-color: var(--bad); background: var(--bad-soft); }
+
+  .rowtools { display: flex; gap: 3px; justify-content: center; opacity: .3; transition: opacity .15s; }
+  tr:hover .rowtools { opacity: 1; }
+  .rowtools button { padding: 3px 8px; font-size: 11.5px; background: #fff; color: var(--sub);
+    border: 1px solid var(--line); box-shadow: none; border-radius: 7px; }
+  .rowtools button::after { display: none; }
+  .rowtools button:hover:not(:disabled) { background: #F3F8FE; color: var(--ink); transform: none;
+    box-shadow: none; border-color: #C9DDF7; }
+  .emptyrow { padding: 34px 20px; text-align: center; color: var(--sub); font-size: 13.5px; }
+
+  /* ---------- sticky action bar ---------- */
+  .actionbar {
+    position: sticky; bottom: 12px; z-index: 40; margin-top: 20px;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    background: rgba(255,255,255,.88); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    border: 1px solid rgba(255,255,255,.95); border-radius: 16px; padding: 13px 16px;
+    box-shadow: 0 12px 34px -14px rgba(14,116,233,.42);
+  }
+  .actionbar .barstatus { flex: 1; min-width: 170px; font-size: 12px; color: var(--sub);
+    font-family: var(--font-mono); line-height: 1.5; }
+
+  .hint { font-size: 12.5px; color: var(--sub); margin-top: 14px; line-height: 1.65;
+    background: linear-gradient(120deg, #F2FBF8, #F0F7FF); border: 1px solid #E2F0F4;
+    padding: 12px 15px; border-radius: 10px; }
+  .hint b { color: var(--ink); }
+  .hint code { font-family: var(--font-mono); font-size: 12px; color: var(--accent-dark); }
+
+  /* ---------- reading drawer ---------- */
+  .drawer { position: fixed; inset: 0; z-index: 9990; display: none;
+    background: rgba(10,28,50,.55); backdrop-filter: blur(4px);
+    align-items: center; justify-content: center; padding: 22px; }
+  .drawer.on { display: flex; animation: fadein .18s ease-out; }
+  @keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+  .drawer .panel { background: #fff; border-radius: 18px; width: min(860px, 100%); max-height: 90vh;
+    display: flex; flex-direction: column; overflow: hidden;
+    box-shadow: 0 40px 90px -30px rgba(6,22,44,.6); animation: rise .22s cubic-bezier(.2,.8,.3,1) both; }
+  .drawer .top { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+  .drawer .top h3 { margin: 0; font-size: 14.5px; font-weight: 800; flex: 1; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .drawer pre { margin: 0; padding: 18px; overflow: auto; font-family: var(--font-mono);
+    font-size: 12px; line-height: 1.65; white-space: pre-wrap; word-break: break-word; color: var(--sub); }
+
+  .toast { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%) translateY(20px);
+    background: var(--ink); color: #fff; padding: 11px 20px; border-radius: 11px; font-size: 13px;
+    font-weight: 600; opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; z-index: 9995;
+    box-shadow: 0 18px 40px -18px rgba(6,22,44,.7); }
+  .toast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .hidden { display: none !important; }
+
+  footer { text-align: center; color: var(--sub); font-size: 12.5px; margin-top: 10px; padding: 20px 0 4px; }
+  footer strong { background: var(--grad); -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: transparent; font-weight: 800; }
+
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-thumb { background: #C6D6E8; border-radius: 6px; }
+  ::-webkit-scrollbar-thumb:hover { background: #A9BFD8; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  @media (max-width: 620px) {
+    .wrap { padding: 18px 13px 40px; }
+    .hero { padding: 26px 20px 24px; border-radius: 20px; }
+    .card { padding: 18px 16px; }
+    .actionbar { bottom: 8px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .001s !important; animation-delay: 0s !important;
+      transition-duration: .001s !important; }
+    .actionbar { position: static; }
+    /* freezing mid-keyframe would leave the ruled lines half drawn and the hands askew,
+       so the mark is put back to rest explicitly */
+    .pi-logo .pi-sheet, .pi-logo .pi-rw, .pi-logo .pi-pill, .pi-logo .pi-clock, .pi-logo .pi-hand {
+      transform: none !important; opacity: 1 !important;
+    }
+  }
+</style>
+</head>
+
+<body>
+<div class="appswitch">
+  <a href="olisa.html">Olisa Tools</a>
+  <a href="calculator.html">Price Calculator</a>
+  <a href="DC_Bypass_Bill.html">DC Bypass Bill</a>
+  <a href="Pending_PI_Summary.html" class="on">Pending PI Summary</a>
+  <a href="index.html" class="home">All tools</a>
+</div>
+
+<div class="bg-scene" aria-hidden="true">
+  <div class="wash w1"></div><div class="wash w2"></div><div class="wash w3"></div>
+  <div class="shape ring s1"></div><div class="shape s2"></div><div class="shape ring s3"></div>
+  <div class="shape s4"></div><div class="shape tri s5"></div><div class="shape ring s6"></div>
+  <div class="mdot d1"></div><div class="mdot d2"></div><div class="mdot d3"></div>
+  <div class="mdot d4"></div><div class="mdot d5"></div>
+</div>
+
+<div class="wrap">
+
+  <div class="hero">
+    <span class="hero-badge"><span class="dot"></span>Pending PI Summary</span>
+    <h1>Pending <span class="grad">PI Summary</span></h1>
+    <div class="hero-chips">
+      <span>Proforma invoices in</span>
+      <span>One Excel, one PDF out</span>
+      <span>Read on this device only</span>
+    </div>
+
+    <svg class="pi-logo hero-art" viewBox="0 0 512 512" role="img" aria-label="Pending PI Summary" xmlns="http://www.w3.org/2000/svg">
+      <g class="pi-sheet">
+        <path d="M124 40h180l88 88v300a28 28 0 0 1-28 28H124a28 28 0 0 1-28-28V68a28 28 0 0 1 28-28z"
+              fill="#FFFFFF" stroke="#102A6E" stroke-width="16" stroke-linejoin="round"/>
+        <path d="M304 40l88 88h-74a14 14 0 0 1-14-14z" fill="#C9DDF7" stroke="#102A6E" stroke-width="16" stroke-linejoin="round"/>
+      </g>
+      <g>
+        <rect class="pi-rw w1" x="140" y="186" width="150" height="20" rx="10" fill="#1565D8"/>
+        <rect class="pi-rw w2" x="140" y="234" width="200" height="20" rx="10" fill="#1565D8"/>
+        <rect class="pi-rw w3" x="140" y="282" width="168" height="20" rx="10" fill="#1565D8"/>
+        <rect class="pi-rw w4" x="140" y="330" width="116" height="20" rx="10" fill="#1565D8"/>
+      </g>
+      <rect class="pi-pill" x="140" y="378" width="86" height="30" rx="15" fill="#D69620"/>
+      <g class="pi-clock">
+        <circle cx="366" cy="378" r="74" fill="#D69620" stroke="#FFFFFF" stroke-width="16"/>
+        <rect class="pi-hand pi-min" x="360" y="318" width="12" height="60" rx="6" fill="#FFFFFF"/>
+        <g transform="rotate(118 366 378)"><rect class="pi-hand pi-hr" x="360" y="338" width="12" height="40" rx="6" fill="#FFFFFF"/></g>
+        <circle cx="366" cy="378" r="9" fill="#FFFFFF"/>
+      </g>
+    </svg>
+  </div>
+
+  <div class="card">
+    <h2><span class="step-num">1</span>Drop your PI PDFs<span class="note" id="trayCount"></span></h2>
+    <div class="tray" id="tray">
+      <div class="drop" id="drop">
+        <svg class="up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+        <div class="dt" id="trayTitle">Drop your PI PDFs here</div>
+        <div class="dd">Any number at once — or choose files below. Everything is read on this device; nothing is uploaded anywhere.</div>
+      </div>
+      <div class="ghost" id="ghost">
+        <div class="hd"><span>Buyer</span><span>PI</span><span>Value</span><span>PI Date</span><span>Pending</span><span>Concern Person</span></div>
+        <div class="rw"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+        <div class="rw"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+        <div class="rw"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+      </div>
+      <div class="prog"><i id="progBar"></i></div>
+    </div>
+
+    <div class="row">
+      <div>
+        <label class="field-label" for="pickFilesWrap">Add invoices</label>
+        <div id="pickFilesWrap" style="display:flex;gap:9px;flex-wrap:wrap">
+          <button class="secondary" id="pickFiles" type="button">Choose files</button>
+          <button class="ghost" id="pickFolder" type="button">Choose a folder</button>
+        </div>
+        <input type="file" id="fileIn" accept="application/pdf,.pdf" multiple class="vh">
+        <input type="file" id="dirIn" webkitdirectory directory multiple class="vh">
+      </div>
+      <div>
+        <label class="field-label" for="asof">Pending as of</label>
+        <input type="date" id="asof">
+      </div>
+      <div>
+        <label class="field-label" for="dfmt">Dates read as</label>
+        <select id="dfmt">
+          <option value="DMY" selected>Day / Month / Year</option>
+          <option value="MDY">Month / Day / Year</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <div id="notices"></div>
+
+  <div class="card" id="summary" hidden>
+    <h2><span class="step-num">2</span>What is outstanding</h2>
+    <div class="sumgrid">
+      <div class="s"><div class="k">Total pending</div><div class="v" id="figValue">$0.00</div></div>
+      <div class="s"><div class="k">Invoices</div><div class="v" id="figCount">0</div></div>
+      <div class="s"><div class="k">Oldest, in days</div><div class="v" id="figOldest">0</div></div>
+      <div class="s"><div class="k">Sitting over 60 days</div><div class="v" id="figOver60">$0.00</div></div>
+    </div>
+    <div class="agebar" id="ageBar"></div>
+    <div class="legend" id="legend"></div>
+  </div>
+
+  <div class="card" id="ledgerCard" hidden>
+    <h2><span class="step-num">3</span>The ledger<span class="note" id="filterNote"></span></h2>
+    <div class="toolbar" id="toolbar">
+      <div class="grow"><input type="search" id="search" placeholder="Filter by party, buyer, PI number or person"></div>
+      <button class="ghost tiny" id="btnAttn" type="button">Show only rows to check</button>
+      <button class="ghost tiny" id="btnAdd" type="button">Add a row by hand</button>
+    </div>
+    <div class="scroll" id="ledger">
+      <table class="ledger">
+        <thead><tr id="headRow"></tr></thead>
+        <tbody id="tbody"></tbody>
+        <tfoot id="tfoot"></tfoot>
+      </table>
+    </div>
+    <p class="hint" id="hint">
+      Every figure is read from the PDF and cross-checked against the amount written in words. Anything the tool could not
+      read with confidence is marked in red — click any cell to correct it by hand. In the Excel file, Pending Days stays a
+      live <code>=TODAY()-PI Date</code> formula, so the sheet ages itself.
+    </p>
+  </div>
+
+  <div class="actionbar" id="foot" hidden>
+    <button id="btnXlsx" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="19"/><line x1="15" y1="13" x2="9" y2="19"/>
+      </svg>Download Excel
+    </button>
+    <button class="secondary" id="btnPdf" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="14" x2="16" y2="14"/><line x1="8" y1="18" x2="13" y2="18"/>
+      </svg>Download PDF
+    </button>
+    <span class="barstatus" id="barStatus"></span>
+    <button class="ghost tiny" id="btnClear" type="button">Clear everything</button>
+  </div>
+
+  <footer>Courtesy of <strong>Sadi Mohammad</strong></footer>
+</div>
+
+<div class="drawer" id="drawer">
+  <div class="panel">
+    <div class="top"><h3 id="drawerTitle"></h3><button class="ghost tiny" id="drawerClose" type="button">Close</button></div>
+    <pre id="drawerBody"></pre>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- pdf.js READS the invoices. The copy in this repo is used when it is there and the CDN copy
+     when it is not, exactly as on the other pages, so the app still works offline. -->
+<script src="./lib/pdf.min.js"></script>
+<script>
+if (!window.pdfjsLib) {
+  document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"><\/script>');
+}
+</script>
+<script>
+/* ============================================================
+   1. EXTRACTION ENGINE   (pure text in, fields out)
+   ============================================================ */
+function normSpace(s){return String(s==null?'':s).replace(/\u00a0/g,' ').replace(/[\u2018\u2019\u201b]/g,"'").replace(/[\u201c\u201d]/g,'"').replace(/[\u2010-\u2015\u2212]/g,'-').replace(/[ \t]+/g,' ').trim();}
+function toLines(text){return String(text||'').replace(/\r\n?/g,'\n').split('\n').map(normSpace).filter(function(l){return l.length>0;});}
+function groupKey(s){return normSpace(s).toUpperCase().replace(/[^A-Z0-9]+/g,' ').replace(/\b(LTD|LIMITED|LTDS)\b/g,'LTD').replace(/\b(CO|COMPANY)\b/g,'CO').replace(/\s+/g,' ').trim();}
+
+var W_UNITS={zero:0,one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10,eleven:11,twelve:12,thirteen:13,fourteen:14,fifteen:15,sixteen:16,seventeen:17,eighteen:18,nineteen:19,twenty:20,thirty:30,forty:40,fourty:40,fifty:50,sixty:60,seventy:70,eighty:80,ninety:90};
+var W_SCALE={hundred:100,thousand:1000,million:1000000,billion:1000000000};
+function wordsToNumber(str){
+  if(!str)return null;
+  var toks=String(str).toLowerCase().replace(/[^a-z\s-]/g,' ').replace(/-/g,' ').split(/\s+/).filter(function(t){return t&&t!=='and';});
+  if(!toks.length)return null;
+  var total=0,current=0,saw=false;
+  for(var i=0;i<toks.length;i++){var t=toks[i];
+    if(W_UNITS[t]!==undefined){current+=W_UNITS[t];saw=true;}
+    else if(t==='hundred'){current=(current||1)*100;saw=true;}
+    else if(W_SCALE[t]!==undefined){total+=(current||1)*W_SCALE[t];current=0;saw=true;}
+    else return null;}
+  return saw?total+current:null;
+}
+function amountFromWords(text){
+  var lines=toLines(text);
+  for(var i=0;i<lines.length;i++){
+    var m=lines[i].match(/([A-Za-z\s\-]+?)\s*dollars?\s*(?:and)?\s*([A-Za-z\s\-]*?)\s*cents?\b/i);
+    if(!m)continue;
+    var head=m[1],cut=head.lastIndexOf(':');
+    if(cut>=0)head=head.slice(cut+1);
+    head=head.replace(/^.*\b(?:usd|us|united\s+states?|dollars?|amount|say|in\s+words?)\b\s*/i,'');
+    var whole=wordsToNumber(head);
+    if(whole===null)continue;
+    var cents=(m[2]&&m[2].trim())?wordsToNumber(m[2]):0;
+    if(cents===null||cents>99)cents=0;
+    return Math.round((whole+cents/100)*100)/100;
+  }
+  for(var j=0;j<lines.length;j++){
+    var m2=lines[j].match(/(?:dollars?\s*:)\s*([A-Za-z\s\-]+?)\s*dollars?\s*(?:only)?\s*\.?$/i);
+    if(m2){var w=wordsToNumber(m2[1]);if(w!==null)return w;}
+  }
+  return null;
+}
+function parseMoney(tok){
+  if(tok==null)return null;
+  var s=String(tok).replace(/[^\d.,\-]/g,'').trim();
+  if(!s)return null;
+  var hasC=s.indexOf(',')>=0,hasD=s.indexOf('.')>=0;
+  if(hasC&&hasD){ if(s.lastIndexOf(',')>s.lastIndexOf('.'))s=s.replace(/\./g,'').replace(',','.'); else s=s.replace(/,/g,''); }
+  else if(hasC){ var p=s.split(','),last=p[p.length-1];
+    if(p.length===2&&last.length===2)s=s.replace(',','.'); else s=s.replace(/,/g,''); }
+  var n=parseFloat(s);
+  return isFinite(n)?n:null;
+}
+function numbersIn(line){
+  var out=[],re=/-?\d[\d,]*(?:\.\d+)?|-?\.\d+/g,m;
+  while((m=re.exec(line))){var v=parseMoney(m[0]);if(v!==null)out.push(v);}
+  return out;
+}
+function amountFromDigits(text){
+  var lines=toLines(text),best=null;
+  for(var i=0;i<lines.length;i++){
+    var L=lines[i];
+    if(!/\btotals?\b/i.test(L))continue;
+    if(/\bqty\b|\bquantity\b|in\s*words?|inwords|%|allowed|pcs\s*only|carton|pieces?\s*only/i.test(L))continue;
+    if(/item\s*description|unit\s*price/i.test(L))continue;
+    var after=L.replace(/^[\s\S]*?\btotals?\b\s*[:\-]?\s*/i,'');
+    if(!after)continue;
+    if(/[A-Za-z]{2,}/.test(after.replace(/\b(usd|us|bdt|tk|taka|dollars?|only)\b/gi,'')))continue;
+    var nums=numbersIn(after);
+    if(!nums.length)continue;
+    var score=0;
+    if(/^\s*(grand\s*|net\s*|sub[\s-]*)?totals?\b/i.test(L))score+=3;
+    if(/grand\s*total/i.test(L))score+=2;
+    if(nums.length<=3)score+=1;
+    var cand={value:nums[nums.length-1],score:score,idx:i};
+    if(!best||cand.score>best.score||(cand.score===best.score&&cand.idx>best.idx))best=cand;
+  }
+  return best?best.value:null;
+}
+function amountFromLineItems(text){
+  var lines=toLines(text),sum=0,hits=0;
+  for(var i=0;i<lines.length;i++){
+    var L=lines[i];
+    if(!/\b(PIECE|PCS|PC|SET|KG|YDS|PAIR)\b/i.test(L))continue;
+    if(/\btotals?\b/i.test(L))continue;
+    var nums=numbersIn(L);
+    if(nums.length<2)continue;
+    sum+=nums[nums.length-1];hits++;
+  }
+  return hits>=2?{sum:Math.round(sum*100)/100,rows:hits}:null;
+}
+var MONTHS={jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,sept:9,oct:10,nov:11,dec:12};
+function mkDate(y,m,d){
+  if(!(m>=1&&m<=12)||!(d>=1&&d<=31))return null;
+  if(y<100)y+=y<70?2000:1900;
+  if(y<1990||y>2100)return null;
+  var dt=new Date(Date.UTC(y,m-1,d));
+  if(dt.getUTCFullYear()!==y||dt.getUTCMonth()!==m-1||dt.getUTCDate()!==d)return null;
+  return dt;
+}
+function parseDateToken(tok,order){
+  var s=normSpace(tok),m;
+  m=s.match(/^(\d{1,2})[\s\-\/.]*([A-Za-z]{3,})[\s\-\/.,]*(\d{2,4})$/);
+  if(m){var mo=MONTHS[m[2].slice(0,3).toLowerCase()];if(mo)return{date:mkDate(+m[3],mo,+m[1]),ambiguous:false};}
+  m=s.match(/^([A-Za-z]{3,})[\s\-\/.]*(\d{1,2})[\s\-\/.,]*(\d{2,4})$/);
+  if(m){var mo2=MONTHS[m[1].slice(0,3).toLowerCase()];if(mo2)return{date:mkDate(+m[3],mo2,+m[2]),ambiguous:false};}
+  m=s.match(/^(\d{4})[\-\/.](\d{1,2})[\-\/.](\d{1,2})$/);
+  if(m)return{date:mkDate(+m[1],+m[2],+m[3]),ambiguous:false};
+  m=s.match(/^(\d{1,2})[\-\/.](\d{1,2})[\-\/.](\d{2,4})$/);
+  if(m){
+    var a=+m[1],b=+m[2],y=+m[3];
+    if(a>12&&b<=12)return{date:mkDate(y,b,a),ambiguous:false};
+    if(b>12&&a<=12)return{date:mkDate(y,a,b),ambiguous:false};
+    var d=(order==='MDY')?mkDate(y,a,b):mkDate(y,b,a);
+    return{date:d,ambiguous:a!==b};
+  }
+  return{date:null,ambiguous:false};
+}
+var DATE_TOKEN='(\\d{1,2}[\\-\\/.\\s][A-Za-z]{3,}[\\-\\/.,\\s]*\\d{2,4}|[A-Za-z]{3,}[\\-\\/.\\s]*\\d{1,2}[\\-\\/.,\\s]*\\d{2,4}|\\d{4}[\\-\\/.]\\d{1,2}[\\-\\/.]\\d{1,2}|\\d{1,2}[\\-\\/.]\\d{1,2}[\\-\\/.]\\d{2,4})';
+function firstMatch(text,patterns){
+  for(var i=0;i<patterns.length;i++){
+    var m=text.match(patterns[i]);
+    if(m&&m[1]!=null){var v=normSpace(m[1]);if(v)return{value:v,rule:i};}
+  }
+  return null;
+}
+function extractPI(text){
+  var r=firstMatch(text,[
+    /\bP\.?\s?I\.?\s*(?:No|Number|#)\s*\.?\s*[:#-]?\s*([A-Za-z0-9][A-Za-z0-9\/\\.\- ]{2,40})/i,
+    /\bProforma\s*Invoice\s*(?:No|Number|#)\s*\.?\s*[:#-]?\s*([A-Za-z0-9][A-Za-z0-9\/\\.\- ]{2,40})/i,
+    /\bInvoice\s*(?:No|Number|#)\s*\.?\s*[:#-]?\s*([A-Za-z0-9][A-Za-z0-9\/\\.\- ]{2,40})/i,
+    /\b(\d{5,}\/\d{1,6}\/\d{4})\b/
+  ]);
+  if(!r)return null;
+  var v=r.value.replace(/\s*\b(date|dated|dt)\b.*$/i,'').trim().replace(/[.,;:\s]+$/,'').trim();
+  return v?{value:v}:null;
+}
+function extractDate(text,order){
+  var lines=toLines(text),tries=[];
+  for(var i=0;i<lines.length;i++){
+    if(/\bP\.?\s?I\.?\s*(No|Number|#)/i.test(lines[i])){
+      var m1=lines[i].match(new RegExp('\\b(?:date|dated|dt)\\b\\s*[:\\-]?\\s*'+DATE_TOKEN,'i'));
+      if(m1)tries.push(m1[1]);
+      else{var m1b=lines[i].match(new RegExp(DATE_TOKEN+'\\s*$'));if(m1b)tries.push(m1b[1]);}
+    }
+  }
+  var m2=text.match(new RegExp('\\b(?:date|dated)\\b\\s*[:\\-]?\\s*'+DATE_TOKEN,'i'));
+  if(m2)tries.push(m2[1]);
+  var m3=text.match(new RegExp(DATE_TOKEN));
+  if(m3)tries.push(m3[1]);
+  for(var k=0;k<tries.length;k++){
+    var p=parseDateToken(tries[k],order);
+    if(p.date)return{date:p.date,raw:normSpace(tries[k]),ambiguous:p.ambiguous};
+  }
+  return null;
+}
+function looksLikeCompany(s){
+  if(!s)return false;
+  var v=normSpace(s);
+  if(v.length<3||v.length>70)return false;
+  if(/^(name|address|proforma|invoice|factory\s*address|advising\s*bank|buyer|supplier)\b/i.test(v))return false;
+  if(/^[\d\s.,\-\/]+$/.test(v))return false;
+  return true;
+}
+function extractParty(text,rightColumnLines){
+  var lines=toLines(text);
+  if(rightColumnLines&&rightColumnLines.length){
+    for(var q=0;q<rightColumnLines.length;q++){
+      var c0=normSpace(rightColumnLines[q]).replace(/[;,]\s*$/,'');
+      if(looksLikeCompany(c0)&&!/^factory\s*\/?\s*delivery/i.test(c0))return{value:c0};
+    }
+  }
+  var m=text.match(/Factory\s*\/?\s*Delivery\s*Place\s*[:\-]\s*([^\n]+)/i);
+  if(m&&looksLikeCompany(m[1]))return{value:normSpace(m[1]).replace(/[;,]\s*$/,'')};
+  for(var i=0;i<lines.length;i++){
+    if(/Factory\s*\/?\s*Delivery\s*Place/i.test(lines[i])&&i>0){
+      var prev=lines[i-1].replace(/[;,]\s*$/,'');
+      if(looksLikeCompany(prev))return{value:prev};
+    }
+  }
+  for(var j=0;j<lines.length;j++){
+    if(/NAME\s*AND\s*ADDRESS\s*OF\s*BUYER/i.test(lines[j])){
+      for(var k=j+1;k<Math.min(j+6,lines.length);k++){
+        var cand=lines[k].replace(/[;,]\s*$/,'');
+        if(looksLikeCompany(cand))return{value:cand};
+      }
+    }
+  }
+  for(var p=0;p<lines.length;p++){
+    if(/^PROFORMA\s*INVOICE$/i.test(lines[p])){
+      var c2=(lines[p+1]||'').replace(/[;,]\s*$/,'');
+      if(looksLikeCompany(c2))return{value:c2};
+    }
+  }
+  return null;
+}
+function extractBuyer(text){
+  var lines=toLines(text);
+  for(var i=0;i<lines.length;i++){
+    var m=lines[i].match(/(?:^|\s)Buyer\s*(?:Name)?\s*[:\-]\s*(.+)$/i);
+    if(!m)continue;
+    if(/NAME\s*AND\s*ADDRESS/i.test(lines[i].slice(0,m.index+6)))continue;
+    var v=normSpace(m[1]).replace(/[;,]\s*$/,'');
+    if(v&&v.length<=70&&!/^factory/i.test(v))return{value:v};
+  }
+  return null;
+}
+function extractConcern(text){
+  var r=firstMatch(text,[
+    /Concern(?:ed)?\s*Person\s*[:\-]\s*([^\n]+)/i,
+    /Contact\s*Person\s*[:\-]\s*([^\n]+)/i,
+    /Attention\s*[:\-]\s*([^\n]+)/i,
+    /\bAttn\.?\s*[:\-]\s*([^\n]+)/i,
+    /Marketing\s*Person\s*[:\-]\s*([^\n]+)/i
+  ]);
+  if(!r)return null;
+  var v=r.value.replace(/\s*\b(ref|reference|cell|mobile|phone|email|e-mail)\b\s*[:\-].*$/i,'').replace(/[;,]\s*$/,'').trim();
+  if(v.length>60)v=v.slice(0,60).trim();
+  return v?{value:v}:null;
+}
+function extractRecord(text,opts){
+  opts=opts||{};
+  var order=opts.dateOrder||'DMY',issues=[];
+  var party=extractParty(text,opts.rightColumnLines),buyer=extractBuyer(text),pi=extractPI(text);
+  var dateRes=extractDate(text,order),concern=extractConcern(text);
+  var vWords=amountFromWords(text),vDigits=amountFromDigits(text);
+  var li=amountFromLineItems(text),vItems=li?li.sum:null;
+  var value=null,valueSource=null,confidence='low';
+  var itemTol=li?Math.max(0.5,0.01*li.rows):0.5;
+  var near=function(a,b,tol){return a!=null&&b!=null&&Math.abs(a-b)<=(tol||0.05);};
+  if(near(vWords,vDigits)){value=vDigits;valueSource='the amount in words matches the TOTAL row';confidence='high';}
+  else if(vWords!=null&&vDigits!=null){
+    if(near(vWords,vItems,itemTol)){value=vWords;valueSource='the amount in words, confirmed by the line items';confidence='medium';}
+    else if(near(vDigits,vItems,itemTol)){value=vDigits;valueSource='the TOTAL row, confirmed by the line items';confidence='medium';}
+    else{value=vWords;valueSource='the amount in words';confidence='low';
+      issues.push('The amount in words reads '+vWords.toFixed(2)+' but the TOTAL row reads '+vDigits.toFixed(2)+'. Check the value.');}
+  }
+  else if(vWords!=null){value=vWords;valueSource='the amount in words';confidence=near(vWords,vItems,itemTol)?'high':'medium';}
+  else if(vDigits!=null){value=vDigits;valueSource='the TOTAL row';confidence=near(vDigits,vItems,itemTol)?'high':'medium';}
+  else if(vItems!=null){value=vItems;valueSource='the sum of the line items';confidence='low';
+    issues.push('No TOTAL row found. The value shown is the sum of the line items.');}
+  if(!party)issues.push('Party name not found.');
+  if(!buyer)issues.push('Buyer not found.');
+  if(!pi)issues.push('PI number not found.');
+  if(!dateRes)issues.push('PI date not found.');
+  if(!concern)issues.push('Concern person not found.');
+  if(value==null)issues.push('PI value not found.');
+  if(dateRes&&dateRes.ambiguous)issues.push('The date "'+dateRes.raw+'" could be read either way. Reading it as '+(order==='MDY'?'Month/Day/Year':'Day/Month/Year')+'.');
+  if(dateRes&&dateRes.date&&dateRes.date.getTime()>Date.now()+86400000)issues.push('The PI date is in the future.');
+  return{
+    party:party?party.value:'', buyer:buyer?buyer.value:'', pi:pi?pi.value:'',
+    value:value, date:dateRes?dateRes.date:null, dateRaw:dateRes?dateRes.dateRaw||dateRes.raw:'',
+    concern:concern?concern.value:'', valueSource:valueSource, confidence:confidence, issues:issues
+  };
+}
+/* run the reader over both text renderings and keep the better answer for each field */
+function extractBest(lineText,flowText,opts){
+  var a=extractRecord(lineText,opts);
+  if(!flowText||flowText===lineText)return a;
+  var b=extractRecord(flowText,opts);
+  var rank={high:3,medium:2,low:1};
+  var out={
+    party:a.party||b.party, buyer:a.buyer||b.buyer, pi:a.pi||b.pi,
+    concern:a.concern||b.concern, date:a.date||b.date, dateRaw:a.dateRaw||b.dateRaw
+  };
+  var pick=(rank[b.confidence]>rank[a.confidence]||(a.value==null&&b.value!=null))?b:a;
+  out.value=pick.value; out.valueSource=pick.valueSource; out.confidence=pick.confidence;
+  var seen={},issues=[];
+  (pick===a?a.issues:b.issues).forEach(function(i){if(!seen[i]){seen[i]=1;issues.push(i);}});
+  ['party','buyer','pi','date','concern'].forEach(function(f){
+    var label={party:'Party name',buyer:'Buyer',pi:'PI number',date:'PI date',concern:'Concern person'}[f];
+    if(!out[f]){var msg=label+' not found.';if(!seen[msg]){seen[msg]=1;issues.push(msg);}}
+  });
+  out.issues=issues.filter(function(i){
+    if(/not found\./.test(i)){
+      var f={'Party name':'party','Buyer':'buyer','PI number':'pi','PI date':'date','Concern person':'concern'}[i.replace(' not found.','')];
+      if(f&&out[f])return false;
+    }
+    return true;
+  });
+  return out;
+}
+
+/* ============================================================
+   2. XLSX WRITER  (no library — an .xlsx is just a zip of XML)
+   ============================================================ */
+var CRC_TABLE=(function(){var t=new Int32Array(256);for(var n=0;n<256;n++){var c=n;for(var k=0;k<8;k++)c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);t[n]=c;}return t;})();
+function crc32(b){var c=-1;for(var i=0;i<b.length;i++)c=(c>>>8)^CRC_TABLE[(c^b[i])&0xFF];return (c^-1)>>>0;}
+function utf8(s){return new TextEncoder().encode(s);}
+function zipStore(files){
+  var chunks=[],central=[],offset=0;
+  function u16(v){return[v&255,(v>>8)&255];}
+  function u32(v){return[v&255,(v>>>8)&255,(v>>>16)&255,(v>>>24)&255];}
+  for(var i=0;i<files.length;i++){
+    var name=utf8(files[i].name),data=utf8(files[i].data),crc=crc32(data);
+    var local=[].concat([0x50,0x4b,0x03,0x04],u16(20),u16(0),u16(0),u16(0),u16(0),u32(crc),u32(data.length),u32(data.length),u16(name.length),u16(0));
+    chunks.push(new Uint8Array(local),name,data);
+    central.push({name:name,crc:crc,size:data.length,offset:offset});
+    offset+=local.length+name.length+data.length;
+  }
+  var cdir=[],cstart=offset;
+  for(var j=0;j<central.length;j++){
+    var e=central[j];
+    var h=[].concat([0x50,0x4b,0x01,0x02],u16(20),u16(20),u16(0),u16(0),u16(0),u16(0),u32(e.crc),u32(e.size),u32(e.size),u16(e.name.length),u16(0),u16(0),u16(0),u16(0),u32(0),u32(e.offset));
+    cdir.push(new Uint8Array(h),e.name);
+    offset+=h.length+e.name.length;
+  }
+  var end=new Uint8Array([].concat([0x50,0x4b,0x05,0x06],u16(0),u16(0),u16(central.length),u16(central.length),u32(offset-cstart),u32(cstart),u16(0)));
+  var all=chunks.concat(cdir,[end]);
+  var total=all.reduce(function(n,a){return n+a.length;},0);
+  var buf=new Uint8Array(total),p=0;
+  for(var k=0;k<all.length;k++){buf.set(all[k],p);p+=all[k].length;}
+  return buf;
+}
+function xmlEsc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&apos;').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g,'');}
+function colLetter(n){var s='';while(n>0){var m=(n-1)%26;s=String.fromCharCode(65+m)+s;n=(n-m-1)/26;}return s;}
+function excelSerial(d){return Math.round((Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate())-Date.UTC(1899,11,30))/86400000);}
+var STYLES_XML='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'+
+'<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'+
+'<numFmts count="2"><numFmt numFmtId="164" formatCode="&quot;$&quot;#,##0.00"/><numFmt numFmtId="165" formatCode="mm\\-dd\\-yy"/></numFmts>'+
+'<fonts count="4"><font><sz val="11"/><name val="Times New Roman"/></font>'+
+'<font><b/><sz val="11"/><name val="Times New Roman"/></font>'+
+'<font><b/><sz val="16"/><name val="Times New Roman"/></font>'+
+'<font><b/><sz val="14"/><color rgb="FF102A6E"/><name val="Times New Roman"/></font></fonts>'+
+'<fills count="4"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>'+
+'<fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/><bgColor indexed="64"/></patternFill></fill>'+
+'<fill><patternFill patternType="solid"><fgColor rgb="FFEAF2FF"/><bgColor indexed="64"/></patternFill></fill></fills>'+
+'<borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border>'+
+'<border><left style="thin"><color indexed="64"/></left><right style="thin"><color indexed="64"/></right>'+
+'<top style="thin"><color indexed="64"/></top><bottom style="thin"><color indexed="64"/></bottom><diagonal/></border></borders>'+
+'<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'+
+'<cellXfs count="11">'+
+'<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'+
+'<xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>'+
+'<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>'+
+'<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'+
+'<xf numFmtId="164" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'+
+'<xf numFmtId="165" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'+
+'<xf numFmtId="1" fontId="0" fillId="2" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'+
+'<xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'+
+'<xf numFmtId="164" fontId="2" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'+
+'<xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>'+
+/* 10 — the party name, sitting across the top of its block */
+'<xf numFmtId="0" fontId="3" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>'+
+'</cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>';
+function cellXml(ref,c){
+  if(!c)return '';
+  var s=c.s?' s="'+c.s+'"':'';
+  if(c.t==='f')return '<c r="'+ref+'"'+s+'><f>'+xmlEsc(c.f)+'</f>'+(c.v!=null?'<v>'+c.v+'</v>':'')+'</c>';
+  if(c.t==='n')return '<c r="'+ref+'"'+s+'><v>'+c.v+'</v></c>';
+  if(c.v===''||c.v==null)return '<c r="'+ref+'"'+s+'/>';
+  return '<c r="'+ref+'" t="inlineStr"'+s+'><is><t xml:space="preserve">'+xmlEsc(c.v)+'</t></is></c>';
+}
+/* heights is keyed by 1-based row number; a merged cell with wrapped text will not
+   auto-fit in Excel, so the party-name rows are given a height of their own. */
+function buildSheet(rows,merges,colWidths,heights){
+  heights=heights||{};
+  var xml='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'+
+  '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'+
+  '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>'+
+  '<sheetViews><sheetView workbookViewId="0" showGridLines="0"/></sheetViews><sheetFormatPr defaultRowHeight="15"/>';
+  if(colWidths&&colWidths.length){
+    xml+='<cols>';
+    for(var c=0;c<colWidths.length;c++)xml+='<col min="'+(c+1)+'" max="'+(c+1)+'" width="'+colWidths[c]+'" customWidth="1"/>';
+    xml+='</cols>';
+  }
+  xml+='<sheetData>';
+  for(var r=0;r<rows.length;r++){
+    var row=rows[r]||[],n=r+1;
+    xml+='<row r="'+n+'"'+(heights[n]?' ht="'+heights[n]+'" customHeight="1"':'')+'>';
+    for(var i=0;i<row.length;i++)if(row[i])xml+=cellXml(colLetter(i+1)+n,row[i]);
+    xml+='</row>';
+  }
+  xml+='</sheetData>';
+  if(merges&&merges.length){
+    xml+='<mergeCells count="'+merges.length+'">';
+    for(var m=0;m<merges.length;m++)xml+='<mergeCell ref="'+merges[m]+'"/>';
+    xml+='</mergeCells>';
+  }
+  /* the six columns are wider than A4 portrait, so the sheet prints landscape and
+     squeezed to one page across — otherwise Concern Person lands on a page of its own */
+  xml+='<pageMargins left="0.4" right="0.4" top="0.6" bottom="0.6" header="0.3" footer="0.3"/>'+
+       '<pageSetup paperSize="9" orientation="landscape" fitToWidth="1" fitToHeight="0"/>';
+  return xml+'</worksheet>';
+}
+function makeWorkbook(sheetName,sheetXml){
+  return zipStore([
+    {name:'[Content_Types].xml',data:'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>'},
+    {name:'_rels/.rels',data:'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'},
+    {name:'xl/workbook.xml',data:'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="'+xmlEsc(sheetName).slice(0,31)+'" sheetId="1" r:id="rId1"/></sheets><calcPr calcId="0" fullCalcOnLoad="1"/></workbook>'},
+    {name:'xl/_rels/workbook.xml.rels',data:'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'},
+    {name:'xl/styles.xml',data:STYLES_XML},
+    {name:'xl/worksheets/sheet1.xml',data:sheetXml}
+  ]);
+}
+/* Six columns now: the party name is a title band across the top of its own block
+   rather than a merged strip down column A, so the sheet reads top to bottom. */
+var COL_W=[24.00,20.00,15.00,12.50,13.50,20.00];
+function sheetTitle(groups){
+  var seen={},list=[];
+  (groups||[]).forEach(function(g){
+    var p=(g.party||'').trim();
+    if(!p||p==='(no party name)')return;
+    if(!seen[p]){seen[p]=1;list.push(p);}
+  });
+  if(list.length!==1)return 'Summary';
+  /* Excel refuses : \ / ? * [ ] in a sheet name, and caps it at 31 characters */
+  var n=list[0].replace(/[:\\\/?*\[\]]+/g,' ').replace(/\s+/g,' ').trim().slice(0,31);
+  return n||'Summary';
+}
+function buildSummaryWorkbook(groups,opts){
+  opts=opts||{};
+  var rows=[],merges=[],heights={},grand=0;
+  for(var g=0;g<groups.length;g++){
+    var grp=groups[g];
+    if(g>0)rows.push([]);
+    /* the party name, right across the width, above its own block */
+    var titleRow=rows.length+1;
+    rows.push([{t:'s',v:grp.party,s:10},{t:'s',v:'',s:10},{t:'s',v:'',s:10},
+               {t:'s',v:'',s:10},{t:'s',v:'',s:10},{t:'s',v:'',s:10}]);
+    merges.push('A'+titleRow+':F'+titleRow);
+    heights[titleRow]=24;
+    var headerRow=rows.length+1;
+    rows.push([
+      {t:'s',v:'Buyer',s:1},{t:'s',v:'PI',s:1},{t:'s',v:'Value',s:1},
+      {t:'s',v:'PI Date',s:1},{t:'s',v:'Pending Days',s:2},{t:'s',v:'Concern Person',s:1}
+    ]);
+    var sum=0;
+    for(var i=0;i<grp.rows.length;i++){
+      var d=grp.rows[i],rn=rows.length+1;
+      var dateCell=d.date?{t:'n',v:excelSerial(d.date),s:5}:{t:'s',v:'',s:3};
+      var daysCell=d.date?{t:'f',f:'TODAY()-D'+rn,v:d.pendingDays,s:6}:{t:'s',v:'',s:6};
+      rows.push([{t:'s',v:d.buyer,s:3},{t:'s',v:d.pi,s:3},
+        d.value==null?{t:'s',v:'',s:4}:{t:'n',v:d.value,s:4},dateCell,daysCell,{t:'s',v:d.concern,s:3}]);
+      if(d.value!=null)sum+=d.value;
+    }
+    var totalRow=rows.length+1,first=headerRow+1,last=totalRow-1;
+    rows.push([{t:'s',v:'TOTAL - ',s:7},{t:'s',v:'',s:7},
+      grp.rows.length?{t:'f',f:'SUM(C'+first+':C'+last+')',v:Math.round(sum*100)/100,s:8}:{t:'n',v:0,s:8},
+      null,null,null]);
+    merges.push('A'+totalRow+':B'+totalRow);
+    grand+=sum;
+  }
+  if(groups.length>1){
+    rows.push([]);
+    var gr=rows.length+1;
+    rows.push([{t:'s',v:'GRAND TOTAL - ',s:7},{t:'s',v:'',s:7},{t:'n',v:Math.round(grand*100)/100,s:8},null,null,null]);
+    merges.push('A'+gr+':B'+gr);
+  }
+  return makeWorkbook(sheetTitle(groups),buildSheet(rows,merges,COL_W,heights));
+}
+
+/* ============================================================
+   3. PDF READING
+   ============================================================ */
+/* pdf.js parses in a SEPARATE worker file. The local copy is used when it is there and the
+   CDN copy when it is not, so the page keeps working offline and on a blocked connection. */
+if(window.pdfjsLib){
+  var LOCAL_WORKER='./lib/pdf.worker.min.js';
+  var CDN_WORKER='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  try{
+    pdfjsLib.GlobalWorkerOptions.workerSrc=LOCAL_WORKER;
+    fetch(LOCAL_WORKER,{method:'HEAD'})
+      .then(function(r){ if(!r.ok)throw new Error('missing'); })
+      .catch(function(){ pdfjsLib.GlobalWorkerOptions.workerSrc=CDN_WORKER; });
+  }catch(e){ try{ pdfjsLib.GlobalWorkerOptions.workerSrc=CDN_WORKER; }catch(e2){} }
+}
+function renderPageText(items,viewport){
+  var rows=[],flow=[],lastY=null;
+  var kept=items.filter(function(it){return it.str&&it.str.trim()!=='';});
+  kept.forEach(function(it){
+    var x=it.transform[4], y=it.transform[5], h=Math.abs(it.transform[3])||10;
+    var bucket=null;
+    for(var i=0;i<rows.length;i++){ if(Math.abs(rows[i].y-y)<=Math.max(2,h*0.5)){bucket=rows[i];break;} }
+    if(!bucket){bucket={y:y,parts:[]};rows.push(bucket);}
+    bucket.parts.push({x:x,s:it.str,w:it.width||0});
+    if(lastY===null||Math.abs(lastY-y)>Math.max(2,h*0.5)){flow.push('\n');}
+    flow.push(it.str);
+    if(it.hasEOL)flow.push('\n');
+    lastY=y;
+  });
+  rows.sort(function(a,b){return b.y-a.y;});
+  var lineText=rows.map(function(r){
+    r.parts.sort(function(a,b){return a.x-b.x;});
+    var s='',prevEnd=null;
+    r.parts.forEach(function(p){
+      if(prevEnd!==null&&p.x-prevEnd>1.2)s+=' ';
+      s+=p.s; prevEnd=p.x+p.w;
+    });
+    return s;
+  }).join('\n');
+  /* the right-hand column of the header block, for the party name */
+  var rightLines=[];
+  var midX=viewport?viewport.width*0.45:300;
+  var anchorY=null,anchorX=null;
+  rows.forEach(function(r){
+    r.parts.forEach(function(p){
+      if(anchorY===null&&/ADDRESS\s*OF\s*BUYER/i.test(p.s)&&!/SUPPLIER/i.test(p.s)){anchorY=r.y;anchorX=p.x;}
+    });
+  });
+  if(anchorY===null){
+    rows.forEach(function(r){ r.parts.forEach(function(p){ if(anchorY===null&&/ADDRESS\s*OF\s*BUYER/i.test(p.s)){anchorY=r.y;} }); });
+  }
+  if(anchorY!==null){
+    var cut=(anchorX!=null&&anchorX>midX*0.5)?anchorX-6:midX;
+    rows.forEach(function(r){
+      if(r.y>=anchorY)return;
+      var right=r.parts.filter(function(p){return p.x>=cut;});
+      if(right.length)rightLines.push(right.map(function(p){return p.s;}).join(' '));
+    });
+  }
+  return {lineText:lineText, flowText:flow.join(' ').replace(/ *\n */g,'\n'), rightLines:rightLines.slice(0,8)};
+}
+async function readPdf(file){
+  var buf=await file.arrayBuffer();
+  var doc=await pdfjsLib.getDocument({data:new Uint8Array(buf),isEvalSupported:false,useSystemFonts:false}).promise;
+  var lineParts=[],flowParts=[],rightLines=[];
+  for(var p=1;p<=doc.numPages;p++){
+    var page=await doc.getPage(p);
+    var tc=await page.getTextContent();
+    var vp=page.getViewport({scale:1});
+    var out=renderPageText(tc.items,vp);
+    lineParts.push(out.lineText); flowParts.push(out.flowText);
+    if(p===1)rightLines=out.rightLines;
+    page.cleanup();
+  }
+  var pages=doc.numPages;
+  try{await doc.destroy();}catch(e){}
+  return {lineText:lineParts.join('\n'),flowText:flowParts.join('\n'),rightLines:rightLines,pages:pages};
+}
+
+/* ============================================================
+   4. STATE + UI
+   ============================================================ */
+var STORE='pi-summary-v1';
+var state={rows:[],asOf:todayISO(),dateOrder:'DMY',sort:{key:'pi',dir:1},query:'',onlyAttn:false};
+var uid=0;
+
+function todayISO(){var d=new Date();return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10);}
+function isoToUTC(iso){if(!iso)return null;var p=iso.split('-');return new Date(Date.UTC(+p[0],+p[1]-1,+p[2]));}
+function fmtDate(d){
+  if(!d)return '';
+  var mm=String(d.getUTCMonth()+1).padStart(2,'0'),dd=String(d.getUTCDate()).padStart(2,'0');
+  return dd+'/'+mm+'/'+d.getUTCFullYear();
+}
+function fmtMoney(n){
+  if(n==null)return '';
+  return '$'+n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+function pendingDays(row){
+  var base=isoToUTC(state.asOf)||isoToUTC(todayISO());
+  if(!row.date)return null;
+  return Math.round((base-row.date)/86400000);
+}
+function band(d){ if(d==null)return null; if(d<=30)return 0; if(d<=60)return 1; if(d<=90)return 2; return 3; }
+var BAND_COLOR=['var(--fresh)','var(--mid)','var(--late)','var(--late)'];
+var BAND_LABEL=['0–30 days','31–60 days','61–90 days','over 90 days'];
+function bandColor(i){ return i===3?'color-mix(in srgb,var(--late) 100%,#000 22%)':BAND_COLOR[i]; }
+
+function $(id){return document.getElementById(id);}
+function toast(msg){var t=$('toast');t.textContent=msg;t.classList.add('on');clearTimeout(t._t);t._t=setTimeout(function(){t.classList.remove('on');},2600);}
+
+function save(){
+  var pack=function(keepText){
+    return JSON.stringify({
+      asOf:state.asOf,dateOrder:state.dateOrder,
+      rows:state.rows.map(function(r){
+        return{id:r.id,party:r.party,buyer:r.buyer,pi:r.pi,value:r.value,
+          date:r.date?r.date.toISOString().slice(0,10):null,concern:r.concern,
+          file:r.file,issues:r.issues,confidence:r.confidence,valueSource:r.valueSource,
+          touched:r.touched,text:keepText?(r.text||'').slice(0,6000):''};
+      })
+    });
+  };
+  try{ localStorage.setItem(STORE,pack(true)); }
+  catch(e){
+    try{ localStorage.setItem(STORE,pack(false)); }
+    catch(e2){ /* nothing can be kept between visits; the table on screen still works */ }
+  }
+}
+function load(){
+  try{
+    var raw=localStorage.getItem(STORE);
+    if(!raw)return;
+    var d=JSON.parse(raw);
+    if(!d||!Array.isArray(d.rows))return;
+    state.asOf=d.asOf||todayISO();
+    state.dateOrder=d.dateOrder||'DMY';
+    state.rows=d.rows.map(function(r){
+      r.date=r.date?isoToUTC(r.date):null;
+      r.id=++uid;
+      r.touched=r.touched||{};
+      return r;
+    });
+  }catch(e){}
+}
+
+/* ---- ingest ---- */
+var busy=false;
+async function ingest(fileList){
+  var files=Array.prototype.slice.call(fileList||[]);
+  var pdfs=files.filter(function(f){return /\.pdf$/i.test(f.name)||f.type==='application/pdf';});
+  var skipped=files.length-pdfs.length;
+  if(!pdfs.length){
+    if(skipped)flash('Nothing added. '+skipped+' file'+(skipped>1?'s were':' was')+' not a PDF.',true);
+    return;
+  }
+  if(!window.pdfjsLib){
+    flash('The PDF reader could not load. Check the connection and reload the page, then try again.',true);
+    return;
+  }
+  busy=true; setProgress(0);
+  var added=0,replaced=0,failed=[];
+  for(var i=0;i<pdfs.length;i++){
+    var f=pdfs[i];
+    try{
+      var out=await readPdf(f);
+      var text=out.lineText;
+      var rec;
+      if(!text.replace(/\s/g,'').length){
+        rec={party:'',buyer:'',pi:'',value:null,date:null,concern:'',confidence:'low',valueSource:null,
+          issues:['This PDF has no text in it — it is a scan or an image. Type the details in by hand.']};
+      }else{
+        rec=extractBest(out.lineText,out.flowText,{dateOrder:state.dateOrder,rightColumnLines:out.rightLines});
+      }
+      rec.file=f.name; rec.text=out.lineText; rec.touched={}; rec.id=++uid;
+      var existing=state.rows.findIndex(function(r){return r.file===f.name;});
+      if(existing>=0){ rec.id=state.rows[existing].id; state.rows[existing]=rec; replaced++; }
+      else{ state.rows.push(rec); added++; }
+    }catch(err){
+      var why=(err&&err.name==='PasswordException')?'it is password protected'
+             :(err&&err.name==='InvalidPDFException')?'the file is damaged or is not really a PDF'
+             :'it could not be opened';
+      failed.push(f.name+' — '+why);
+    }
+    setProgress((i+1)/pdfs.length);
+  }
+  busy=false; setProgress(0);
+  var parts=[];
+  if(added)parts.push(added+' invoice'+(added>1?'s':'')+' added');
+  if(replaced)parts.push(replaced+' re-read');
+  if(skipped)parts.push(skipped+' non-PDF file'+(skipped>1?'s':'')+' skipped');
+  if(failed.length)parts.push(failed.length+' could not be read');
+  flash(parts.join(' · ')||'Nothing to add.',failed.length>0, failed);
+  render(); save();
+}
+function setProgress(p){
+  var b=$('progBar');
+  b.style.width=(p>0&&p<1)?Math.round(p*100)+'%':(p>=1?'100%':'0');
+  if(p===0)b.style.width='0';
+}
+
+/* ---- notices ---- */
+var flashMsg=null;
+function flash(text,bad,detail){ flashMsg={text:text,bad:!!bad,detail:detail||[]}; renderNotices(); }
+function renderNotices(){
+  var box=$('notices'); box.innerHTML='';
+  if(flashMsg){
+    var n=document.createElement('div');
+    n.className='notice'+(flashMsg.bad?' bad':'');
+    var list=flashMsg.detail.length?'<ul>'+flashMsg.detail.map(function(d){return '<li>'+esc(d)+'</li>';}).join('')+'</ul>':'';
+    n.innerHTML='<span class="dot"></span><div><b>'+esc(flashMsg.text)+'</b>'+list+'</div>';
+    box.appendChild(n);
+  }
+  var attn=state.rows.filter(rowNeedsAttention);
+  if(attn.length){
+    var reasons={};
+    attn.forEach(function(r){ (issuesFor(r)).forEach(function(i){reasons[i]=(reasons[i]||0)+1;}); });
+    var top=Object.keys(reasons).sort(function(a,b){return reasons[b]-reasons[a];}).slice(0,4);
+    var n2=document.createElement('div');
+    n2.className='notice';
+    n2.innerHTML='<span class="dot"></span><div><b>'+attn.length+' row'+(attn.length>1?'s need':' needs')+
+      ' a look before you send this on.</b><ul>'+top.map(function(t){return '<li>'+esc(t)+(reasons[t]>1?' ('+reasons[t]+' rows)':'')+'</li>';}).join('')+'</ul></div>';
+    box.appendChild(n2);
+  }
+}
+function issuesFor(r){
+  var out=(r.issues||[]).slice();
+  var dup=state.rows.filter(function(o){return o.pi&&r.pi&&o.pi===r.pi;});
+  if(dup.length>1)out.push('PI number '+r.pi+' appears more than once.');
+  return out.filter(function(i,ix,a){return a.indexOf(i)===ix;});
+}
+function rowNeedsAttention(r){
+  if(!r.party||!r.buyer||!r.pi||!r.concern||r.value==null||!r.date)return true;
+  if(issuesFor(r).length)return true;
+  return false;
+}
+function esc(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+
+/* ---- table ---- */
+var COLS=[
+  {key:'party',   label:'Party',          cls:'party'},
+  {key:'buyer',   label:'Buyer',          cls:'buyer'},
+  {key:'pi',      label:'PI',             cls:'pi mono'},
+  {key:'value',   label:'Value',          cls:'val mono'},
+  {key:'date',    label:'PI Date',        cls:'date mono'},
+  {key:'days',    label:'Pending Days',   cls:'days mono', flag:true},
+  {key:'concern', label:'Concern Person', cls:'concern'}
+];
+function visibleRows(){
+  var q=state.query.trim().toLowerCase();
+  return state.rows.filter(function(r){
+    if(state.onlyAttn&&!rowNeedsAttention(r))return false;
+    if(!q)return true;
+    return [r.party,r.buyer,r.pi,r.concern,r.file].join(' ').toLowerCase().indexOf(q)>=0;
+  });
+}
+function sortRows(rows){
+  var k=state.sort.key,dir=state.sort.dir;
+  return rows.slice().sort(function(a,b){
+    var va,vb;
+    if(k==='days'||k==='date'){ va=a.date?a.date.getTime():-Infinity; vb=b.date?b.date.getTime():-Infinity; if(k==='days'){va=-va;vb=-vb;} }
+    else if(k==='value'){ va=a.value==null?-Infinity:a.value; vb=b.value==null?-Infinity:b.value; }
+    else { va=(a[k]||'').toLowerCase(); vb=(b[k]||'').toLowerCase(); }
+    if(va<vb)return -1*dir; if(va>vb)return 1*dir; return 0;
+  });
+}
+function grouped(rows){
+  var map={},order=[];
+  rows.forEach(function(r){
+    var key=groupKey(r.party)||'\u0000';
+    if(!map[key]){map[key]={party:r.party||'(no party name)',rows:[]};order.push(key);}
+    if(!map[key].party||map[key].party==='(no party name)')map[key].party=r.party||map[key].party;
+    map[key].rows.push(r);
+  });
+  return order.map(function(k){return map[k];});
+}
+
+function render(){
+  var has=state.rows.length>0;
+  $('tray').classList.toggle('slim',has);
+  $('ghost').hidden=has;
+  $('trayTitle').textContent=has?'Drop more PI PDFs anywhere on this page':'Drop your PI PDFs here';
+  $('trayCount').textContent=has?state.rows.length+(state.rows.length>1?' invoices read':' invoice read'):'';
+  $('summary').hidden=!has; $('ledgerCard').hidden=!has; $('foot').hidden=!has;
+  $('asof').value=state.asOf; $('dfmt').value=state.dateOrder;
+  $('btnAttn').textContent=state.onlyAttn?'Show all rows':'Show only rows to check';
+  renderNotices();
+  if(!has){ $('tbody').innerHTML=''; $('tfoot').innerHTML=''; return; }
+
+  /* head */
+  var hr=$('headRow'); hr.innerHTML='';
+  COLS.forEach(function(c){
+    var th=document.createElement('th');
+    th.className=(c.flag?'flag ':'')+(state.sort.key===c.key?'on':'');
+    th.innerHTML=esc(c.label)+'<span class="ar">'+(state.sort.key===c.key?(state.sort.dir>0?'▲':'▼'):'▲')+'</span>';
+    th.tabIndex=0;
+    var go=function(){ if(state.sort.key===c.key)state.sort.dir*=-1; else{state.sort.key=c.key;state.sort.dir=1;} render(); };
+    th.onclick=go;
+    th.onkeydown=function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();go();}};
+    hr.appendChild(th);
+  });
+  var thx=document.createElement('th'); thx.textContent=''; thx.style.cursor='default'; thx.onclick=null; hr.appendChild(thx);
+
+  /* body */
+  var rows=sortRows(visibleRows());
+  var groups=grouped(rows);
+  var tb=$('tbody'); tb.innerHTML='';
+  if(!rows.length){
+    var tr0=document.createElement('tr');
+    tr0.innerHTML='<td colspan="8" class="emptyrow">No rows match that filter.</td>';
+    tb.appendChild(tr0);
+  }
+  groups.forEach(function(g){
+    var sub=g.rows.reduce(function(n,r){return n+(r.value||0);},0);
+    g.rows.forEach(function(r,i){
+      var tr=document.createElement('tr');
+      if(rowNeedsAttention(r))tr.className='attn';
+      if(i===0){
+        var tdp=document.createElement('td');
+        tdp.className='party ed'; tdp.rowSpan=g.rows.length; tdp.tabIndex=0;
+        tdp.title='Click to rename this party on all '+g.rows.length+' row'+(g.rows.length>1?'s':'');
+        tdp.innerHTML=esc(g.party)+'<span class="sub">'+g.rows.length+' PI'+(g.rows.length>1?'s':'')+'<br>'+esc(fmtMoney(sub))+'</span>';
+        var ids=g.rows.map(function(x){return x.id;});
+        var editParty=function(){ startPartyEdit(tdp,ids,g.party); };
+        tdp.onclick=editParty;
+        tdp.onkeydown=function(e){if(e.key==='Enter'){e.preventDefault();editParty();}};
+        tr.appendChild(tdp);
+      }
+      tr.appendChild(cell(r,'buyer'));
+      tr.appendChild(cell(r,'pi'));
+      tr.appendChild(cell(r,'value'));
+      tr.appendChild(cell(r,'date'));
+      tr.appendChild(daysCell(r));
+      tr.appendChild(cell(r,'concern'));
+      var tdx=document.createElement('td');
+      tdx.innerHTML='<div class="rowtools"></div>';
+      var tools=tdx.firstChild;
+      var bi=document.createElement('button'); bi.textContent='?'; bi.title='What was read from this PDF';
+      bi.onclick=function(){openDrawer(r);}; tools.appendChild(bi);
+      var bd=document.createElement('button'); bd.textContent='✕'; bd.title='Remove this row';
+      bd.onclick=function(){
+        state.rows=state.rows.filter(function(o){return o.id!==r.id;});
+        flash('Row removed.',false); render(); save();
+      };
+      tools.appendChild(bd);
+      tr.appendChild(tdx);
+      tb.appendChild(tr);
+    });
+  });
+
+  /* foot */
+  var grand=state.rows.reduce(function(n,r){return n+(r.value||0);},0);
+  var tf=$('tfoot'); tf.innerHTML='';
+  var trf=document.createElement('tr'); trf.className='grand';
+  trf.innerHTML='<td></td><td colspan="2">TOTAL —</td><td class="val mono">'+esc(fmtMoney(grand))+'</td><td colspan="4"></td>';
+  tf.appendChild(trf);
+
+  var shown=rows.length, all=state.rows.length;
+  $('filterNote').textContent=(shown===all)?'':'showing '+shown+' of '+all;
+  $('barStatus').textContent=all+(all>1?' invoices':' invoice')+' · '+fmtMoney(grand)+
+    ' · saved as “'+exportBaseName()+'”';
+
+  renderSummary();
+}
+function cell(r,key){
+  var td=document.createElement('td');
+  var col=COLS.filter(function(c){return c.key===key;})[0];
+  td.className=col.cls+' ed'+(r.touched&&r.touched[key]?' touched':'');
+  var txt = key==='value'?fmtMoney(r.value) : key==='date'?fmtDate(r.date) : (r[key]||'');
+  if(!txt){ td.classList.add('miss'); }
+  else td.textContent=txt;
+  td.tabIndex=0;
+  td.title='Click to edit';
+  var edit=function(){startEdit(td,r,key);};
+  td.onclick=edit;
+  td.onkeydown=function(e){if(e.key==='Enter'){e.preventDefault();edit();}};
+  return td;
+}
+function startPartyEdit(td,ids,current){
+  if(td.querySelector('input'))return;
+  var inp=document.createElement('input');
+  inp.className='cellin'; inp.type='text';
+  inp.value=(current==='(no party name)')?'':current;
+  inp.setAttribute('aria-label','Party name');
+  td.textContent=''; td.appendChild(inp); inp.focus(); inp.select();
+  var cancelled=false;
+  inp.onblur=function(){
+    if(cancelled)return;
+    var v=inp.value.trim();
+    state.rows.forEach(function(r){
+      if(ids.indexOf(r.id)<0)return;
+      r.party=v; r.touched=r.touched||{}; r.touched.party=true;
+      r.issues=(r.issues||[]).filter(function(i){return i!=='Party name not found.';});
+    });
+    render(); save();
+  };
+  inp.onkeydown=function(e){
+    if(e.key==='Enter'){e.preventDefault();inp.blur();}
+    if(e.key==='Escape'){cancelled=true;inp.blur();render();}
+  };
+}
+function daysCell(r){
+  var td=document.createElement('td');
+  td.className='days mono';
+  var d=pendingDays(r);
+  if(d==null){ td.className+=' miss'; return td; }
+  var b=band(d);
+  td.innerHTML='<span class="daycell"><u style="background:'+bandColor(b)+'"></u>'+d+'</span>';
+  td.title=BAND_LABEL[b]+' — counted from the PI date to '+state.asOf;
+  return td;
+}
+function startEdit(td,r,key){
+  if(td.querySelector('input'))return;
+  var raw = key==='value'?(r.value==null?'':String(r.value))
+          : key==='date'?fmtDate(r.date)
+          : (r[key]||'');
+  var inp=document.createElement('input');
+  inp.className='cellin'; inp.type='text'; inp.value=raw;
+  inp.setAttribute('aria-label','Edit '+key);
+  td.textContent=''; td.classList.remove('miss'); td.appendChild(inp);
+  inp.focus(); inp.select();
+  var cancelled=false;
+  function commit(){
+    if(cancelled)return;
+    var v=inp.value.trim();
+    if(key==='value'){
+      if(v===''){ r.value=null; }
+      else{
+        var n=parseMoney(v);
+        if(n===null){ inp.classList.add('bad'); inp.title='That is not a number'; return; }
+        r.value=Math.round(n*100)/100;
+      }
+    } else if(key==='date'){
+      if(v===''){ r.date=null; }
+      else{
+        var p=parseDateToken(v,state.dateOrder);
+        if(!p.date){ inp.classList.add('bad'); inp.title='Try 22/08/2026 or 22-Aug-2026'; return; }
+        r.date=p.date;
+      }
+    } else {
+      r[key]=v;
+    }
+    r.touched=r.touched||{}; r.touched[key]=true;
+    /* an edited field settles its own complaint */
+    r.issues=(r.issues||[]).filter(function(i){
+      var map={party:'Party name',buyer:'Buyer',pi:'PI number',date:'PI date',concern:'Concern person',value:'PI value'};
+      if(i===map[key]+' not found.')return false;
+      if(key==='value'&&/amount in words|TOTAL row|line items/i.test(i))return false;
+      if(key==='date'&&/could be read either way|in the future/i.test(i))return false;
+      return true;
+    });
+    render(); save();
+  }
+  inp.onblur=commit;
+  inp.onkeydown=function(e){
+    if(e.key==='Enter'){e.preventDefault();inp.blur();}
+    if(e.key==='Escape'){cancelled=true;inp.blur();render();}
+  };
+  inp.oninput=function(){inp.classList.remove('bad');};
+}
+function renderSummary(){
+  var rows=state.rows;
+  var total=rows.reduce(function(n,r){return n+(r.value||0);},0);
+  $('figValue').textContent=fmtMoney(total);
+  $('figCount').textContent=rows.length;
+  var days=rows.map(pendingDays).filter(function(d){return d!=null;});
+  $('figOldest').textContent=days.length?Math.max.apply(null,days):'—';
+  var buckets=[0,0,0,0],counts=[0,0,0,0];
+  rows.forEach(function(r){
+    var b=band(pendingDays(r));
+    if(b==null)return;
+    buckets[b]+=(r.value||0); counts[b]++;
+  });
+  $('figOver60').textContent=fmtMoney(buckets[2]+buckets[3]);
+  var sum=buckets.reduce(function(a,b){return a+b;},0)||1;
+  var bar=$('ageBar'); bar.innerHTML='';
+  buckets.forEach(function(v,i){
+    if(v<=0)return;
+    var el=document.createElement('i');
+    el.style.width=(v/sum*100)+'%';
+    el.style.background=bandColor(i);
+    el.title=BAND_LABEL[i]+': '+fmtMoney(v);
+    bar.appendChild(el);
+  });
+  var lg=$('legend'); lg.innerHTML='';
+  buckets.forEach(function(v,i){
+    if(!counts[i])return;
+    var s=document.createElement('span');
+    s.innerHTML='<u style="background:'+bandColor(i)+'"></u>'+BAND_LABEL[i]+' · '+counts[i]+' · '+esc(fmtMoney(v));
+    lg.appendChild(s);
+  });
+}
+function openDrawer(r){
+  $('drawerTitle').textContent=r.file||'Typed in by hand';
+  var head=[];
+  head.push('Party          '+(r.party||'— not found'));
+  head.push('Buyer          '+(r.buyer||'— not found'));
+  head.push('PI             '+(r.pi||'— not found'));
+  head.push('Value          '+(r.value==null?'— not found':fmtMoney(r.value))+(r.valueSource?'   (read from '+r.valueSource+')':''));
+  head.push('PI date        '+(r.date?fmtDate(r.date):'— not found'));
+  head.push('Pending days   '+(pendingDays(r)==null?'—':pendingDays(r))+'   (as of '+state.asOf+')');
+  head.push('Concern person '+(r.concern||'— not found'));
+  var iss=issuesFor(r);
+  if(iss.length)head.push('\nTo check:\n  • '+iss.join('\n  • '));
+  $('drawerBody').textContent=head.join('\n')+'\n\n────────  text found in the PDF  ────────\n\n'+(r.text||'(nothing)');
+  $('drawer').classList.add('on');
+}
+
+/* ============================================================
+   4b. PDF WRITER  (no library — a PDF is a handful of objects and a byte table)
+   ============================================================ */
+/* Helvetica is one of the fourteen fonts every PDF reader already has, so nothing is
+   embedded and the file stays a few kilobytes. These are its character widths in
+   thousandths of an em, which is what lets text be centred, right-aligned and clipped. */
+var HELV=[278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,278,278,584,584,584,556,1015,667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,667,778,722,667,611,722,667,944,667,667,611,278,278,278,469,556,333,556,556,500,556,556,278,556,556,222,222,500,222,833,556,556,556,556,333,500,278,556,500,722,500,500,500,334,260,334,584];
+var HELVB=[278,333,474,556,556,889,722,238,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,333,333,584,584,584,611,975,722,722,722,722,667,611,778,722,278,556,722,611,833,722,778,667,778,722,667,611,722,667,944,667,667,611,333,278,333,584,556,333,556,611,556,611,556,333,611,611,278,278,556,278,889,611,611,611,611,389,556,333,611,556,778,556,556,500,389,280,389,584];
+/* Everything is written as plain ASCII: one character, one byte, so the byte offsets in
+   the cross-reference table are simply string positions. Anything fancier is folded down. */
+function pdfAscii(s){
+  s=String(s==null?'':s)
+    .replace(/[\u2018\u2019\u201b]/g,"'").replace(/[\u201c\u201d]/g,'"')
+    .replace(/[\u2010-\u2015\u2212]/g,'-').replace(/\u2026/g,'...').replace(/\u00a0/g,' ');
+  try{ s=s.normalize('NFD').replace(/[\u0300-\u036f]/g,''); }catch(e){}
+  return s.replace(/[^\x20-\x7e]/g,'?');
+}
+function pdfEsc(s){return pdfAscii(s).replace(/\\/g,'\\\\').replace(/\(/g,'\\(').replace(/\)/g,'\\)');}
+function textWidth(s,size,bold){
+  var t=bold?HELVB:HELV,str=pdfAscii(s),w=0;
+  for(var i=0;i<str.length;i++){var c=str.charCodeAt(i)-32;w+=(c>=0&&c<t.length)?t[c]:500;}
+  return w*size/1000;
+}
+function clipText(s,size,bold,max){
+  if(textWidth(s,size,bold)<=max)return pdfAscii(s);
+  var str=pdfAscii(s);
+  while(str.length>1&&textWidth(str+'...',size,bold)>max)str=str.slice(0,-1);
+  return str.replace(/[\s,;:-]+$/,'')+'...';
+}
+/* a page being painted, in top-down coordinates — PDF counts up from the bottom, this does not */
+function Page(w,h){this.w=w;this.h=h;this.ops=[];}
+Page.prototype.fill=function(x,y,w,h,rgb){
+  this.ops.push(rgb[0]+' '+rgb[1]+' '+rgb[2]+' rg '+r2(x)+' '+r2(this.h-y-h)+' '+r2(w)+' '+r2(h)+' re f');
+};
+Page.prototype.line=function(x1,y1,x2,y2,rgb,lw){
+  this.ops.push(rgb[0]+' '+rgb[1]+' '+rgb[2]+' RG '+(lw||.5)+' w '+r2(x1)+' '+r2(this.h-y1)+' m '+r2(x2)+' '+r2(this.h-y2)+' l S');
+};
+Page.prototype.text=function(s,x,y,size,bold,rgb,align,boxW){
+  var str=pdfAscii(s);
+  if(!str)return;
+  var tx=x;
+  if(align==='c')tx=x+(boxW-textWidth(str,size,bold))/2;
+  else if(align==='r')tx=x+boxW-textWidth(str,size,bold);
+  this.ops.push('BT /'+(bold?'F2':'F1')+' '+size+' Tf '+rgb[0]+' '+rgb[1]+' '+rgb[2]+' rg '+
+    r2(tx)+' '+r2(this.h-y)+' Td ('+pdfEsc(str)+') Tj ET');
+};
+function r2(n){return Math.round(n*100)/100;}
+function makePdfFile(pages,w,h){
+  var n=pages.length,pageIds=[],contentIds=[],objs={},i;
+  for(i=0;i<n;i++){pageIds.push(5+i*2);contentIds.push(6+i*2);}
+  objs[1]='<< /Type /Catalog /Pages 2 0 R >>';
+  objs[2]='<< /Type /Pages /Kids ['+pageIds.map(function(id){return id+' 0 R';}).join(' ')+'] /Count '+n+' >>';
+  objs[3]='<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>';
+  objs[4]='<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>';
+  for(i=0;i<n;i++){
+    objs[pageIds[i]]='<< /Type /Page /Parent 2 0 R /MediaBox [0 0 '+w+' '+h+'] '+
+      '/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents '+contentIds[i]+' 0 R >>';
+    objs[contentIds[i]]={stream:pages[i].ops.join('\n')};
+  }
+  var out='%PDF-1.4\n',offsets={},maxId=4+n*2;
+  for(var id=1;id<=maxId;id++){
+    offsets[id]=out.length;
+    var o=objs[id];
+    if(o&&o.stream!==undefined)out+=id+' 0 obj\n<< /Length '+o.stream.length+' >>\nstream\n'+o.stream+'\nendstream\nendobj\n';
+    else out+=id+' 0 obj\n'+o+'\nendobj\n';
+  }
+  var xref=out.length;
+  out+='xref\n0 '+(maxId+1)+'\n0000000000 65535 f \n';
+  for(id=1;id<=maxId;id++)out+=('0000000000'+offsets[id]).slice(-10)+' 00000 n \n';
+  out+='trailer\n<< /Size '+(maxId+1)+' /Root 1 0 R >>\nstartxref\n'+xref+'\n%%EOF';
+  var bytes=new Uint8Array(out.length);
+  for(i=0;i<out.length;i++)bytes[i]=out.charCodeAt(i)&0xff;
+  return bytes;
+}
+/* the same six columns as the Excel file, laid out on A4 portrait */
+var PDF_COLS=[
+  {label:'Buyer',          w:118, al:'l', key:'buyer'},
+  {label:'PI',             w:105, al:'l', key:'pi'},
+  {label:'Value',          w: 82, al:'r', key:'value'},
+  {label:'PI Date',        w: 62, al:'c', key:'date'},
+  {label:'Pending Days',   w: 54, al:'c', key:'days'},
+  {label:'Concern Person', w: 94, al:'l', key:'concern'}
+];
+var INK=[.06,.15,.25], SUB=[.36,.43,.54], NAVY=[.06,.16,.43], WHITE=[1,1,1],
+    RULE=[.87,.90,.94], BAND=[.918,.949,1], HEADFILL=[.961,.976,.996],
+    FLAGFILL=[1,.953,.69], ZEBRA=[.98,.988,1];
+function buildSummaryPdf(groups,opts){
+  opts=opts||{};
+  var W=595,H=842,M=40,TOP=48,BOT=54;
+  var tableW=PDF_COLS.reduce(function(n,c){return n+c.w;},0);
+  var x0=M+(W-M*2-tableW)/2;
+  var pages=[],pg=null,y=0;
+  function newPage(){ pg=new Page(W,H); pages.push(pg); y=TOP; }
+  function room(h){ return y+h<=H-BOT; }
+  function cellX(i){var x=x0;for(var k=0;k<i;k++)x+=PDF_COLS[k].w;return x;}
+  function drawHead(){
+    var h=20;
+    pg.fill(x0,y,tableW,h,HEADFILL);
+    pg.fill(cellX(4),y,PDF_COLS[4].w,h,FLAGFILL);
+    PDF_COLS.forEach(function(c,i){
+      pg.text(c.label,cellX(i)+5,y+13.5,7.5,true,SUB,'c',c.w-10);
+      if(i)pg.line(cellX(i),y,cellX(i),y+h,RULE,.5);
+    });
+    pg.line(x0,y,x0+tableW,y,RULE,.5);
+    pg.line(x0,y+h,x0+tableW,y+h,RULE,.5);
+    pg.line(x0,y,x0,y+h,RULE,.5); pg.line(x0+tableW,y,x0+tableW,y+h,RULE,.5);
+    y+=h;
+  }
+  function drawTitle(party){
+    var h=24;
+    pg.fill(x0,y,tableW,h,BAND);
+    pg.text(party,x0+10,y+16,11.5,true,NAVY,'c',tableW-20);
+    pg.line(x0,y,x0+tableW,y,RULE,.5); pg.line(x0,y,x0,y+h,RULE,.5);
+    pg.line(x0+tableW,y,x0+tableW,y+h,RULE,.5);
+    y+=h;
+  }
+  newPage();
+  pg.text('PI Pending Summary',x0,y+4,17,true,INK,'l',tableW);
+  if(opts.asOf)pg.text('Pending as of '+opts.asOf,x0,y+4,9,false,SUB,'r',tableW);
+  y+=18;
+  pg.line(x0,y,x0+tableW,y,RULE,1);
+  y+=20;
+
+  var grand=0;
+  groups.forEach(function(grp,gi){
+    if(gi>0)y+=14;
+    if(!room(24+20+18*2))newPage();
+    drawTitle(grp.party);
+    drawHead();
+    var sum=0,alt=0;
+    grp.rows.forEach(function(d){
+      var h=17;
+      if(!room(h+18)){ newPage(); drawTitle(grp.party+'  (continued)'); drawHead(); alt=0; }
+      if(alt%2)pg.fill(x0,y,tableW,h,ZEBRA);
+      pg.fill(cellX(4),y,PDF_COLS[4].w,h,FLAGFILL);
+      var vals={buyer:d.buyer||'', pi:d.pi||'',
+        value:d.value==null?'':fmtMoney(d.value),
+        date:d.date?fmtDate(d.date):'',
+        days:d.pendingDays==null?'':String(d.pendingDays),
+        concern:d.concern||''};
+      PDF_COLS.forEach(function(c,i){
+        var pad=5,box=c.w-pad*2,t=clipText(vals[c.key],8,false,box);
+        var ax=c.al==='l'?'l':(c.al==='r'?'r':'c');
+        pg.text(t,cellX(i)+pad,y+11.5,8,false,INK,ax,box);
+        if(i)pg.line(cellX(i),y,cellX(i),y+h,RULE,.5);
+      });
+      pg.line(x0,y+h,x0+tableW,y+h,RULE,.5);
+      pg.line(x0,y,x0,y+h,RULE,.5); pg.line(x0+tableW,y,x0+tableW,y+h,RULE,.5);
+      y+=h; alt++;
+      if(d.value!=null)sum+=d.value;
+    });
+    var th=20;
+    if(!room(th)){ newPage(); }
+    pg.fill(x0,y,tableW,th,HEADFILL);
+    pg.text('TOTAL -',cellX(0)+5,y+13.5,9,true,INK,'l',PDF_COLS[0].w+PDF_COLS[1].w-10);
+    pg.text(fmtMoney(Math.round(sum*100)/100),cellX(2)+5,y+13.5,9.5,true,INK,'r',PDF_COLS[2].w-10);
+    pg.line(x0,y,x0+tableW,y,RULE,.5); pg.line(x0,y+th,x0+tableW,y+th,RULE,.5);
+    pg.line(x0,y,x0,y+th,RULE,.5); pg.line(x0+tableW,y,x0+tableW,y+th,RULE,.5);
+    pg.line(cellX(2),y,cellX(2),y+th,RULE,.5); pg.line(cellX(3),y,cellX(3),y+th,RULE,.5);
+    y+=th;
+    grand+=sum;
+  });
+  if(groups.length>1){
+    y+=14;
+    if(!room(24))newPage();
+    pg.fill(x0,y,tableW,24,BAND);
+    pg.text('GRAND TOTAL -',cellX(0)+5,y+16,10,true,NAVY,'l',PDF_COLS[0].w+PDF_COLS[1].w-10);
+    pg.text(fmtMoney(Math.round(grand*100)/100),cellX(2)+5,y+16,11,true,NAVY,'r',PDF_COLS[2].w-10);
+    pg.line(x0,y,x0+tableW,y,RULE,.5); pg.line(x0,y+24,x0+tableW,y+24,RULE,.5);
+    pg.line(x0,y,x0,y+24,RULE,.5); pg.line(x0+tableW,y,x0+tableW,y+24,RULE,.5);
+    y+=24;
+  }
+  if(pages.length>1){
+    pages.forEach(function(p,i){
+      p.text('Page '+(i+1)+' of '+pages.length,x0,H-30,8,false,SUB,'r',tableW);
+    });
+  }
+  return makePdfFile(pages,W,H);
+}
+
+/* ---- exports ---- */
+function exportGroups(){
+  var rows=sortRows(state.rows);
+  return grouped(rows).map(function(g){
+    return {party:g.party,rows:g.rows.map(function(r){
+      return {buyer:r.buyer,pi:r.pi,value:r.value,date:r.date,concern:r.concern,pendingDays:pendingDays(r)};
+    })};
+  });
+}
+/* Both files are named after the party: "A One Polar - PI Pending Summary.xlsx".
+   A colon is what Windows and macOS refuse in a file name — the browser would swap it
+   for an underscore behind your back — so the separator is a dash. */
+function safeFileName(s){
+  return String(s==null?'':s).replace(/[\\\/:*?"<>|\u0000-\u001f]+/g,' ').replace(/\s+/g,' ').trim().slice(0,90);
+}
+function exportBaseName(){
+  var seen={},list=[];
+  exportGroups().forEach(function(g){
+    var p=(g.party||'').trim();
+    if(!p||p==='(no party name)')return;
+    if(!seen[p]){seen[p]=1;list.push(p);}
+  });
+  if(list.length===1){
+    var n=safeFileName(list[0]);
+    if(n)return n+' - PI Pending Summary';
+  }
+  return 'PI Pending Summary';
+}
+var savedCap,capAsked=false;
+function inViewer(){return !!(window.claude&&typeof window.claude.use==='function');}
+async function saveCap(){
+  if(capAsked)return savedCap;
+  capAsked=true;
+  try{ savedCap=inViewer()?await window.claude.use('downloads'):null; }catch(e){ savedCap=null; }
+  return savedCap;
+}
+async function download(blob,name){
+  var cap=await saveCap();
+  if(cap){
+    try{ await cap.save({filename:name,data:blob}); return true; }
+    catch(err){
+      var code=err&&err.code;
+      if(code==='declined')return false;
+      if(code==='rate_limited'){flash('A save prompt is already open. Try again in a moment.',true);return false;}
+      if(code==='too_large'){flash('That file is too big to save here. Filter to fewer rows and try again.',true);return false;}
+      if(code==='rejected_extension'||code==='extension_not_enabled'){
+        flash('This view will not save .'+name.split('.').pop()+' files. Open the page in a browser tab and download it there.',true);return false;}
+      flash('The file could not be saved. Open the page in a browser tab and download it there.',true); return false;
+    }
+  }
+  if(inViewer()){
+    flash('Saving files is switched off in this view. Open the page in a browser tab to download.',true);
+    return false;
+  }
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a');
+  a.href=url; a.download=name; document.body.appendChild(a); a.click();
+  setTimeout(function(){URL.revokeObjectURL(url);a.remove();},1500);
+  return true;
+}
+async function doXlsx(){
+  var name=exportBaseName()+'.xlsx',bytes;
+  try{ bytes=buildSummaryWorkbook(exportGroups()); }
+  catch(e){ flash('The Excel file could not be built: '+(e&&e.message||e),true); return; }
+  var ok=await download(new Blob([bytes],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),name);
+  if(ok)toast('Saved ' + name);
+}
+async function doPdf(){
+  var name=exportBaseName()+'.pdf',bytes;
+  try{ bytes=buildSummaryPdf(exportGroups(),{asOf:state.asOf}); }
+  catch(e){ flash('The PDF could not be built: '+(e&&e.message||e),true); return; }
+  var ok=await download(new Blob([bytes],{type:'application/pdf'}),name);
+  if(ok)toast('Saved ' + name);
+}
+
+/* ============================================================
+   5. WIRING
+   ============================================================ */
+load();
+if(!state.asOf)state.asOf=todayISO();
+
+$('drop').onclick=function(){$('fileIn').click();};
+$('pickFiles').onclick=function(e){e.stopPropagation();$('fileIn').click();};
+$('pickFolder').onclick=function(){$('dirIn').click();};
+$('fileIn').onchange=function(e){ingest(e.target.files);e.target.value='';};
+$('dirIn').onchange=function(e){ingest(e.target.files);e.target.value='';};
+
+var dragDepth=0;
+['dragenter','dragover'].forEach(function(ev){
+  document.addEventListener(ev,function(e){
+    if(!e.dataTransfer||Array.prototype.indexOf.call(e.dataTransfer.types||[],'Files')<0)return;
+    e.preventDefault();
+    if(ev==='dragenter')dragDepth++;
+    $('tray').classList.add('drag');
+  });
+});
+document.addEventListener('dragleave',function(){ dragDepth=Math.max(0,dragDepth-1); if(!dragDepth)$('tray').classList.remove('drag'); });
+document.addEventListener('drop',function(e){
+  if(!e.dataTransfer)return;
+  e.preventDefault(); dragDepth=0; $('tray').classList.remove('drag');
+  if(e.dataTransfer.files&&e.dataTransfer.files.length)ingest(e.dataTransfer.files);
+});
+
+$('asof').onchange=function(e){ state.asOf=e.target.value||todayISO(); render(); save(); };
+$('dfmt').onchange=function(e){
+  state.dateOrder=e.target.value;
+  var n=0;
+  state.rows.forEach(function(r){
+    if(r.touched&&r.touched.date)return;
+    if(!r.text)return;
+    var d=extractDate(r.text,state.dateOrder);
+    if(d&&d.date&&(!r.date||d.date.getTime()!==r.date.getTime())){r.date=d.date;n++;}
+  });
+  flash(n?n+' date'+(n>1?'s':'')+' re-read as '+(state.dateOrder==='MDY'?'Month/Day/Year':'Day/Month/Year')+'.':'No dates changed.',false);
+  render(); save();
+};
+$('search').oninput=function(e){state.query=e.target.value;render();};
+$('btnAttn').onclick=function(){state.onlyAttn=!state.onlyAttn;render();};
+$('btnAdd').onclick=function(){
+  state.rows.push({id:++uid,party:state.rows.length?state.rows[state.rows.length-1].party:'',buyer:'',pi:'',value:null,date:null,
+    concern:state.rows.length?state.rows[state.rows.length-1].concern:'',file:'',issues:[],confidence:'low',touched:{},text:''});
+  render(); save();
+  var last=$('tbody').lastElementChild;
+  if(last)last.scrollIntoView({block:'center',behavior:'smooth'});
+};
+$('btnXlsx').onclick=doXlsx;
+$('btnPdf').onclick=doPdf;
+$('btnClear').onclick=function(){
+  if(!state.rows.length)return;
+  if(!confirm('Remove all '+state.rows.length+' rows? This cannot be undone.'))return;
+  state.rows=[]; flashMsg=null; try{localStorage.removeItem(STORE);}catch(e){}
+  render();
+};
+$('drawerClose').onclick=function(){$('drawer').classList.remove('on');};
+$('drawer').onclick=function(e){if(e.target===$('drawer'))$('drawer').classList.remove('on');};
+document.addEventListener('keydown',function(e){if(e.key==='Escape')$('drawer').classList.remove('on');});
+window.addEventListener('beforeunload',function(e){ if(busy){e.preventDefault();e.returnValue='';} });
+
+render();
+</script>
+</body>
+</html>

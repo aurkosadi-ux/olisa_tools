@@ -599,7 +599,7 @@
 
   .appswitch { position:sticky; top:0; z-index:9500; display:flex; gap:6px; align-items:center;
     padding:7px 10px; background:rgba(255,255,255,.94); backdrop-filter:blur(6px);
-    border-bottom:1px solid #E5ECF5; font-family:'Outfit','Segoe UI',Arial,sans-serif; }
+    border-bottom:1px solid #E5ECF5; font-family:'Outfit','Segoe UI',Arial,sans-serif; overflow-x:auto; }
   .appswitch a { text-decoration:none; font-size:12.5px; font-weight:700; color:#5B6D89;
     padding:5px 11px; border-radius:999px; border:1px solid transparent; white-space:nowrap; }
   .appswitch a.on { color:#102A6E; background:#EAF2FF; border-color:#C9DDF7; }
@@ -906,6 +906,7 @@
   <a href="olisa.html" class="on">Olisa Tools</a>
   <a href="calculator.html">Price Calculator</a>
   <a href="DC_Bypass_Bill.html">DC Bypass Bill</a>
+  <a href="Pending_PI_Summary.html">Pending PI Summary</a>
   <a href="index.html" class="home">All tools</a>
 </div>
 <script>
@@ -1259,7 +1260,7 @@ function switchTab(which) {
 // immediately, so the whole script threw on load. Evaluation stopped there, which meant every
 // `let` below it never initialised either, and the first thing to notice was an unrelated
 // "cannot access 'piIndex' before initialization". One misplaced constant, entire tool dead.
-const APP_VERSION = 131;
+const APP_VERSION = 132;
 // ==================== WHAT KIND OF CARTON IS THIS LINE? ====================
 // This lived inside the Undelivered Report's IIFE, so the Ask tab could not reach it and simply
 // printed the Master File's Item column as-is. That column says "Master Carton" on punch lines
