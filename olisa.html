@@ -1260,7 +1260,7 @@ function switchTab(which) {
 // immediately, so the whole script threw on load. Evaluation stopped there, which meant every
 // `let` below it never initialised either, and the first thing to notice was an unrelated
 // "cannot access 'piIndex' before initialization". One misplaced constant, entire tool dead.
-const APP_VERSION = 133;
+const APP_VERSION = 134;
 // ==================== WHAT KIND OF CARTON IS THIS LINE? ====================
 // This lived inside the Undelivered Report's IIFE, so the Ask tab could not reach it and simply
 // printed the Master File's Item column as-is. That column says "Master Carton" on punch lines
@@ -2969,9 +2969,15 @@ let piIndexBuiltAt = null; // when the CURRENT in-memory PI index was produced (
 let piIndexPartial = false;
 // Load acceptances first, then re-apply them if the Master File is already in memory (the two
 // load independently, and without this a refresh could briefly show settled lines as outstanding).
-loadRemarkOverrides();
-loadAcceptedShorts().then(() => {
-  if (allRecords.length && Object.keys(acceptedShorts).length) { reconcileManualChallans(); }
+// Both overlays, not just acceptances: remark edits were loaded with nothing re-applying them, so a
+// Master File that finished loading first showed Olisa's wording until the next reconcile.
+// The recorded undos load with them: until they are in, a load could re-link an undone settlement,
+// and the repair pass below is what removes it again.
+Promise.all([loadRemarkOverrides(), loadAcceptedShorts(), loadOverlayUndos()]).then(() => {
+  if (!allRecords.length) return;
+  if (!Object.keys(remarkOverrides).length && !Object.keys(acceptedShorts).length) return;
+  repairOverlayKeys();
+  reconcileManualChallans();
 });
 (async function initPiIndex() {
   try {
@@ -3112,56 +3118,83 @@ function showShortageList() {
     // Ask-tab filters (PI range / Manual Challan) are applied AFTERWARDS — they only decide which
     // outstanding lines get listed, never which manual challans count.
     const shortRecords = allRecords.filter(r => effectiveShort(r) < 0);
-    if (!shortRecords.length) {
+    // Settled lines are worked out BEFORE any early exit. Their table is the only place an
+    // acceptance can be undone, and this view used to return early whenever nothing was left
+    // outstanding — so settling the LAST short by mistake (in the whole file, or just inside the PI
+    // range) hid the Undo button at exactly the moment it was needed. Every branch now ends in it.
+    const acceptedAll = allRecords.filter(r => r.accepted);
+    if (!shortRecords.length && !acceptedAll.length) {
       addBubble(`No outstanding shortage lines in the Master File — every short has been re-delivered.`, 'askA');
       return;
     }
     const filterDesc = activeFilterDesc();
     const shortRecordsInScope = applyAskFilters(shortRecords);
-    if (!shortRecordsInScope.length) {
-      const noPi = shortRecords.filter(r => !isFinite(parseFloat(r.piRef))).length;
-      let msg = `No outstanding shortage lines fall inside the active filter (<b>${escHtml(filterDesc || 'none')}</b>). `;
-      msg += `The Master File has ${shortRecords.length} outstanding short line(s) in total.`;
-      if (noPi) msg += `<br><span class="sub-note">Note: ${noPi} of those line(s) carry a blank or <b>#N/A</b> PI Ref, so they can never fall inside a PI range — clear the PI boxes to see them.</span>`;
-      addBubble(msg, 'askA');
-      return;
-    }
+    const acceptedInScope = applyAskFilters(acceptedAll);
+    const acceptedHidden = acceptedAll.length - acceptedInScope.length;
     const hiddenCount = shortRecords.length - shortRecordsInScope.length;
-    // Accepted lines are no longer outstanding, so they drop out of shortRecords — but they must
-    // stay visible and reversible, otherwise a mistaken acceptance becomes invisible forever.
-    const acceptedInScope = applyAskFilters(allRecords.filter(r => r.accepted));
     const sorted = [...shortRecordsInScope].sort((a, b) => (Number(b.piRef) || 0) - (Number(a.piRef) || 0));
     const totalShort = sorted.reduce((s, r) => s + effectiveShort(r), 0);
 
-    let html = `<div class="summary-line">Shortage list — ${sorted.length} outstanding line(s), total short ${Math.abs(totalShort)} pcs`;
-    if (filterDesc) html += ` <span class="sub-note">(filter: ${escHtml(filterDesc)}${hiddenCount ? ` — ${hiddenCount} further outstanding line(s) hidden by this filter` : ''})</span>`;
-    html += `</div>`;
-    html += `<div class="previewbox" style="margin-top:8px;max-height:400px;"><table class="preview"><tr><th>PI Ref</th><th>Inv. Date</th><th>Style</th><th>Item</th><th>Measurement</th><th>Del Qty</th><th>Rec Qty</th><th>Short&Exs</th><th>Challan No</th><th>Challan Date</th><th>Remarks</th><th>Settled?</th></tr>`;
-    sorted.slice(0, MAX_TABLE_ROWS).forEach(r => {
-      const piCell = (r.piRef !== null && r.piRef !== undefined && r.piRef !== '') ? `<a href="#" class="pi-link" data-pi="${r.piRef}">${r.piRef}</a>` : '';
-      const outstanding = effectiveShort(r);
-      const act = `<button class="secondary acc-btn" data-k="${escHtml(acceptKey(r))}" style="padding:4px 9px;font-size:11.5px;white-space:nowrap;">Mark accepted</button>`;
-      html += `<tr class="${rowClass(r)}"><td>${piCell}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(itemLabel(r))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${escHtml(String(r.delQty ?? ''))}</td><td>${escHtml(String(r.recQty ?? ''))}</td><td>${outstanding}</td><td>${challanCell(r)}</td><td>${escHtml(String(r.challanDate ?? ''))}</td>${remarkCell(r)}<td>${act}</td></tr>`;
-    });
-    html += tableCapNote(Math.min(sorted.length, MAX_TABLE_ROWS), sorted.length);
-    html += `</table></div>`;
+    let html = '';
+    if (!shortRecords.length) {
+      // Nothing outstanding anywhere — but part of that is by agreement, not by re-delivery, so
+      // "every short has been re-delivered" would be untrue here.
+      html += `<div class="summary-line">No outstanding shortage lines — every short has been re-delivered or settled by agreement.`;
+      if (filterDesc) html += ` <span class="sub-note">(filter: ${escHtml(filterDesc)})</span>`;
+      html += `</div>`;
+    } else if (!sorted.length) {
+      const noPi = shortRecords.filter(r => !isFinite(parseFloat(r.piRef))).length;
+      html += `<div>No outstanding shortage lines fall inside the active filter (<b>${escHtml(filterDesc || 'none')}</b>). `;
+      html += `The Master File has ${shortRecords.length} outstanding short line(s) in total.`;
+      if (noPi) html += `<br><span class="sub-note">Note: ${noPi} of those line(s) carry a blank or <b>#N/A</b> PI Ref, so they can never fall inside a PI range — clear the PI boxes to see them.</span>`;
+      html += `</div>`;
+    } else {
+      html += `<div class="summary-line">Shortage list — ${sorted.length} outstanding line(s), total short ${Math.abs(totalShort)} pcs`;
+      if (filterDesc) html += ` <span class="sub-note">(filter: ${escHtml(filterDesc)}${hiddenCount ? ` — ${hiddenCount} further outstanding line(s) hidden by this filter` : ''})</span>`;
+      html += `</div>`;
+      html += `<div class="previewbox" style="margin-top:8px;max-height:400px;"><table class="preview"><tr><th>PI Ref</th><th>Inv. Date</th><th>Style</th><th>Item</th><th>Measurement</th><th>Del Qty</th><th>Rec Qty</th><th>Short&Exs</th><th>Challan No</th><th>Challan Date</th><th>Remarks</th><th>Settled?</th></tr>`;
+      sorted.slice(0, MAX_TABLE_ROWS).forEach(r => {
+        const piCell = (r.piRef !== null && r.piRef !== undefined && r.piRef !== '') ? `<a href="#" class="pi-link" data-pi="${escHtml(String(r.piRef))}">${escHtml(String(r.piRef))}</a>` : '';
+        const outstanding = effectiveShort(r);
+        const act = `<button class="secondary acc-btn" data-k="${escHtml(acceptKey(r))}" style="padding:4px 9px;font-size:11.5px;white-space:nowrap;">Mark accepted</button>`;
+        html += `<tr class="${rowClass(r)}"><td>${piCell}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(itemLabel(r))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${escHtml(String(r.delQty ?? ''))}</td><td>${escHtml(String(r.recQty ?? ''))}</td><td>${outstanding}</td><td>${challanCell(r)}</td><td>${escHtml(String(r.challanDate ?? ''))}</td>${remarkCell(r)}<td>${act}</td></tr>`;
+      });
+      html += tableCapNote(Math.min(sorted.length, MAX_TABLE_ROWS), sorted.length);
+      html += `</table></div>`;
+    }
     if (acceptedInScope.length) {
-      html += `<div class="summary-line" style="margin-top:14px;">Settled by agreement — ${acceptedInScope.length} line(s), ${Math.abs(acceptedInScope.reduce((s, r) => s + (r.short || 0), 0))} pcs no longer claimed</div>`;
+      // Newest settlement first: a line settled by mistake is the one just done, so it sits at the
+      // top instead of somewhere in Master File order.
+      const settled = [...acceptedInScope].sort((a, b) =>
+        ((b.accepted.at || 0) - (a.accepted.at || 0)) || ((Number(b.piRef) || 0) - (Number(a.piRef) || 0)));
+      html += `<div class="summary-line" style="margin-top:14px;">Settled by agreement — ${settled.length} line(s), ${Math.abs(settled.reduce((s, r) => s + (r.short || 0), 0))} pcs no longer claimed`;
+      if (acceptedHidden) html += ` <span class="sub-note">(${acceptedHidden} more settled line(s) outside this filter)</span>`;
+      html += `</div>`;
       html += `<div class="previewbox" style="margin-top:6px;max-height:260px;"><table class="preview"><tr><th>PI Ref</th><th>Inv. Date</th><th>Style</th><th>Item</th><th>Measurement</th><th>Original Short</th><th>Challan No</th><th>Accepted because</th><th></th></tr>`;
-      acceptedInScope.slice(0, MAX_TABLE_ROWS).forEach(r => {
-        const piCell = (r.piRef !== null && r.piRef !== undefined && r.piRef !== '') ? `<a href="#" class="pi-link" data-pi="${r.piRef}">${r.piRef}</a>` : '';
+      settled.slice(0, MAX_TABLE_ROWS).forEach(r => {
+        const piCell = (r.piRef !== null && r.piRef !== undefined && r.piRef !== '') ? `<a href="#" class="pi-link" data-pi="${escHtml(String(r.piRef))}">${escHtml(String(r.piRef))}</a>` : '';
         html += `<tr class="resolved"><td>${piCell}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(itemLabel(r))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${escHtml(String(r.short ?? ''))}</td><td>${challanCell(r)}</td><td>${escHtml(r.accepted.reason || '(no reason given)')} <span class="sub-note">${dmyFromMs(r.accepted.at)}</span></td><td><button class="secondary unacc-btn" data-k="${escHtml(acceptKey(r))}" style="padding:4px 9px;font-size:11.5px;white-space:nowrap;">Undo</button></td></tr>`;
       });
+      // This table used to stop at the cap in silence, and a settled line past row 500 simply could
+      // not be undone. The oldest ones are the ones cut, and the note says how to reach them.
+      if (settled.length > MAX_TABLE_ROWS) html += `<tr><td colspan="9" style="font-weight:700;color:var(--sub);">\u2026 ${settled.length - MAX_TABLE_ROWS} older settled line(s) not shown \u2014 narrow the PI range to reach them.</td></tr>`;
       html += `</table></div>`;
+    } else if (acceptedHidden) {
+      html += `<div class="sub-note" style="margin-top:10px;">${acceptedHidden} settled line(s) sit outside this filter \u2014 clear the filter to see or undo them.</div>`;
     }
     const bubble = addBubble(html, 'askA');
     bubble.querySelectorAll('.pi-link').forEach(a => a.addEventListener('click', e => { e.preventDefault(); openPiFolderFiles(a.dataset.pi); }));
     const byKey = k => allRecords.find(r => acceptKey(r) === k);
+    // A settlement is stored per key, and identical lines on one challan (same style, measurement
+    // and Short) share a key — so they settle and un-settle together. Say so before it happens.
+    const twinsOf = r => { const k = acceptKey(r); return allRecords.filter(x => x !== r && acceptKey(x) === k).length; };
     wireRemarkCells(bubble, showShortageList);
     bubble.querySelectorAll('.acc-btn').forEach(b => b.addEventListener('click', () => {
       const r = byKey(b.dataset.k);
       if (!r) { toast('That line could not be matched — reload the Master File and try again.'); return; }
-      const reason = prompt(`Mark this short as accepted by Olisa?\n\n${r.style} · ${extractMeasurement(r.itemDesc)} · ${r.short} pcs · challan ${r.challanNo || '-'}\n\nWhy did Olisa accept it? (e.g. "hole mark accepted, usable")`, r.remarks || '');
+      const twins = twinsOf(r);
+      const twinNote = twins ? `\n\nNote: ${twins} other line(s) on this challan are identical (same style, measurement and Short), so they will be settled together with this one.` : '';
+      const reason = prompt(`Mark this short as accepted by Olisa?\n\n${r.style} · ${extractMeasurement(r.itemDesc)} · ${r.short} pcs · challan ${r.challanNo || '-'}${twinNote}\n\nWhy did Olisa accept it? (e.g. "hole mark accepted, usable")`, r.remarks || '');
       if (reason === null) return; // cancelled
       setAccepted(r, reason);
       notify('info', `Marked ${Math.abs(r.short)} pcs on ${r.style} as accepted by Olisa.`);
@@ -3170,12 +3203,14 @@ function showShortageList() {
     bubble.querySelectorAll('.unacc-btn').forEach(b => b.addEventListener('click', () => {
       const r = byKey(b.dataset.k);
       if (!r) return;
-      if (!confirm(`Put this line back on the shortage list?\n\n${r.style} · ${r.short} pcs`)) return;
+      const twins = twinsOf(r);
+      if (!confirm(`Put this line back on the shortage list?\n\n${r.style} · ${r.short} pcs${twins ? `\n\n${twins} identical line(s) on the same challan come back with it.` : ''}`)) return;
       clearAccepted(r);
       notify('info', `${r.style} is back on the shortage list.`);
       showShortageList();
     }));
 
+    if (!sorted.length) return;   // nothing outstanding on screen, so nothing to download
     const btn = document.createElement('button');
     btn.className = 'secondary';
     btn.style.marginTop = '10px';
@@ -3262,7 +3297,7 @@ function showManualChallanList() {
     html += `<div class="summary-line" style="margin-top:14px;">Every manual challan line</div>`;
     html += `<div class="previewbox" style="margin-top:6px;max-height:420px;"><table class="preview"><tr><th>PI Ref</th><th>Inv. Date</th><th>Style</th><th>Item</th><th>Measurement</th><th>Del Qty</th><th>Rec Qty</th><th>Short&Exs</th><th>Challan No</th><th>Challan Date</th><th>Remarks</th></tr>`;
     sorted.slice(0, MAX_TABLE_ROWS).forEach(r => {
-      const piCell = (r.piRef !== null && r.piRef !== undefined && r.piRef !== '') ? `<a href="#" class="pi-link" data-pi="${r.piRef}">${r.piRef}</a>` : '';
+      const piCell = (r.piRef !== null && r.piRef !== undefined && r.piRef !== '') ? `<a href="#" class="pi-link" data-pi="${escHtml(String(r.piRef))}">${escHtml(String(r.piRef))}</a>` : '';
       html += `<tr class="${rowClass(r)}"><td>${piCell}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(itemLabel(r))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${escHtml(String(r.delQty ?? ''))}</td><td>${escHtml(String(r.recQty ?? ''))}</td><td>${escHtml(String(r.short ?? ''))}</td><td>${challanCell(r)}</td><td>${escHtml(String(r.challanDate ?? ''))}</td>${remarkCell(r)}</tr>`;
     });
     html += tableCapNote(Math.min(sorted.length, MAX_TABLE_ROWS), sorted.length);
@@ -3377,6 +3412,10 @@ async function idbSet(key, value) {
     tx.objectStore('handles').put(value, key);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
+    // A full disk aborts the transaction — often with no error event at all — and a promise that
+    // only listened for complete/error then waited forever. Anything awaiting a save (a build
+    // checkpoint included) would hang with it instead of reporting the failure.
+    tx.onabort = () => reject(tx.error || new Error('Storage write was aborted (the device may be out of space)'));
   });
 }
 
@@ -3759,7 +3798,12 @@ async function checkForNewerMaster(announce) {
     // tool's own storage, NOT only in the uploaded copy — so loading Olisa's fresh file loses none
     // of them. Re-saving now writes them straight onto the new file, which keeps the copy in
     // "Latest Master Inventory Files" complete: newest data plus every update note.
-    const editCount = (typeof remarkOverrides === 'object' && remarkOverrides) ? Object.keys(remarkOverrides).length : 0;
+    // Settlements count as edits too: they are written into the copy's Update column exactly like
+    // remarks, and counting remarks alone meant a copy holding only settlements was never refreshed
+    // onto Olisa's new file. An undone settle or edit is removed from its store (only the undo
+    // record remains, in overlayUndos), so it is never counted here.
+    const editCount = (typeof remarkOverrides === 'object' && remarkOverrides)
+      ? liveCount(remarkOverrides) + liveCount(acceptedShorts) : 0;
     if (editCount && typeof scheduleMasterBackup === 'function') scheduleMasterBackup();
     if (announce !== false) {
       loadStatus.textContent = `Master File updated to "${file.name}" \u2014 loaded automatically just now.`;
@@ -5372,7 +5416,7 @@ function xlText(v) {
 function updateTextFor(r) {
   const parts = [];
   const ov = remarkOverrides[acceptKey(r)];
-  if (ov && String(ov.text || '').trim()) parts.push(String(ov.text).trim());
+  if (overlayLive(ov) && String(ov.text || '').trim()) parts.push(String(ov.text).trim());
   const acc = acceptedFor(r);
   if (acc) parts.push(`Settled by agreement${acc.reason ? ' — ' + acc.reason : ''} (${dmyFromMs(acc.at)})`);
   if (r.autoNotes && r.autoNotes.length) parts.push(...r.autoNotes);
@@ -5443,7 +5487,9 @@ async function buildUpdatedMasterBlob() {
     }
     const upd = updateTextFor(r);
     const ov = remarkOverrides[acceptKey(r)];
-    if (ov) { row.getCell(c.remarksCol).value = ov.text; }
+    // The Remarks cell is only touched when there is a live edit to put there. A removed edit leaves
+    // Olisa's own remark in the copy exactly as it is in their file — never a blank cell.
+    if (overlayLive(ov)) { row.getCell(c.remarksCol).value = ov.text; }
     if (upd) {
       row.getCell(c.updateCol).value = upd;
       // Colour intelligence carries into Excel too: a "done / settled" comment shows green there,
@@ -5501,7 +5547,7 @@ function backupMasterToDrive(silent, force) {
 }
 async function backupMasterToDriveInner(silent) {
   if (!allRecords.length) { if (!silent) toast('Load the Master File first.'); return; }
-  const editCount = Object.keys(remarkOverrides).length;
+  const editCount = liveCount(remarkOverrides) + liveCount(acceptedShorts);
   try {
     const { blob, patched } = await buildUpdatedMasterBlob();
     if (!(savedRootHandle && savedRootHandle.isDrive)) {
@@ -6147,7 +6193,11 @@ function currentIndexPayload() {
     challanMisses,
     piPdfDuds,
     acceptedShorts, // travel with the index so a decision made on the laptop reaches the phone
-    remarkOverrides
+    remarkOverrides,
+    // Undos travel too — otherwise an undo on one device never reached the other, and that
+    // device's next index upload handed the undone settlement straight back. A separate field,
+    // so an older build reading this file simply ignores it.
+    overlayUndos
   };
 }
 // Gzip the index before saving. Measured on realistic data: ~18x smaller (155 PIs: 0.43 MB -> 0.03 MB;
@@ -6184,21 +6234,42 @@ async function saveIndexFile() {
 // so a remark written on the laptop could silently never reach the phone.
 function mergeOverlays(data) {
   let merged = 0;
-  if (data && data.remarkOverrides) {
-    Object.entries(data.remarkOverrides).forEach(([k, v]) => {
-      if (!v) return;
-      if (!remarkOverrides[k] || (v.at || 0) > (remarkOverrides[k].at || 0)) { remarkOverrides[k] = v; merged++; }
+  // Undo records first, latest-wins per key like everything else — they decide which of the
+  // incoming entries below are already cancelled.
+  if (data && data.overlayUndos && typeof data.overlayUndos === 'object') {
+    let undosIn = 0;
+    ['acc', 'rmk'].forEach(kind => {
+      const inc = data.overlayUndos[kind];
+      if (!inc || typeof inc !== 'object') return;
+      Object.entries(inc).forEach(([k, u]) => {
+        if (!u || !u.undoes) return;
+        const mine = overlayUndos[kind][k];
+        if (!mine || (u.at || 0) > (mine.at || 0)) { overlayUndos[kind][k] = u; undosIn++; }
+      });
     });
-    persistRemarkOverrides();
+    if (undosIn) { merged += undosIn; persistOverlayUndos(); }
   }
-  if (data && data.acceptedShorts) {
-    Object.entries(data.acceptedShorts).forEach(([k, v]) => {
-      if (!v) return;
-      if (!acceptedShorts[k] || (v.at || 0) > (acceptedShorts[k].at || 0)) { acceptedShorts[k] = v; merged++; }
+  // A stale copy of something undone on THIS device is not an update. Without this check the old
+  // index file in Drive re-added it on every connect (and the sweep removed it again), announcing
+  // "1 update picked up" each time for a change that never happened.
+  const mergeStore = (incoming, store, kind, persist) => {
+    if (!incoming || typeof incoming !== 'object') return;
+    const ids = undoneIds(kind);
+    Object.entries(incoming).forEach(([k, v]) => {
+      if (!overlayLive(v)) return;
+      if (undoneBy(kind, k, v, ids)) return;
+      if (!store[k] || (v.at || 0) > (store[k].at || 0)) { store[k] = v; merged++; }
     });
-    persistAcceptedShorts();
-  }
-  if (merged) {
+    persist();
+  };
+  if (data) mergeStore(data.remarkOverrides, remarkOverrides, 'rmk', persistRemarkOverrides);
+  if (data) mergeStore(data.acceptedShorts, acceptedShorts, 'acc', persistAcceptedShorts);
+  // An undo that just arrived from the other device removes this device's own copy of that
+  // decision — under the same key, or under a different key if the two devices saw different
+  // versions of the Master File.
+  const swept = sweepUndone('rmk') + sweepUndone('acc');
+  if (swept) { persistRemarkOverrides(); persistAcceptedShorts(); }
+  if (merged || swept) {
     migrateOverlayKeys();
     if (allRecords.length) reconcileManualChallans();
   }
@@ -7801,20 +7872,120 @@ let acceptedShorts = {}; // key -> { reason, at }
 // re-applied over ANY Master File that is loaded afterwards — including a brand-new export from
 // Olisa that has never seen your note. Nothing is silently lost.
 let remarkOverrides = {}; // key -> { text, at, original }
+// Anything already in memory (a device merge that landed before storage answered) is folded in by
+// the same latest-wins rule rather than being replaced — replacing it, and then persisting, would
+// have overwritten the saved notes with the handful that had just arrived.
+function foldSaved(saved, mem) {
+  Object.entries(mem || {}).forEach(([k, v]) => { if (v && (!saved[k] || (v.at || 0) > (saved[k].at || 0))) saved[k] = v; });
+  return saved;
+}
 async function loadRemarkOverrides() {
   try {
     const saved = await idbGet('remarkOverrides');
-    if (saved && saved.map) remarkOverrides = saved.map;
+    if (saved && saved.map) remarkOverrides = foldSaved(saved.map, remarkOverrides);
   } catch (e) { /* first run */ }
 }
 async function persistRemarkOverrides() {
   try { await idbSet('remarkOverrides', { map: remarkOverrides, at: Date.now() }); } catch (e) { /* quota */ }
 }
+// ==================== AN UNDO THAT STAYS UNDONE ====================
+// Undo used to DELETE the entry, and two things then quietly put it back:
+//  1. The index file in Drive still carried the old acceptance. The merge on every connect is
+//     latest-timestamp-wins per key — but a deleted entry has no timestamp left to win with, so
+//     the stale copy was simply added back and the line re-settled itself.
+//  2. After Olisa re-saves the Master File, the repair pass re-links an acceptance to the line's
+//     new key and KEEPS the copy under the old key (deliberately — files move back and forth).
+//     Undo removed only the live key; the old copy re-attached itself on the very next load.
+// So every undo is now also RECORDED: a dated entry that cancels that exact decision under every
+// key it lives under, and travels between devices like any other edit. A settle or edit made
+// after the undo is newer than the record and still wins. Remark edits had the same flaw.
+//
+// The records live in their OWN map, never inside acceptedShorts / remarkOverrides. Those two keep
+// exactly the shape every earlier build reads, so a phone still open on an older build — or a
+// rollback — can never mistake an undo record for a settlement.
+let overlayUndos = { acc: {}, rmk: {} };   // kind -> key -> { at, undoes, fp }
+function overlayStore(kind) { return kind === 'acc' ? acceptedShorts : remarkOverrides; }
+// This build never writes a `cleared` flag — an undone entry is deleted and its undo recorded in
+// overlayUndos. The check only keeps a hand-edited or foreign index file from counting as live.
+function overlayLive(v) { return !!v && !v.cleared; }
+// Identity of one decision. Copies made by the repair pass or by a device sync keep the same
+// timestamp and text, so they are recognised as the same decision under a different key.
+function overlayId(v) { return `${(v && v.at) || 0}|${v && v.reason != null ? v.reason : (v && v.text != null ? v.text : '')}`; }
+async function loadOverlayUndos() {
+  try {
+    const saved = await idbGet('overlayUndos');
+    if (saved && saved.acc && saved.rmk) {
+      ['acc', 'rmk'].forEach(kind => { overlayUndos[kind] = foldSaved(saved[kind], overlayUndos[kind]); });
+    }
+  } catch (e) { /* first run */ }
+}
+async function persistOverlayUndos() {
+  try { await idbSet('overlayUndos', { acc: overlayUndos.acc, rmk: overlayUndos.rmk, at: Date.now() }); } catch (e) { /* quota */ }
+}
+// Undo the decision stored under key k: remove it under EVERY key holding a copy of it, and record
+// the undo under each of those keys.
+function undoOverlay(kind, k, fp) {
+  const store = overlayStore(kind), undos = overlayUndos[kind];
+  const cur = store[k];
+  if (!overlayLive(cur)) return false;
+  const id = overlayId(cur);
+  // Always later than what it cancels, even when that entry came from a device whose clock runs
+  // ahead — otherwise the next merge would hand the undone entry straight back.
+  const at = Math.max(Date.now(), (cur.at || 0) + 1);
+  Object.keys(store).forEach(key => {
+    const v = store[key];
+    if (key !== k && !(overlayLive(v) && (v === cur || overlayId(v) === id))) return;
+    undos[key] = { at, undoes: id, fp: key === k ? (fp || cur.fp) : (v.fp || cur.fp) };
+    delete store[key];
+  });
+  persistOverlayUndos();
+  return true;
+}
+// Is this entry cancelled by a recorded undo — one made later under the same key, or one that
+// names this exact decision under any key?
+function undoneBy(kind, key, v, ids) {
+  const u = overlayUndos[kind][key];
+  if (u && (u.at || 0) > (v.at || 0)) return true;
+  const at = ids.get(overlayId(v));
+  return !!at && at > (v.at || 0);
+}
+function undoneIds(kind) {
+  const ids = new Map();
+  Object.values(overlayUndos[kind]).forEach(u => {
+    if (u && u.undoes) ids.set(u.undoes, Math.max(ids.get(u.undoes) || 0, u.at || 0));
+  });
+  return ids;
+}
+// Removes any live copy of an undone decision, however it arrived (an old index file, a repair
+// copy, another device). Returns how many it removed.
+function sweepUndone(kind) {
+  const store = overlayStore(kind);
+  const ids = undoneIds(kind);
+  let n = 0;
+  Object.keys(store).forEach(key => {
+    const v = store[key];
+    if (!v) return;
+    if (!overlayLive(v) || undoneBy(kind, key, v, ids)) { delete store[key]; n++; }
+  });
+  return n;
+}
+function liveCount(store) { return Object.values(store || {}).filter(overlayLive).length; }
+// The time stamped on a NEW settle or edit. Normally just now — but never at or before an undo
+// already recorded on that line. An undo is dated after the decision it cancels, and when that
+// decision came from a device whose clock runs ahead, the undo is dated ahead too; a fresh settle
+// stamped with this device's plain clock would then look OLDER than the undo, and the next sweep
+// would delete it.
+function decisionTime(kind, k) {
+  const u = overlayUndos[kind] && overlayUndos[kind][k];
+  return Math.max(Date.now(), u ? (u.at || 0) + 1 : 0);
+}
 function setRemark(r, text) {
   const k = acceptKey(r);
   const clean = String(text == null ? '' : text).slice(0, 500);
-  if (!clean.trim() && remarkOverrides[k]) { delete remarkOverrides[k]; }
-  else remarkOverrides[k] = { text: clean, at: Date.now(), original: String(r.remarks ?? ''), fp: fingerprintOf(r) };
+  // Blanking an edited remark hands the line back to Olisa's own wording, as it always did — but
+  // the removal is recorded, so a copy of the old edit elsewhere (Drive index, repair copy) cannot return.
+  if (!clean.trim() && overlayLive(remarkOverrides[k])) undoOverlay('rmk', k, fingerprintOf(r));
+  else remarkOverrides[k] = { text: clean, at: decisionTime('rmk', k), original: String((r._remarksOrig !== undefined ? r._remarksOrig : r.remarks) ?? ''), fp: fingerprintOf(r) };
   persistRemarkOverrides();
   reconcileManualChallans();
   scheduleMasterBackup();
@@ -7830,9 +8001,13 @@ function remarkColorWord(text) {
   return null;
 }
 // The remark actually in force for a row: your edit if there is one, else Olisa's original.
+// _remarksOrig is what the Master File itself says; r.remarks is overwritten with your edit during
+// reconciliation, so falling back to r.remarks alone would return the edit you just removed.
 function effectiveRemark(r) {
   const o = remarkOverrides[acceptKey(r)];
-  return o ? o.text : (r.remarks == null ? '' : String(r.remarks));
+  if (overlayLive(o)) return o.text;
+  const orig = r._remarksOrig !== undefined ? r._remarksOrig : r.remarks;
+  return orig == null ? '' : String(orig);
 }
 // Day/month/year, matching every other date in the tool.
 function dmyFromMs(ms) {
@@ -7926,7 +8101,13 @@ function repairTiersForRecord(r) {
   return t;
 }
 function repairOverlayKeys() {
-  if (!allRecords.length) return 0;
+  // Remove live copies of undone decisions first, so the re-linking below can never carry one
+  // onto a line — whether or not a Master File is loaded yet.
+  const swept = sweepUndone('rmk') + sweepUndone('acc');
+  if (!allRecords.length) {
+    if (swept) { persistRemarkOverrides(); persistAcceptedShorts(); }
+    return 0;
+  }
   const liveKeys = new Map();        // exact key -> record
   const byStable = new Map();
   const byTier = new Map();          // tier string -> [exact key]
@@ -7948,7 +8129,7 @@ function repairOverlayKeys() {
     byPos.set(`${r.xlSheet || r.sheet || ''}|${r.xlRow || 0}`, r);
   });
   let repaired = 0, backfilled = 0;
-  const fix = store => {
+  const fix = (store, kind) => {
     Object.keys(store).forEach(k => {
       const live = liveKeys.get(k);
       if (live) {
@@ -7994,6 +8175,10 @@ function repairOverlayKeys() {
             && fpNorm(at.item) === store[k].fp.item) target = acceptKey(at);
       }
       if (!target || store[target]) return;             // no confident match, or that line has its own
+      // An undo recorded on that line after this entry was made stands: re-linking would put back
+      // the very thing that was removed. A settle or edit made AFTER the undo is newer and goes on.
+      const u = overlayUndos[kind][target];
+      if (u && (u.at || 0) >= (store[k].at || 0)) return;
       store[target] = store[k];
       if (liveKeys.get(target)) store[target].fp = fingerprintOf(liveKeys.get(target));
       // The orphan is KEPT, not deleted. Olisa's files move back and forth between versions, and a
@@ -8002,9 +8187,9 @@ function repairOverlayKeys() {
       repaired++;
     });
   };
-  fix(remarkOverrides);
-  fix(acceptedShorts);
-  if (repaired || backfilled) { persistRemarkOverrides(); persistAcceptedShorts(); }
+  fix(remarkOverrides, 'rmk');
+  fix(acceptedShorts, 'acc');
+  if (repaired || backfilled || swept) { persistRemarkOverrides(); persistAcceptedShorts(); }
   return repaired;
 }
 // Kept as an alias so callers read naturally; the overlay "migration" is now a repair pass.
@@ -8012,25 +8197,27 @@ function migrateOverlayKeys() { return repairOverlayKeys(); }
 async function loadAcceptedShorts() {
   try {
     const saved = await idbGet('acceptedShorts');
-    if (saved && saved.map) acceptedShorts = saved.map;
+    if (saved && saved.map) acceptedShorts = foldSaved(saved.map, acceptedShorts);
   } catch (e) { /* first run */ }
 }
 async function persistAcceptedShorts() {
   try { await idbSet('acceptedShorts', { map: acceptedShorts, at: Date.now() }); } catch (e) { /* quota */ }
 }
 function setAccepted(r, reason) {
-  acceptedShorts[acceptKey(r)] = { reason: String(reason || '').slice(0, 200), at: Date.now(), fp: fingerprintOf(r) };
+  const k = acceptKey(r);
+  acceptedShorts[k] = { reason: String(reason || '').slice(0, 200), at: decisionTime('acc', k), fp: fingerprintOf(r) };
   persistAcceptedShorts();
   reconcileManualChallans();
   if (typeof scheduleMasterBackup === 'function') scheduleMasterBackup();
 }
 function clearAccepted(r) {
-  delete acceptedShorts[acceptKey(r)];
+  // Removed AND recorded — see "AN UNDO THAT STAYS UNDONE" above.
+  undoOverlay('acc', acceptKey(r), fingerprintOf(r));
   persistAcceptedShorts();
   reconcileManualChallans();
   if (typeof scheduleMasterBackup === 'function') scheduleMasterBackup();
 }
-function acceptedFor(r) { return acceptedShorts[acceptKey(r)] || null; }
+function acceptedFor(r) { const v = acceptedShorts[acceptKey(r)]; return overlayLive(v) ? v : null; }
 function effectiveShort(r) {
   if (r.accepted) return 0; // waived by agreement — no longer outstanding, raw short still shown
   if ((r.short || 0) < 0) { const cov = r._covered || 0; return Math.min(0, (r.short || 0) + cov); }
@@ -8140,9 +8327,15 @@ function reconcileManualChallans() {
   // Overlay first: an accepted line is settled and must not also be "covered" by a manual challan.
   // Re-attach your remark edits to whatever Master File is currently loaded. A fresh export from
   // Olisa arrives without them; this puts them straight back on the matching lines.
+  // r.remarks is overwritten with your edit so every table and export shows it — which used to
+  // destroy the Master File's own wording in memory. Removing an edit then changed nothing on
+  // screen (old note and old colour) until the whole file was reloaded. The original is now kept
+  // once, the first time a record is reconciled, and put back whenever no edit applies.
   allRecords.forEach(r => {
+    if (r._remarksOrig === undefined) r._remarksOrig = (r.remarks === undefined ? null : r.remarks);
     const o = remarkOverrides[acceptKey(r)];
-    if (o) { r.remarkEdited = true; r.remarks = o.text; }
+    if (overlayLive(o)) { r.remarkEdited = true; r.remarks = o.text; }
+    else r.remarks = r._remarksOrig;
     const cw = remarkColorWord(effectiveRemark(r));
     if (cw) r.forceColor = cw;
   });
@@ -10113,7 +10306,7 @@ async function renderSingleResult(result) {
       for (const pi of piHits) { const k = normPiKey(pi); if (k && !piIndex[k]) await ensurePiQty(k); }
       const piLineGroups = piLinesForStyle(code.toUpperCase());
       let html = `<div class="summary-line">No delivery yet for <b>${code}</b> — <span class="neg">not delivered</span></div>`;
-      html += `Found in PI: ` + piHits.map(pi => `<a href="#" class="pi-link" data-pi="${pi}" style="font-weight:800;color:var(--accent-dark);">${pi}</a>`).join(', ');
+      html += `Found in PI: ` + piHits.map(pi => `<a href="#" class="pi-link" data-pi="${escHtml(String(pi))}" style="font-weight:800;color:var(--accent-dark);">${escHtml(String(pi))}</a>`).join(', ');
       if (piLineGroups.length) {
         html += `<div class="previewbox" style="margin-top:8px;max-height:260px;"><table class="preview"><tr><th>PI Ref</th><th>PI Date</th><th>PI Qty</th><th>Inventory Date</th><th>Style</th><th>Item</th><th>Measurement</th><th>Delivered Qty</th><th>Received Qty</th><th>Short&Exs</th><th>Challan No</th><th>Challan Date</th><th>Remarks</th></tr>`;
         piLineGroups.forEach(g => g.lines.forEach(ln => {
@@ -10170,7 +10363,7 @@ async function renderSingleResult(result) {
   }
 
   let html = `<div class="summary-line">${fuzzy ? 'Closest matches for' : 'Found ' + matches.length + ' record(s) for'} <b>${code}</b>${fuzzy ? ' (' + matches.length + ' record(s))' : ''}</div>`;
-  html += `<div style="margin-bottom:4px;">PI: ` + piRefs.map(pi => `<a href="#" class="pi-link" data-pi="${pi}" style="font-weight:800;color:var(--accent-dark);">${pi}</a>`).join(', ') + `</div>`;
+  html += `<div style="margin-bottom:4px;">PI: ` + piRefs.map(pi => `<a href="#" class="pi-link" data-pi="${escHtml(String(pi))}" style="font-weight:800;color:var(--accent-dark);">${escHtml(String(pi))}</a>`).join(', ') + `</div>`;
   let totalPiQty = 0, hasPiQty = false;
   piLinesForStyle(codeNorm).forEach(g => g.lines.forEach(ln => { totalPiQty += ln.qty; hasPiQty = true; }));
   if (!hasPiQty) {
@@ -10194,7 +10387,7 @@ async function renderSingleResult(result) {
   // so the display cap is applied inside the loop, not by slicing the array.
   let shownRows = 0;
   matches.forEach(r => {
-    const piCell = (r.piRef !== null && r.piRef !== undefined && r.piRef !== '') ? `<a href="#" class="pi-link" data-pi="${r.piRef}">${r.piRef}</a>` : '';
+    const piCell = (r.piRef !== null && r.piRef !== undefined && r.piRef !== '') ? `<a href="#" class="pi-link" data-pi="${escHtml(String(r.piRef))}">${escHtml(String(r.piRef))}</a>` : '';
     const piQ = piQtyForRow(r.piRef, r.styleNorm, r.itemDesc);
     const refKey = normPiKey(r.piRef);
     if (piQ !== null && refKey) coveredPiLine.add(piCoverKey(r));
