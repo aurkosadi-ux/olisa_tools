@@ -93,8 +93,10 @@ t('challans that failed their own totals are listed after a build', /res\.unveri
 
 console.log('\n6. Our record is never merged into Olisa\'s');
 t('challanStatus compares by challan number against the Master File',
-  /function challanStatus[\s\S]{0,400}?allRecords\.filter\(r => normChallanKey\(r\.challanNo\)/.test(src));
-t('only lines Olisa has NOT booked are offered', /const missing = lines\.filter\(ln => ln\.style && !bookedStyles\.has/.test(src));
+  /function challanStatus[\s\S]{0,400}?masterRowsByChallan\(\)\.get\(key\)/.test(src)
+  && /function masterRowsByChallan[\s\S]{0,400}?challanKeysOf\(r\.challanNo\)/.test(src));
+t('only lines Olisa has NOT booked are offered',
+  /const missing = lines\.filter\(ln => ln\.style && !chLineOnRows\(ln, rows, lines\)\)/.test(src));
 t('unverified challans are held back from the style answer',
   /const good = rows\.filter\(r => r\.verified\)/.test(src) && /const shaky = rows\.filter\(r => !r\.verified\)/.test(src));
 t('the answer says plainly that this is our record, not Olisa\'s',

@@ -1260,7 +1260,7 @@ function switchTab(which) {
 // immediately, so the whole script threw on load. Evaluation stopped there, which meant every
 // `let` below it never initialised either, and the first thing to notice was an unrelated
 // "cannot access 'piIndex' before initialization". One misplaced constant, entire tool dead.
-const APP_VERSION = 135;
+const APP_VERSION = 136;
 // ==================== WHAT KIND OF CARTON IS THIS LINE? ====================
 // This lived inside the Undelivered Report's IIFE, so the Ask tab could not reach it and simply
 // printed the Master File's Item column as-is. That column says "Master Carton" on punch lines
@@ -1277,10 +1277,6 @@ function itemKind(desc) {
 // DISPLAY name only. itemKind() still matches on the words the raw export writes; renaming what is
 // SHOWN must never change what is MATCHED.
 const KIND_LABEL = { master: 'Master Carton', punch: 'Chip Box (Punch)', cross: 'Cross Divider' };
-// The Item cell for any row, anywhere: the kind read from the description, never the raw column.
-function itemLabel(r) {
-  return KIND_LABEL[itemKind(String((r && r.itemDesc) || '') + ' ' + String((r && r.item) || ''))];
-}
 // true top level, outside any IIFE, since it's used across all of them.
 function escHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -7394,6 +7390,96 @@ function cartonDims(r) {
   const n = v => { const f = parseFloat(v); return isFinite(f) ? String(Math.round(f * 10) / 10) : String(v); };
   return `${n(t[1])}X${n(t[2])}X${n(t[3])}`;
 }
+// ==================== THE ASK TAB'S ANSWER TO "WHAT KIND OF CARTON?" ====================
+// Lives HERE, inside the Ask section, because it has to read the Master rows, the challan index and
+// the PI index — all declared in this section. itemKind() and KIND_LABEL stay at true top level:
+// the Undelivered Report uses them from its own section. Every caller of itemLabel() is in here.
+// itemKind() above reads ONE piece of text and is right whenever that text says "Punch" or "Cross
+// Divider" — which the raw export always does, so the Undelivered Report keeps using it unchanged.
+// The Ask tab has a harder job. It shows lines from three places, and two of them drop the word:
+//   * the PI reader recorded every carton as plain "Master Carton" — "(Punch)" was never kept;
+//   * a Master File row can carry only dimensions, or "Master Carton, 3 Ply", with no "Punch".
+// Everything classified as "master" by default, so the Chip Box filter hid real chip boxes and the
+// table labelled them Master Carton. Deciding by the words alone throws away what the tool already
+// knows, so the kind is now settled in this order:
+//   1. a DECISIVE word on the line itself (punch / perforated / chip box, cross divider / divider).
+//      "Master Carton" is NOT decisive: Olisa writes it on punch lines too.
+//   2. what the other documents say about the SAME carton — same style, same L x W x H — on a
+//      Master row, a challan line or a PI line that does carry a decisive word.
+//   3. the ply: in this business a chip box is the 3-ply carton and a master carton is 5-ply
+//      (the calculator prices them that way), so a 3-ply carton with no other word is a chip box.
+//   4. otherwise a Master Carton, as before.
+function kindWord(text) {
+  const d = String(text == null ? '' : text);
+  if (/cross\s*divider|\bdivider\b|\u5200\u5361/i.test(d)) return 'cross';
+  if (/punch|perforat|chip\s*-?\s*box/i.test(d)) return 'punch';
+  return '';
+}
+function kindDims(text) {
+  const d = cartonDims({ itemDesc: String(text == null ? '' : text) });
+  return d ? d.toUpperCase() : '';
+}
+function kindStyleKey(style) { return normHard(String(style == null ? '' : style)); }
+// style|dims -> 'punch' | 'cross', learned from every line that states its kind outright. Rebuilt
+// only when one of the three sources has changed, so a 3,000-row search does not rebuild it 3,000
+// times. A carton two sources disagree about is left out rather than guessed.
+let _kindMemo = null;
+function kindKnowledge() {
+  let recs = [], ch = {}, pis = {}, chAt = 0, piAt = 0;
+  try { recs = allRecords || []; } catch (e) { recs = []; }
+  try { ch = challanIndex || {}; chAt = challanIndexBuiltAt || 0; } catch (e) { ch = {}; }
+  try { pis = piIndex || {}; piAt = piIndexBuiltAt || 0; } catch (e) { pis = {}; }
+  const chN = Object.keys(ch).length, piN = Object.keys(pis).length;
+  const m = _kindMemo;
+  if (m && m.recs === recs && m.recN === recs.length && m.ch === ch && m.chN === chN && m.chAt === chAt
+      && m.pis === pis && m.piN === piN && m.piAt === piAt) return m.map;
+  const map = new Map();
+  const add = (style, dims, kind) => {
+    if (!kind || !dims) return;
+    const k = kindStyleKey(style) + '|' + dims;
+    if (!kindStyleKey(style)) return;
+    const was = map.get(k);
+    map.set(k, was && was !== kind ? '?' : kind);
+  };
+  recs.forEach(r => add(r.styleNorm || r.style, kindDims(String(r.itemDesc == null ? '' : r.itemDesc) + ' ' + String(r.item == null ? '' : r.item)),
+    kindWord(String(r.itemDesc == null ? '' : r.itemDesc) + ' ' + String(r.item == null ? '' : r.item))));
+  Object.values(ch).forEach(c => (c && Array.isArray(c.lines) ? c.lines : []).forEach(ln => add(ln.style, kindDims(ln.desc), kindWord(ln.desc))));
+  Object.values(pis).forEach(e => (e && Array.isArray(e.items) ? e.items : []).forEach(it => add(it.style, String(it.dims || '').toUpperCase(), kindWord(it.item))));
+  _kindMemo = { recs, recN: recs.length, ch, chN, chAt, pis, piN, piAt, map };
+  return map;
+}
+function kindOf(style, dims, text) {
+  const w = kindWord(text);
+  if (w) return w;
+  if (style && dims) {
+    let k = '';
+    try { k = kindKnowledge().get(kindStyleKey(style) + '|' + dims) || ''; } catch (e) { k = ''; }
+    if (k === 'punch' || k === 'cross') return k;
+  }
+  if (/\b3\s*-?\s*ply\b|\bply\s*[:\-]?\s*3\b/i.test(String(text || ''))) return 'punch';
+  return 'master';
+}
+// A Master File row (or a PI-only row built in the same shape).
+function rowKind(r) {
+  if (!r) return 'master';
+  const text = String(r.itemDesc == null ? '' : r.itemDesc) + ' ' + String(r.item == null ? '' : r.item);
+  return kindOf(r.styleNorm || r.style, kindDims(text), text);
+}
+// A line read off a Proforma Invoice.
+function piLineKind(ln) {
+  if (!ln) return 'master';
+  const text = String(ln.item || '') + ' ' + String(ln.meas || '');
+  return kindOf(ln.style, String(ln.dims || '').toUpperCase() || kindDims(text), text);
+}
+// A line read off one of our challans.
+function challanLineKind(ln) {
+  if (!ln) return 'master';
+  return kindOf(ln.style, kindDims(ln.desc), String(ln.desc || ''));
+}
+// The Item cell for any row, anywhere in the Ask tab — never the raw column.
+function itemLabel(r) {
+  return KIND_LABEL[rowKind(r)] || KIND_LABEL.master;
+}
 function cartonPack(r) {
   const s = String(r && r.item != null ? r.item : '') + ' ' + String(r && r.itemDesc != null ? r.itemDesc : '');
   const m = s.match(/(\d+)\s*PRS/i);
@@ -8230,17 +8316,105 @@ async function improvedTwinExists(entry) {
 // The Master File stores styles as trimmed upper case (see loadFile); challan text must be put in
 // exactly that form before the two are ever compared.
 function normChStyle(v) { return String(v === null || v === undefined ? '' : v).trim().toUpperCase(); }
+// ==================== "IT IS IN THE MASTER FILE — WHY DOES IT SAY NOT BOOKED?" ====================
+// The search found Olisa's row for a delivery and, underneath it, reported the same delivery as
+// "not in Olisa's inventory yet". Loading a fresh Master File changed nothing, because the Master
+// File was never the problem: the comparison was. Two things were wrong.
+//
+// 1. ONE challan number per cell. The Master File's Challan No cell often holds two ("31910799,
+//    31910794"), and only the first was ever read — every line of the second challan was reported
+//    unbooked forever. Two numbers separated only by a space were worse: glued into one 16-digit
+//    number that matches nothing.
+// 2. EXACT style text. The search finds a style through the four-tier ladder (spaces, punctuation,
+//    parent/sub-code), but the booking check compared the raw text — so "M82036A6-1" on our challan
+//    and "M82036A6 - 1" in Olisa's file, or M82041_3C and M82041-3C, or a sub-code booked under its
+//    parent, were one delivery to the search and two to the booking check.
+//
+// Every challan number in a cell now counts, and a challan line counts as booked when a row ON THAT
+// SAME CHALLAN carries the same style by the same ladder — never by a row on some other challan.
+// When a line is still flagged, the reason is stated, so the next question answers itself.
+function challanKeysOf(v) {
+  const s = String(v === null || v === undefined ? '' : v).trim();
+  if (!s) return [];
+  const keys = new Set();
+  const first = normChallanKey(s);
+  if (first) keys.add(first);
+  // Only when the cell holds a real system number (6+ digits) are the others read. A lone short
+  // number next to it ("31910793/94", a date) is NOT a challan and must never quietly match a hand
+  // challan of that number.
+  const nums = [];
+  s.split(/[^\d\s]+/).forEach(chunk => {
+    const toks = chunk.trim().split(/\s+/).filter(Boolean);
+    if (!toks.length) return;
+    if (toks.length > 1 && toks.every(t => t.length >= 5)) toks.forEach(t => nums.push(t));
+    else nums.push(toks.join(''));
+  });
+  if (nums.some(n => n.replace(/^0+/, '').length >= 6)) {
+    nums.forEach(n => { if (n.replace(/^0+/, '').length >= 6) { const k = normChallanKey(n); if (k) keys.add(k); } });
+  }
+  return [...keys];
+}
+// Olisa's rows grouped by challan number, built once per Master File instead of scanning every
+// row for every challan.
+let _chRowsMemo = null;
+function masterRowsByChallan() {
+  const recs = allRecords || [];
+  if (_chRowsMemo && _chRowsMemo.recs === recs && _chRowsMemo.n === recs.length) return _chRowsMemo.map;
+  const map = new Map();
+  recs.forEach(r => challanKeysOf(r.challanNo).forEach(k => {
+    let a = map.get(k);
+    if (!a) map.set(k, a = []);
+    a.push(r);
+  }));
+  _chRowsMemo = { recs, n: recs.length, map };
+  return map;
+}
+// Parent / sub-code: M81988-3A1 and M81988-3A1-1, M82035 and M82035A1. Never across the middle of
+// a number (M82035A1-3 is not M82035A1-31) or of a word.
+function chSubCodeOf(a, b) {
+  const [sh, lo] = a.length <= b.length ? [a, b] : [b, a];
+  if (sh.length < 5 || !/[A-Z]/.test(sh) || !lo.startsWith(sh) || lo === sh) return false;
+  const x = sh[sh.length - 1], y = lo[sh.length];
+  if (/\d/.test(x) && /\d/.test(y)) return false;
+  if (/[A-Z]/.test(x) && /[A-Z]/.test(y)) return false;
+  return true;
+}
+// Is this challan line on Olisa's rows for the same challan?
+function chLineOnRows(ln, rows, lines) {
+  const a = normSp(ln.style), ah = normHard(ln.style);
+  if (!a) return true;
+  if (rows.some(r => normSp(r.styleNorm) === a)) return true;
+  // A row that is exactly ANOTHER line of this challan belongs to that line and cannot be claimed
+  // by a looser match — otherwise one booked line could hide its unbooked neighbour.
+  const others = new Set((lines || []).filter(x => x !== ln && x && x.style).map(x => normSp(x.style)));
+  const free = rows.filter(r => !others.has(normSp(r.styleNorm)));
+  if (ah.length >= 5) {
+    const d = new Set(free.filter(r => normHard(r.styleNorm) === ah).map(r => normSp(r.styleNorm)));
+    if (d.size === 1) return true;
+  }
+  return free.some(r => chSubCodeOf(a, normSp(r.styleNorm)));
+}
 function challanStatus(entry) {
   if (!entry || !entry.no) return null;
-  const rows = allRecords.filter(r => normChallanKey(r.challanNo) === normChallanKey(entry.no));
+  const key = normChallanKey(entry.no);
+  const rows = (key && masterRowsByChallan().get(key)) || [];
   const lines = Array.isArray(entry.lines) ? entry.lines : [];
-  if (!rows.length) return { state: lines.length ? 'not-booked' : 'not-booked-unknown', rows, missing: lines, bookedQty: 0 };
-  const bookedStyles = new Set(rows.map(r => normChStyle(r.style)));
-  const missing = lines.filter(ln => ln.style && !bookedStyles.has(normChStyle(ln.style)));
+  if (!rows.length) return { state: lines.length ? 'not-booked' : 'not-booked-unknown', rows, missing: lines, bookedQty: 0, why: 'challan' };
+  const missing = lines.filter(ln => ln.style && !chLineOnRows(ln, rows, lines));
   return {
     state: missing.length ? (missing.length === lines.length ? 'not-booked' : 'part-booked') : 'booked',
-    rows, missing, bookedQty: rows.reduce((a, r) => a + (r.delQty || 0), 0)
+    rows, missing, bookedQty: rows.reduce((a, r) => a + (r.delQty || 0), 0), why: missing.length ? 'style' : ''
   };
+}
+// For a flagged line: does Olisa's file hold the same style and quantity under a DIFFERENT challan
+// number? That is usually a typo on their side. Shown as a pointer, never counted as booked — a
+// number that cannot be proved is not claimed.
+function chPossibleTwin(ln, entryKey) {
+  const a = normSp(ln.style), ah = normHard(ln.style);
+  if (!a || !(ln.qty > 0)) return null;
+  return (allRecords || []).find(r => (r.delQty || 0) === ln.qty
+    && (normSp(r.styleNorm) === a || (ah.length >= 5 && normHard(r.styleNorm) === ah))
+    && !challanKeysOf(r.challanNo).includes(entryKey)) || null;
 }
 // Every challan line for a style that Olisa has not booked yet, newest first. This is what turns
 // "Olisa says hold these styles" into "three of them left the factory on Sunday".
@@ -8250,10 +8424,21 @@ function unbookedLinesForStyle(styleNorm) {
     if (!c || !Array.isArray(c.lines) || !c.lines.length) return;
     const st = challanStatus(c);
     if (!st || st.state === 'booked') return;
+    const key = normChallanKey(c.no);
     st.missing.forEach(ln => {
       if (!styleMatches(ln.style, styleNorm)) return;
+      let why;
+      if (st.why === 'challan') {
+        const twin = chPossibleTwin(ln, key);
+        why = `Challan ${c.no} is not in Olisa's file at all.`
+          + (twin ? ` Their file does have ${twin.style}, ${twin.delQty} pcs on challan ${String(twin.challanNo || 'blank')}${twin.challanDate ? ' (' + twin.challanDate + ')' : ''} \u2014 check whether that is this delivery under a mistyped number.` : '');
+      } else {
+        const theirs = [...new Set(st.rows.map(r => r.style))].slice(0, 4).join(', ');
+        why = `Challan ${c.no} is in Olisa's file, but not this style on it${theirs ? ` (their rows on it: ${theirs})` : ''}.`;
+      }
       out.push({ challanNo: c.no, date: c.date || '', piRef: ln.piRef || c.piRef || '', hand: !!c.hand,
-                 style: ln.style, qty: ln.qty, desc: ln.desc, verified: !!c.verified, path: c.path });
+                 style: ln.style, qty: ln.qty, desc: ln.desc, kind: challanLineKind(ln), why,
+                 verified: !!c.verified, path: c.path });
     });
   });
   return out.sort((a, b) => String(b.date).localeCompare(String(a.date)));
@@ -8273,11 +8458,39 @@ function unbookedChallans() {
     .filter(x => x.st && x.st.state !== 'booked')
     .sort((a, b) => String(b.entry.date).localeCompare(String(a.entry.date)));
 }
+// Which Master File the booking check just used, so "is it syncing?" is answered on the spot.
+function masterCheckedAgainst() {
+  let name = '', ms = 0;
+  try { name = (currentMasterMeta && currentMasterMeta.name) || masterFileName || ''; ms = (currentMasterMeta && currentMasterMeta.modifiedMs) || 0; } catch (e) { /* not connected */ }
+  if (!name) return '';
+  let when = '';
+  if (ms) {
+    const d = new Date(ms);
+    const p2 = n => String(n).padStart(2, '0');
+    let h = d.getHours(); const ap = h >= 12 ? 'pm' : 'am'; h = h % 12 || 12;
+    when = ` (saved ${p2(d.getDate())}/${p2(d.getMonth() + 1)}/${d.getFullYear()} ${h}:${p2(d.getMinutes())} ${ap})`;
+  }
+  return `Checked against Olisa's file: ${name}${when}.`;
+}
 // Our record, shown UNDER Olisa's record and never mixed into it. Everything here means: the
-// carton left the factory on our challan and Olisa's inventory has not caught up yet.
-function unbookedBlockHtml(styleNorm) {
+// carton left the factory on our challan and Olisa's inventory has not caught up yet. It obeys the
+// same filter bar as the table above it.
+function unbookedBlockHtml(styleNorm, filters) {
   let rows;
   try { rows = unbookedLinesForStyle(styleNorm); } catch (e) { return ''; }
+  const f = filters || (typeof readAskFilters === 'function' ? readAskFilters() : null);
+  if (f && f.ok) {
+    const hasFrom = !isNaN(f.from), hasTo = !isNaN(f.to);
+    rows = rows.filter(r => {
+      if (f.manualOnly && !r.hand) return false;
+      if (f.kind && r.kind !== f.kind) return false;
+      if (hasFrom || hasTo) {
+        const p = parseFloat(r.piRef);
+        if (isNaN(p) || (hasFrom && p < f.from) || (hasTo && p > f.to)) return false;
+      }
+      return true;
+    });
+  }
   if (!rows.length) return '';
   const good = rows.filter(r => r.verified);
   const shaky = rows.filter(r => !r.verified);
@@ -8285,15 +8498,17 @@ function unbookedBlockHtml(styleNorm) {
   const total = good.reduce((a, r) => a + (r.qty || 0), 0);
   let h = `<div class="summary-line" style="margin-top:14px;">Delivered on our challan &mdash; not in Olisa's inventory yet: <b>${good.length}</b> line(s), <b>${total}</b> pcs</div>`;
   if (good.length) {
-    h += `<div class="previewbox" style="max-height:220px;"><table class="preview"><tr><th>Challan No</th><th>Challan Date</th><th>PI Ref</th><th>Style</th><th>Item</th><th>Delivered Qty</th></tr>`;
+    h += `<div class="previewbox" style="max-height:220px;"><table class="preview"><tr><th>Challan No</th><th>Challan Date</th><th>PI Ref</th><th>Style</th><th>Item</th><th>Measurement</th><th>Delivered Qty</th><th>Why it is listed</th></tr>`;
     good.forEach(r => {
-      h += `<tr class="review"><td>${escHtml(String(r.challanNo))}${r.hand ? ' (Manual)' : ''}</td><td>${escHtml(String(r.date))}</td><td>${escHtml(String(r.piRef))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(String(r.desc))}</td><td>${escHtml(String(r.qty))}</td></tr>`;
+      h += `<tr class="review"><td>${escHtml(String(r.challanNo))}${r.hand ? ' (Manual)' : ''}</td><td>${escHtml(String(r.date))}</td><td>${escHtml(String(r.piRef))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(KIND_LABEL[r.kind] || KIND_LABEL.master)}</td><td>${escHtml(extractMeasurement(r.desc))}</td><td>${escHtml(String(r.qty))}</td><td>${escHtml(r.why || '')}</td></tr>`;
     });
     h += `</table></div>`;
   }
   if (shaky.length) {
     h += `<div class="sub-note" style="margin-top:6px;color:var(--bad);">${shaky.length} further line(s) sit on challan(s) whose printed Total Line / Total Qty did not match what could be read, so they are held back rather than shown &mdash; a quantity that cannot be proved should not go to Olisa. Challan(s): ${escHtml([...new Set(shaky.map(r => r.challanNo))].join(', '))}.</div>`;
   }
+  const against = masterCheckedAgainst();
+  if (against) h += `<div class="sub-note" style="margin-top:4px;">${escHtml(against)}</div>`;
   return h;
 }
 // ==================== "LOOK FOR CHANGES, DON'T RE-READ EVERYTHING" ====================
@@ -9330,7 +9545,7 @@ function applyAskFilters(matches) {
     if (f.manualOnly && !r.manualCh) return false;
     // Classified from the description, exactly as the Undelivered Report does it, so "punch only"
     // means the same set of lines in both places.
-    if (f.kind && itemKind(String(r.itemDesc || '') + ' ' + String(r.item || '')) !== f.kind) return false;
+    if (f.kind && rowKind(r) !== f.kind) return false;
     if (hasFrom || hasTo) {
       const p = parseFloat(r.piRef);          // one parse per row, not two
       if (isNaN(p)) return false;             // blank / "#N/A" PI Ref can't sit in a numeric range
@@ -9339,6 +9554,24 @@ function applyAskFilters(matches) {
     }
     return true;
   });
+}
+// The same filter bar, applied to a PI line that has no delivery yet. These lines used to be added
+// to every answer with the filter ignored, which is how "Chip Box only" came back full of Master
+// Cartons and Cross Dividers. A line never delivered has no challan, manual or otherwise, so the
+// Manual Challan filter leaves none of them.
+function askFilterPassesPiLine(ref, ln, f) {
+  f = f || readAskFilters();
+  if (!f || !f.ok) return true;
+  if (f.manualOnly) return false;
+  if (f.kind && piLineKind(ln) !== f.kind) return false;
+  const hasFrom = !isNaN(f.from), hasTo = !isNaN(f.to);
+  if (hasFrom || hasTo) {
+    const p = parseFloat(ref);
+    if (isNaN(p)) return false;
+    if (hasFrom && p < f.from) return false;
+    if (hasTo && p > f.to) return false;
+  }
+  return true;
 }
 // Single source of truth for "which filters are on" text — used by both the filter hint under
 // the filter bar and the Shortage List header, so the two can never drift apart.
@@ -9436,7 +9669,11 @@ function parsePiLines(lines) {
     const style = cands.length ? cands[cands.length - 1].toUpperCase() : null;
     const dims = dimsFromPiText(rowText);
     const measM = rowText.match(/Ply:[^)]*\)\s*CM/i);
-    const item = /Cross Divider/i.test(rowText) ? 'Cross Divider' : (/Master Carton/i.test(rowText) ? 'Master Carton' : '');
+    // "(Punch)" is kept. It used to collapse into plain "Master Carton", which is why every chip box
+    // read off a PI was listed as a Master Carton.
+    const item = /Cross Divider/i.test(rowText) ? 'Cross Divider'
+      : (/punch|perforat|chip\s*-?\s*box/i.test(rowText) ? 'Master Carton (Punch)'
+      : (/Master Carton/i.test(rowText) ? 'Master Carton' : ''));
     if (style) {
       styles[style] = (styles[style] || 0) + qty;
       items.push({ style, dims: dimKey(dims), meas: measM ? measM[0] : '', item, qty });
@@ -10335,6 +10572,34 @@ function piCoverKey(r) {
   const dk = dimKey(dimsFromMasterText(r.itemDesc) || uqExtractDimsAny(r.itemDesc));
   return normPiKey(r.piRef) + '|' + r.styleNorm + '|' + (dk || 'nodim');
 }
+// ==================== "NOT DELIVERED YET (FROM PI)" — ONE LIST, FILTER-AWARE ====================
+// Which PI lines have been delivered is a FACT about the Master File, not about the filter. It used
+// to be worked out from the FILTERED rows only, so with "Chip Box only" selected every delivered
+// Master Carton and Cross Divider line lost its delivery and came back as "Not delivered yet (from
+// PI)". Coverage is now taken from every Master row of the styles searched; only then is the filter
+// applied to what is left. Screen and Excel both call this, so they cannot disagree.
+function piFillerLines(styles, filters) {
+  const set = new Set(styles || []);
+  const covered = new Set();
+  allRecords.forEach(r => {
+    if (!set.has(r.styleNorm) || !normPiKey(r.piRef)) return;
+    if (piQtyForRow(r.piRef, r.styleNorm, r.itemDesc) !== null) covered.add(piCoverKey(r));
+  });
+  const out = [];
+  set.forEach(sn => piLinesForStyle(sn).forEach(g => g.lines.forEach(ln => {
+    const sig = g.ref + '|' + ln.style + '|' + (ln.dims || 'nodim');
+    // Two matched styles can resolve to the SAME PI line (piLinesForStyle falls back to the hard
+    // form), and without this the same undelivered line is printed once per style.
+    if (covered.has(sig)) return;
+    covered.add(sig);
+    if (filters && !askFilterPassesPiLine(g.ref, ln, filters)) return;
+    out.push({ ref: g.ref, ln });
+  })));
+  return out;
+}
+function piFillerRowHtml(g, ln) {
+  return `<tr class="review"><td><a href="#" class="pi-link" data-pi="${escHtml(String(g))}">${escHtml(String(g))}</a></td><td>${escHtml(String(piDateFor(g) ?? ''))}</td><td>${escHtml(String(ln.qty ?? ''))}</td><td></td><td>${escHtml(String(ln.style ?? ''))}</td><td>${escHtml(KIND_LABEL[piLineKind(ln)])}</td><td>${escHtml(String(ln.meas || ''))}</td><td>0</td><td></td><td></td><td></td><td></td><td>Not delivered yet (from PI)</td></tr>`;
+}
 function fillerStylesFor(matches) {
   const set = new Set();
   (matches || []).forEach(r => set.add(r.styleNorm));
@@ -10521,6 +10786,9 @@ function lookupStyle(code, opts) {
     if (matches.length) fuzzy = true;
   }
   const unfilteredCount = matches.length;
+  // Kept unfiltered: which PI lines count as delivered is decided from these, never from the
+  // filtered view (see piFillerLines).
+  const allMatches = matches;
   // The Ask-tab UI filters (Manual Challan mode / PI range) apply ONLY to Ask-tab searches.
   // The upload checker passes noFilters so a leftover Ask filter can never silently turn a
   // real style into "not found" in the generated report.
@@ -10538,7 +10806,7 @@ function lookupStyle(code, opts) {
     hitKeys.forEach(k => (styleIndex[k] || []).forEach(p => set.add(p)));
     piHits = [...set];
   }
-  return { code, codeNorm: codeRaw, matches, fuzzy, piHits, filteredOut: unfilteredCount > 0 && matches.length === 0 };
+  return { code, codeNorm: codeRaw, matches, allMatches, fuzzy, piHits, filteredOut: unfilteredCount > 0 && matches.length === 0 };
 }
 
 function addBubble(html, cls) {
@@ -10607,17 +10875,17 @@ async function downloadMatches(matches, code, opts) {
     const eff = effectiveShort(r);
     if (eff < 0) totalShort += eff; else totalExcess += eff;
   });
-  if (!shortageOnly && !noFillers) stylesInMatches.forEach(sn => piLinesForStyle(sn).forEach(g => g.lines.forEach(ln => {
-    const sig = g.ref + '|' + ln.style + '|' + (ln.dims || 'nodim');
-    // Two matched styles can resolve to the SAME PI line, which printed it — and counted its
-    // quantity into the PI total — once per style.
-    if (!coveredXls.has(sig)) {
-      coveredXls.add(sig);
+  // The same list the screen draws: coverage from every row of the searched styles, then the Ask
+  // filter bar applied. Two matched styles resolving to one PI line are counted once.
+  if (!shortageOnly && !noFillers) {
+    const fStyles = (opts && opts.fillerStyles && opts.fillerStyles.length) ? opts.fillerStyles : [...stylesInMatches];
+    piFillerLines(fStyles, readAskFilters()).forEach(p => {
+      const ln = p.ln;
       totalPiQty += ln.qty;
-      const xr = ws.addRow([g.ref, piDateFor(g.ref), ln.qty, '', ln.style, ln.item || '', ln.meas || '', 0, '', '', '', '', 'Not delivered yet (from PI)']);
+      const xr = ws.addRow([p.ref, piDateFor(p.ref), ln.qty, '', ln.style, KIND_LABEL[piLineKind(ln)], ln.meas || '', 0, '', '', '', '', 'Not delivered yet (from PI)']);
       xr.eachCell({ includeEmpty: true }, c => { c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF4DD' } }; });
-    }
-  })));
+    });
+  }
   const excessNote = totalExcess > 0 ? `Excess (separate, not netted): +${totalExcess} pcs` : '';
   const totalRow = ws.addRow(['Total', '', totalPiQty || '', '', '', '', '', totalDel, totalRec, totalShort, '', '', excessNote]);
   totalRow.font = { bold: true };
@@ -11068,22 +11336,50 @@ async function renderSingleResult(result) {
   const refsFromIndex = (styleIndex && styleIndex[codeNorm]) ? styleIndex[codeNorm].map(normPiKey).filter(Boolean) : [];
   const piRefsToLoad = [...new Set([...refsFromMatches, ...refsFromIndex])];
   for (const pr of piRefsToLoad) { if (!piIndex[pr]) await ensurePiQty(pr); }
+  const askF = readAskFilters();
+  const fDesc = (typeof activeFilterDesc === 'function') ? activeFilterDesc() : '';
   if (!matches.length && result.filteredOut) {
-    addBubble(`Records exist for <b>${code}</b>, but none match the current filter (Manual Challan / PI range). Clear the filter to see them.`, 'askA');
+    // Nothing DELIVERED passes the filter — but a line of that kind may still be on order. "No chip
+    // box delivered yet, and here is the one on PI 150" is the answer; "clear the filter" is not.
+    const unStyles = fillerStylesFor(result.allMatches || []);
+    const pending = piFillerLines(unStyles, askF);
+    let html = `<div class="summary-line">Records exist for <b>${escHtml(code)}</b>, but none of the delivered lines match the filter (${escHtml(fDesc)}).</div>`;
+    if (pending.length) {
+      html += `Still on order and matching the filter &mdash; <span class="neg">not delivered yet</span>: <b>${pending.length}</b> line(s).`;
+      html += `<div class="previewbox" style="margin-top:8px;max-height:260px;"><table class="preview"><tr><th>PI Ref</th><th>PI Date</th><th>PI Qty</th><th>Inventory Date</th><th>Style</th><th>Item</th><th>Measurement</th><th>Delivered Qty</th><th>Received Qty</th><th>Short&amp;Exs</th><th>Challan No</th><th>Challan Date</th><th>Remarks</th></tr>`;
+      pending.forEach(p => { html += piFillerRowHtml(p.ref, p.ln); });
+      html += `</table></div>`;
+    } else {
+      html += `Nothing of that kind is waiting on a PI either. Clear the filter to see the other lines.`;
+    }
+    html += unbookedBlockHtml(codeNorm, askF);
+    const b = addBubble(html, 'askA');
+    b.querySelectorAll('.pi-link').forEach(a => a.addEventListener('click', e => { e.preventDefault(); openPiFolderFiles(a.dataset.pi); }));
+    if (pending.length) {
+      const rowsOut = pending.map(p => ({ piRef: p.ref, invDate: '', style: p.ln.style, styleNorm: String(p.ln.style || '').trim().toUpperCase(),
+        item: p.ln.item || '', itemDesc: p.ln.meas || p.ln.item || '', delQty: 0, recQty: null, short: null,
+        challanNo: '', challanDate: '', remarks: 'Not delivered yet (from PI)', _piOnly: true }));
+      addDownloadButton(b, rowsOut, code, { noFillers: true });
+      result.piOnlyRows = rowsOut;
+    }
     return;
   }
   if (!matches.length) {
     if (piHits && piHits.length) {
       for (const pi of piHits) { const k = normPiKey(pi); if (k && !piIndex[k]) await ensurePiQty(k); }
-      const piLineGroups = piLinesForStyle(code.toUpperCase());
+      // The filter bar applies here too: "Chip Box only" on an undelivered style lists its chip box
+      // lines, not every line on the PI.
+      const piLineGroups = piLinesForStyle(code.toUpperCase())
+        .map(g => ({ ref: g.ref, lines: g.lines.filter(ln => askFilterPassesPiLine(g.ref, ln, askF)) }))
+        .filter(g => g.lines.length);
       let html = `<div class="summary-line">No delivery yet for <b>${code}</b> — <span class="neg">not delivered</span></div>`;
       html += `Found in PI: ` + piHits.map(pi => `<a href="#" class="pi-link" data-pi="${escHtml(String(pi))}" style="font-weight:800;color:var(--accent-dark);">${escHtml(String(pi))}</a>`).join(', ');
       if (piLineGroups.length) {
         html += `<div class="previewbox" style="margin-top:8px;max-height:260px;"><table class="preview"><tr><th>PI Ref</th><th>PI Date</th><th>PI Qty</th><th>Inventory Date</th><th>Style</th><th>Item</th><th>Measurement</th><th>Delivered Qty</th><th>Received Qty</th><th>Short&Exs</th><th>Challan No</th><th>Challan Date</th><th>Remarks</th></tr>`;
-        piLineGroups.forEach(g => g.lines.forEach(ln => {
-          html += `<tr class="review"><td><a href="#" class="pi-link" data-pi="${escHtml(String(g.ref))}">${escHtml(String(g.ref))}</a></td><td>${escHtml(String(piDateFor(g.ref) ?? ''))}</td><td>${escHtml(String(ln.qty ?? ''))}</td><td></td><td>${escHtml(String(ln.style ?? ''))}</td><td>${escHtml(String(ln.item || ''))}</td><td>${escHtml(String(ln.meas || ''))}</td><td>0</td><td></td><td></td><td></td><td></td><td>Not delivered yet (from PI)</td></tr>`;
-        }));
+        piLineGroups.forEach(g => g.lines.forEach(ln => { html += piFillerRowHtml(g.ref, ln); }));
         html += `</table></div>`;
+      } else if (fDesc && piLinesForStyle(code.toUpperCase()).length) {
+        html += `<div class="hint" style="margin-top:8px;">None of its PI lines match the filter (${escHtml(fDesc)}). Clear the filter to see them.</div>`;
       } else {
         html += `<div class="hint" style="margin-top:8px;">Click a PI number to open its work order file. Build the style index so the PI PDF quantities can be read.</div>`;
       }
@@ -11169,25 +11465,19 @@ async function renderSingleResult(result) {
   // Drawn from every style the search matched, which is what the download has always done: on a
   // fuzzy/prefix hit the old codeNorm-only version showed the first matched style's lines and the
   // file showed them all, so screen and file disagreed on exactly the rows that matter most.
-  const fillerStyles = fillerStylesFor(matches);
+  // Coverage from EVERY row of the styles searched, the filter applied afterwards — see
+  // piFillerLines. The styles come from the unfiltered hits for the same reason.
+  const fillerStyles = fillerStylesFor(result.allMatches || matches);
   if (!fillerStyles.size) fillerStyles.add(codeNorm);
-  [...fillerStyles].forEach(sn => piLinesForStyle(sn).forEach(g => g.lines.forEach(ln => {
-    const sig = g.ref + '|' + ln.style + '|' + (ln.dims || 'nodim');
-    // Two matched styles can resolve to the SAME PI line (piLinesForStyle falls back to the hard
-    // form), and without this the same undelivered line is printed once per style.
-    if (coveredPiLine.has(sig)) return;
-    coveredPiLine.add(sig);
-    {
-      html += `<tr class="review"><td><a href="#" class="pi-link" data-pi="${escHtml(String(g.ref))}">${escHtml(String(g.ref))}</a></td><td>${escHtml(String(piDateFor(g.ref) ?? ''))}</td><td>${escHtml(String(ln.qty ?? ''))}</td><td></td><td>${escHtml(String(ln.style ?? ''))}</td><td>${escHtml(String(ln.item || ''))}</td><td>${escHtml(String(ln.meas || ''))}</td><td>0</td><td></td><td></td><td></td><td></td><td>Not delivered yet (from PI)</td></tr>`;
-    }
-  })));
+  piFillerLines(fillerStyles, askF).forEach(p => { html += piFillerRowHtml(p.ref, p.ln); });
   html += tableCapNote(Math.min(matches.length, MAX_TABLE_ROWS), matches.length);
   html += `</table></div>`;
-  html += unbookedBlockHtml(codeNorm);
+  if (fDesc) html += `<div class="sub-note" style="margin-top:4px;">Filter on: ${escHtml(fDesc)} &mdash; every line above, including the not-delivered ones, is only that.</div>`;
+  html += unbookedBlockHtml(codeNorm, askF);
   const bubble = addBubble(html, 'askA');
   bubble.querySelectorAll('.pi-link').forEach(a => a.addEventListener('click', e => { e.preventDefault(); openPiFolderFiles(a.dataset.pi); }));
   wireRemarkCells(bubble, () => { resetChat(); renderSingleResult(result); });
-  addDownloadButton(bubble, matches, code);
+  addDownloadButton(bubble, matches, code, { fillerStyles: [...fillerStyles] });
 }
 
 async function renderBulkResults(codes) {
@@ -11198,10 +11488,12 @@ async function renderBulkResults(codes) {
   addBubble(`<div class="summary-line">Checked ${codes.length} style(s) — ${foundCount} found, ${codes.length - foundCount} not found</div>Full detail for each style below.`, 'askA');
 
   const allMatches = [];
+  const bulkFillerStyles = new Set();
   for (const code of codes) {
     const result = lookupStyle(code);
     await renderSingleResult(result);
     allMatches.push(...result.matches);
+    fillerStylesFor(result.allMatches || result.matches).forEach(sn => bulkFillerStyles.add(sn));
     // Undelivered styles produce no master rows but DO produce lines on screen. Leaving them out
     // meant a search where nothing had been delivered showed tables and offered no combined file.
     if (result.piOnlyRows && result.piOnlyRows.length) allMatches.push(...result.piOnlyRows);
@@ -11215,7 +11507,7 @@ async function renderBulkResults(codes) {
     btn.style.fontSize = '12.5px';
     btn.style.padding = '7px 12px';
     btn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16" stroke-linecap="round" stroke-linejoin="round"/></svg> Download combined result (${allMatches.length} row(s))`;
-    btn.onclick = () => runMatchDownload(allMatches, 'Bulk_Query', allMatches.some(r => r._piOnly) ? { noFillers: true } : undefined, btn);
+    btn.onclick = () => runMatchDownload(allMatches, 'Bulk_Query', allMatches.some(r => r._piOnly) ? { noFillers: true } : { fillerStyles: [...bulkFillerStyles] }, btn);
     bubble.appendChild(btn);
     scrollIntoChatView(btn);
   }

@@ -78,10 +78,11 @@ t('the on-screen table uses it', /coveredPiLine\.add\(piCoverKey\(r\)\)/.test(sr
 t('no second, divergent dim key is still being built for coverage',
   !/coveredPiLine\.add\(refKey \+/.test(src) && !/const ck = refKey \+/.test(src));
 t('both sides draw filler lines from every matched style',
-  /function fillerStylesFor/.test(src) && /fillerStylesFor\(matches\)/.test(src));
+  /function fillerStylesFor/.test(src) && /fillerStylesFor\(result\.allMatches \|\| matches\)/.test(src));
 t('a PI line shared by two matched styles is printed once, not twice',
-  /if \(coveredPiLine\.has\(sig\)\) return;\s*\n\s*coveredPiLine\.add\(sig\);/.test(src) &&
-  /if \(!coveredXls\.has\(sig\)\) \{\s*\n\s*coveredXls\.add\(sig\);/.test(src));
+  /function piFillerLines[\s\S]{0,900}?if \(covered\.has\(sig\)\) return;\s*\n\s*covered\.add\(sig\);/.test(src));
+t('screen and file build their filler lines from the same function',
+  /piFillerLines\(fillerStyles, askF\)/.test(src) && /piFillerLines\(fStyles, readAskFilters\(\)\)/.test(src));
 
 
 console.log('\n7. The undelivered path offers a file too');
@@ -143,6 +144,8 @@ console.log('\n9. The workbook really does hold one row per match (real ExcelJS)
     itemLabel: r => String((r && r.item) || ''),   // real one lives at top level now
     piDateFor: () => '',
     piLinesForStyle: () => [],
+    piFillerLines: () => [], readAskFilters: () => ({ ok: false }), piLineKind: () => 'master',
+    KIND_LABEL: { master: 'Master Carton', punch: 'Chip Box (Punch)', cross: 'Cross Divider' },
     dimKey: () => '', dimsFromMasterText: () => null, uqExtractDimsAny: () => null,
     notifyDownload: () => {},
     saveBlobAs: (blob, name) => name,

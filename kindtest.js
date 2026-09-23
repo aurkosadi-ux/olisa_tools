@@ -11,8 +11,9 @@ const t = (n, c, x) => { c ? (pass++, console.log('  ok   ' + n)) : (fail++, con
 const html = fs.readFileSync(process.argv[2] || 'olisa.html', 'utf8');
 const src = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]).sort((a, b) => b.length - a.length)[0];
 function lift(n) { const s = src.indexOf('function ' + n); if (s < 0) throw new Error('missing ' + n); let d = 0, e = s; for (let i = src.indexOf('{', s); i < src.length; i++) { if (src[i] === '{') d++; else if (src[i] === '}') { d--; if (!d) { e = i + 1; break; } } } return src.slice(s, e); }
-const bag = new Function(lift('itemKind') + src.match(/const KIND_LABEL = \{[^}]*\};/)[0] + lift('itemLabel')
-  + '\nreturn { itemKind, KIND_LABEL, itemLabel };')();
+const bag = new Function(lift('itemKind') + src.match(/const KIND_LABEL = \{[^}]*\};/)[0]
+  + ['normHard', 'cartonDims', 'kindWord', 'kindDims', 'kindStyleKey', 'kindKnowledge', 'kindOf', 'rowKind', 'itemLabel'].map(lift).join('\n')
+  + '\nlet _kindMemo = null;\nreturn { itemKind, KIND_LABEL, itemLabel, rowKind };')();
 
 console.log('\n1. Real descriptions are classified correctly');
 // Lifted from the actual challans and the Master File.
@@ -59,8 +60,10 @@ t('Chip Box (Punch) only is offered', /<option value="punch">Chip Box \(Punch\) 
 t('Cross Divider only is offered', /<option value="cross">Cross Divider only<\/option>/.test(html));
 t('Manual Challan only is still there', /<option value="manual">/.test(html));
 t('the chosen kind is read out of the dropdown', /const kind = \(mode === 'master' \|\| mode === 'punch' \|\| mode === 'cross'\)/.test(src));
-t('and filters on the description, the same way the Undelivered Report does',
-  /if \(f\.kind && itemKind\(String\(r\.itemDesc \|\| ''\) \+ ' ' \+ String\(r\.item \|\| ''\)\) !== f\.kind\) return false;/.test(src));
+t('and filters through the same resolver that labels the Item column',
+  /if \(f\.kind && rowKind\(r\) !== f\.kind\) return false;/.test(src)
+  && /function itemLabel\(r\) \{\s*return KIND_LABEL\[rowKind\(r\)\]/.test(src));
+t('the Undelivered Report still classifies with itemKind, unchanged', /sr\[itemKind\(r\.itemDesc\)\] \+= r\.uQty;/.test(src));
 t('a kind filter counts as "something is active"', /if \(!f\.manualOnly && !f\.kind && !hasFrom && !hasTo\) return matches;/.test(src));
 t('and is named in the active-filter text', /bits\.push\(KIND_LABEL\[f\.kind\] \+ ' only'\)/.test(src));
 
