@@ -1122,7 +1122,7 @@ document.addEventListener('click', function (e) {
       </button>
       <button id="askSaveIndexBtn" class="secondary hidden" style="flex:0 0 auto;" title="Save this index as a file you can put in Drive so your phone uses it too">⬇ Save index file</button>
       <button id="askBackupBtn" class="secondary hidden" style="flex:0 0 auto;" title="Download the current Master File (with your Update column written in) as &quot;Olisa Inventory Master File.xlsx&quot; — the exact name the tool looks for">⬇ Download Master File</button>
-      <button id="askBuildIndexBtn" class="secondary hidden" style="flex:0 0 auto;">
+      <button id="askBuildIndexBtn" class="secondary hidden" style="flex:0 0 auto;" title="New challans and work orders are indexed by themselves while the app is open. Press this only to force a full re-check now, or to read a backlog on this phone.">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h7" stroke-linecap="round"/></svg>
         Index PI + challans
       </button>
@@ -1260,7 +1260,7 @@ function switchTab(which) {
 // immediately, so the whole script threw on load. Evaluation stopped there, which meant every
 // `let` below it never initialised either, and the first thing to notice was an unrelated
 // "cannot access 'piIndex' before initialization". One misplaced constant, entire tool dead.
-const APP_VERSION = 134;
+const APP_VERSION = 135;
 // ==================== WHAT KIND OF CARTON IS THIS LINE? ====================
 // This lived inside the Undelivered Report's IIFE, so the Ask tab could not reach it and simply
 // printed the Master File's Item column as-is. That column says "Master Carton" on punch lines
@@ -2958,10 +2958,17 @@ const chatEl = document.getElementById('askChat');
 const PI_CACHE_VERSION = 3;
 let piIndexRestoredAt = null;
 let indexBuilding = false; // true while a build is running: searches still work, but say results may be partial
+// True while the running build was started by the auto-index rather than by a person. Declared up
+// here, beside indexBuilding, because the health strip, the nav guard and the build all read it,
+// and several of those run before the auto-index section further down has been reached.
+let autoBuildRunning = false;
 // indexBuilding lives inside this IIFE, but the nav guard in <head> runs at true top level and has
 // to ask whether a build is in progress. A probe function rather than a mirrored flag, so there is
 // only ever one source of truth and the two cannot drift apart.
-window.__olisaBuilding = function () { return indexBuilding; };
+// An AUTOMATIC build is not protected this way: it swaps in only when complete, so leaving the page
+// mid-way loses nothing, and it simply runs again next time. Opening the Calculator in a surprise
+// new tab for a job nobody started would be the stranger outcome.
+window.__olisaBuilding = function () { return indexBuilding && !autoBuildRunning; };
 let piIndexBuiltAt = null; // when the CURRENT in-memory PI index was produced (restored or freshly built)
 // True when the index on disk came from a checkpoint of a build that never finished. Such an index
 // is genuinely useful — it saves re-reading everything — but it is INCOMPLETE, and an incomplete
@@ -3017,6 +3024,17 @@ if (!window.showDirectoryPicker) {
 const progressWrap = document.getElementById('askProgressWrap');
 const progressBar = document.getElementById('askProgressBar');
 const progressText = document.getElementById('askProgressText');
+// An automatic build must not touch the progress box — it would paint a bar and a running commentary
+// over a screen nobody asked to be busy, and overwrite the last manual build's "Done —" line. It
+// writes to these stand-ins instead, which have exactly the shape the build expects and do nothing.
+// buildStyleIndex picks one of the two and binds them under the real names, so every progress line
+// inside it stays written the way it always was.
+const SILENT_PROGRESS = {
+  wrap: { classList: { add() {}, remove() {} } },
+  bar: { style: {} },
+  text: { textContent: '' }
+};
+function progressEls() { return { wrap: progressWrap, bar: progressBar, text: progressText }; }
 
 let allRecords = [];
 let savedRootHandle = null;
@@ -3858,9 +3876,12 @@ async function checkForNewerSharedIndex() {
     // inside, and adoptIndexPayload rejects that on its own — so this is a cheap pre-filter, not
     // the decision. Small margin so a clock skew between devices cannot cause a download loop.
     if (!stamp || stamp <= (piIndexBuiltAt || 0) + 1000) return;
+    await loadSharedIdxSeen();
+    if (sharedIdxAlreadySeen(f.id, stamp)) return;   // this exact file has been read already
     // DriveFileHandle takes the RAW metadata object from the Drive listing, not (id, name) —
     // getting that wrong throws inside getFile() and the poll would fail silently every time.
     const data = await readIndexFile({ handle: new DriveFileHandle(f), gz: /\.gz$/i.test(f.name) });
+    rememberSharedIdx(f.id, stamp);
     const adopted = adoptIndexPayload(data, 'the shared index file in Drive');
     if (adopted) {
       if (typeof clearNewWorkOrderFlag === 'function') clearNewWorkOrderFlag();
@@ -3885,6 +3906,10 @@ function newPiHint() {
 }
 async function checkForNewWorkOrders() {
   if (newPiCheckBusy) return;
+  // Superseded while the changes feed is working: that sees challans as well as work orders, misses
+  // nothing to a naming rule, and acts instead of asking. This stays as the fallback for the day
+  // Drive will not give us a cursor.
+  if (autoIndexActive() && autoFeed.token) return;
   if (!savedRootHandle || !savedRootHandle.isDrive || !piRootHandle || !piRootHandle.id) return;
   if (!piIndexBuiltAt) return;                                    // nothing to be newer THAN yet
   if (typeof indexBuilding !== 'undefined' && indexBuilding) return;
@@ -3918,7 +3943,10 @@ async function checkForNewWorkOrders() {
     driveNewSinceIndex = names.length;
     driveNewNames = names;
     if (driveNewSinceIndex && driveNewSinceIndex !== was) {
-      if (typeof notify === 'function') {
+      // No cursor, but something is clearly new: index it rather than ask. Without a cursor this
+      // is the only watcher left, so it has to do more than turn a strip amber.
+      if (autoIndexActive()) noteAutoChanges([{ id: '__watcher', kind: 'maybe', name: names[0] || '', at: Date.now() }]);
+      else if (typeof notify === 'function') {
         notify('drive', `${driveNewSinceIndex} new PI folder(s)/work order(s) appeared in Drive since the style index was built. Build the index again to include them.`);
       }
     }
@@ -3945,6 +3973,9 @@ function startMasterPolling() {
     checkForNewerMaster(true);
     if (Date.now() - lastSharedIdxCheck >= SHAREDIDX_POLL_MS) checkForNewerSharedIndex();
     if (Date.now() - lastNewPiCheck >= NEWPI_POLL_MS) checkForNewWorkOrders();
+    // Challans and work orders, on the same two-minute beat as the Master File: one small request
+    // to Drive's changes feed. See "CHALLANS AND WORK ORDERS, KEPT UP TO DATE BY THEMSELVES".
+    pollDriveChanges();
   }, MASTER_POLL_MS);
   // Coming back to the app is the most likely moment for the file to have changed while you were
   // away, so check then too rather than waiting out the rest of the interval.
@@ -3955,11 +3986,423 @@ function startMasterPolling() {
     // phone was in a pocket, so this one is checked on EVERY return, not on the 5-minute timer.
     checkForNewerSharedIndex();
     if (Date.now() - lastNewPiCheck >= NEWPI_POLL_MS) checkForNewWorkOrders();
+    // Files that landed while the app was away are found now, and anything already waiting (its
+    // timer may have fired while hidden, and an automatic build never starts off screen) goes now.
+    pollDriveChanges();
+    if (autoPending) scheduleAutoIndex();
   });
   // One check shortly after connecting, so a PI added since the last session is flagged straight
   // away instead of ten minutes into the session.
   setTimeout(checkForNewWorkOrders, 20000);
   setTimeout(checkForNewerSharedIndex, 8000);   // and one shortly after connecting
+}
+
+// ==================== CHALLANS AND WORK ORDERS, KEPT UP TO DATE BY THEMSELVES ====================
+// The Master File has looked after itself for a while: save it on the laptop and within two minutes
+// the app has it, with nothing pressed. Challans and work orders did not. A challan scanned into
+// Drive, or a work order filed into a PI folder, sat unread until someone remembered to press the
+// index button — the watcher above could only turn the strip amber and ask.
+//
+// Now they behave like the Master File. Google Drive keeps a running list of everything that changes
+// in the account (its "changes feed"), and asking it "anything since last time?" is ONE small
+// request — cheap enough to ask every two minutes, even on mobile data. When something lands in
+// Work Orders or Challans, the app lets the upload settle, then runs the same build the index button
+// runs. That build already skips every file whose size and date have not changed, so only what is
+// new gets downloaded — and then it says, in plain words, what it added.
+//
+// What keeps it out of the way:
+//  - Searches keep answering from the complete current index until the new one is finished. The
+//    swap is instant; a half-built index never answers a question.
+//  - It only runs while the app is on screen and idle — never on top of a build you started, a
+//    connect, or a Master File reload. Coming back to the app catches up straight away.
+//  - Phones give the laptop the first go. If the laptop is open it indexes the change and uploads
+//    the index, and the phone simply loads that. If the phone is the only device open it does the
+//    work itself — except a backlog big enough to be worth a laptop or a deliberate tap, which it
+//    declines and says so rather than quietly spending an evening of mobile data on it.
+//
+// The cursor into the feed travels inside the index file. A phone that loads the laptop's index
+// therefore asks Drive for exactly the changes that index has not seen: nothing is checked twice and
+// nothing falls in the gap between the two devices.
+const AUTOIDX = {
+  quietMs: 45000,          // after the newest change, wait this long: uploads arrive in bursts
+  phoneExtraMs: 120000,    // phones wait longer still, so an open laptop gets there first
+  maxWaitMs: 300000,       // however busy the folder is, never wait longer than this once found
+  minGapMs: 120000,        // at least this long between two automatic builds
+  retryMs: 600000,         // after a failure try again in ten minutes, doubling up to an hour
+  busyRetryMs: 30000,      // something else was running (a connect, a build): look again shortly
+  phoneMaxReadsCell: 25,   // on mobile data a phone reads at most this many work orders unasked
+  phoneMaxReadsWifi: 150,  // on Wi-Fi more, but a whole cold catch-up still waits for the laptop
+  maxPages: 20,            // pages of the feed read in one poll (up to 1,000 changes each)
+  ancestryPerPoll: 12,     // "which folder is this in?" questions put to Drive in one poll
+  selfWriteMs: 30 * 60000  // the tool's own OCR output is not news for this long
+};
+const AUTO_DOC_RE = /\.(xlsx|xls|xlsm|pdf|docx?|rtf|png|jpe?g)$/i;
+// The cursor, and the moment the index was last known to match Drive. The invariant that makes
+// this safe: the index reflects Drive as it stood at syncedAt, and the feed from `token` lists
+// every change after that. Everything below keeps that true, or leaves it untouched.
+let autoFeed = { rootId: null, token: null, syncedAt: 0, sharedOk: false };
+let autoWatch = { rootId: null, chRootId: null, folders: {}, files: {} };   // Drive id -> 'wo' | 'ch'
+let autoPending = null;      // { firstAt, lastAt, dueAt, items: { id: { kind, name, removed, at } } }
+let autoTimer = null;
+let autoPollBusy = false;
+let autoLastRunAt = 0;
+let autoFailCount = 0;
+let autoRetryAt = 0;
+let autoBlocked = null;      // { why: 'reads' | 'saveData', reads, at }
+let autoLastResult = null;   // { at, summary }
+let autoStarted = false;
+const autoSelfWrites = new Map();   // Drive file id -> when this tool itself wrote it
+
+function autoIndexActive() {
+  return !!(savedRootHandle && savedRootHandle.isDrive && piRootHandle && piRootHandle.id);
+}
+function autoOnWifi() {
+  const c = navigator.connection;
+  return !!(c && (c.type === 'wifi' || c.type === 'ethernet'));
+}
+function persistAutoFeed() { idbSet('autoIndexFeed', { ...autoFeed }).catch(() => {}); }
+function persistAutoWatch() { idbSet('autoIndexWatch', { ...autoWatch }).catch(() => {}); }
+async function driveChangesStartToken() {
+  const j = await driveFetch('https://www.googleapis.com/drive/v3/changes/startPageToken?supportsAllDrives=true');
+  return (j && j.startPageToken) || null;
+}
+// Files this tool itself just wrote (the OCR pass) must not come back through the feed as news and
+// trigger a second build for the tool's own output.
+function noteSelfWrite(id) { if (id) autoSelfWrites.set(id, Date.now()); }
+function autoPendingCount() {
+  return autoPending ? Object.values(autoPending.items).filter(i => i.kind !== 'check').length : 0;
+}
+// A person pressing the index button covers anything the auto-index was waiting to do.
+function autoCancelPending() {
+  autoPending = null;
+  autoBlocked = null;
+  if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; }
+}
+// A finished build, or an index adopted from the other device, has taken in everything up to the
+// cursor it carries. Whatever is still news after that cursor will be reported again by the very
+// next poll — which is why the waiting list can simply start over here. No clock comparison is
+// involved, so a phone and a laptop whose clocks disagree cannot lose a file between them.
+function autoFeedAdvanced(token, syncedAt, fromShared) {
+  if (!token || !savedRootHandle) return;
+  autoFeed = { rootId: savedRootHandle.id, token, syncedAt: syncedAt || Date.now(),
+               sharedOk: !!(fromShared || autoFeed.sharedOk) };
+  persistAutoFeed();
+  autoCancelPending();
+  setTimeout(pollDriveChanges, 1500);
+}
+// Every folder and file under Work Orders and Challans, as the last full listing saw them. This is
+// how a change is recognised as ours without asking Drive where it lives.
+function refreshAutoWatch(chRootId) {
+  if (!autoIndexActive()) return;
+  if (autoWatch.rootId !== savedRootHandle.id) autoWatch = { rootId: savedRootHandle.id, chRootId: null, folders: {}, files: {} };
+  if (chRootId) autoWatch.chRootId = chRootId;
+  const folders = {}, files = {};
+  const walk = (id, kind, depth) => {
+    if (!id || depth > 7 || folders[id]) return;
+    folders[id] = kind;
+    const kids = driveListCache.get(id);
+    if (!kids) return;
+    kids.forEach(k => { if (k.mimeType === DRIVE_FOLDER_MIME) walk(k.id, kind, depth + 1); else files[k.id] = kind; });
+  };
+  walk(piRootHandle.id, 'wo', 0);
+  walk(autoWatch.chRootId, 'ch', 0);
+  // Added to, never replaced: a folder the listing cache has since let go of is still ours.
+  autoWatch.folders = { ...autoWatch.folders, ...folders };
+  autoWatch.files = { ...autoWatch.files, ...files };
+  const fk = Object.keys(autoWatch.files);
+  if (fk.length > 30000) fk.slice(0, fk.length - 30000).forEach(k => { delete autoWatch.files[k]; });
+  persistAutoWatch();
+}
+function autoOwnOutput(name) {
+  const n = String(name || '');
+  return /^olisa[\s-]*tools/i.test(n) || /^olisa-index\.json(\.gz)?$/i.test(n) || /^~\$/.test(n);
+}
+// Is this change in Work Orders or in Challans?
+//   'wo' / 'ch' — yes;   null — no, it is somewhere else in the Drive;
+//   'maybe'     — Drive could not say in time. One build that finds nothing is better than a missed file.
+//   'defer'     — this poll has asked Drive enough questions; ask again on the next one.
+async function classifyDriveChange(c, budget) {
+  if (!c || (c.changeType && c.changeType !== 'file')) return null;
+  const f = c.file || null;
+  const id = c.fileId || (f && f.id);
+  if (!id) return null;
+  const selfAt = autoSelfWrites.get(id);
+  if (selfAt && Date.now() - selfAt < AUTOIDX.selfWriteMs) return null;
+  const at = Math.min((c.time && Date.parse(c.time)) || Date.now(), Date.now());
+  const known = autoWatch.files[id] || autoWatch.folders[id] || null;
+  // Deleted for good, or no longer shared: only the id is left, so only a file already indexed can
+  // be recognised — and that is exactly the case that matters.
+  if (c.removed || !f) return known ? { id, kind: known, name: '', removed: true, at } : null;
+  const isFolder = f.mimeType === DRIVE_FOLDER_MIME;
+  if (!isFolder && !known) {
+    if (/^application\/vnd\.google-apps\./.test(f.mimeType || '')) return null;   // a Google Doc or Sheet
+    if (!AUTO_DOC_RE.test(f.name || '')) return null;
+  }
+  if (autoOwnOutput(f.name)) return null;
+  let kind = known;
+  const parents = f.parents || [];
+  if (!kind) {
+    for (const p of parents) {
+      if (p === piRootHandle.id) { kind = 'wo'; break; }
+      if (autoWatch.chRootId && p === autoWatch.chRootId) { kind = 'ch'; break; }
+      if (autoWatch.folders[p]) { kind = autoWatch.folders[p]; break; }
+    }
+  }
+  if (!kind && parents.length) {
+    if (budget.left <= 0) return { id, kind: 'defer', name: f.name || '', at };
+    budget.left--;
+    // A folder no listing has seen yet. Ask Drive where it sits — the answer is cached, so each
+    // folder is asked about once, not once per file.
+    const inWo = await isUnderDriveFolder(parents, piRootHandle.id);
+    const inCh = (inWo === true || !autoWatch.chRootId) ? false : await isUnderDriveFolder(parents, autoWatch.chRootId);
+    if (inWo === true) kind = 'wo';
+    else if (inCh === true) kind = 'ch';
+    else if (inWo === 'unproven' || inCh === 'unproven') kind = 'maybe';
+    if (kind === 'wo' || kind === 'ch') parents.forEach(p => { autoWatch.folders[p] = kind; });
+  }
+  if (!kind) return null;
+  if (kind === 'wo' || kind === 'ch') {
+    if (isFolder) autoWatch.folders[id] = kind; else autoWatch.files[id] = kind;
+  }
+  return { id, kind, name: f.name || '', removed: !!f.trashed, folder: isFolder, at };
+}
+// One small request, most of the time: "what has changed since the cursor?"
+async function pollDriveChanges() {
+  if (!autoIndexActive() || !autoFeed.token || autoPollBusy) return;
+  if (indexBuilding || connectInFlight || navigator.onLine === false) return;
+  autoPollBusy = true;
+  const startedAt = Date.now();
+  try {
+    const fields = encodeURIComponent('nextPageToken,newStartPageToken,changes(changeType,time,removed,fileId,file(id,name,mimeType,parents,trashed,modifiedTime,size))');
+    const budget = { left: AUTOIDX.ancestryPerPoll };
+    const found = [];
+    let page = autoFeed.token, pages = 0, keep = null, drained = false, sawOurs = false;
+    while (page && pages < AUTOIDX.maxPages) {
+      let j;
+      try {
+        j = await driveFetch(`https://www.googleapis.com/drive/v3/changes?pageToken=${encodeURIComponent(page)}&pageSize=1000&includeRemoved=true&restrictToMyDrive=false&spaces=drive&supportsAllDrives=true&includeItemsFromAllDrives=true&fields=${fields}`);
+      } catch (e) {
+        // A cursor Drive no longer accepts cannot be repaired. Start a fresh one and check the index
+        // against Drive once, exactly as a first run does.
+        if (/error (400|404|410)\b/.test(String(e && e.message))) await autoResetFeed();
+        return;
+      }
+      pages++;
+      let pageOurs = false;
+      for (const c of (j.changes || [])) {
+        const k = await classifyDriveChange(c, budget);
+        if (!k) continue;
+        pageOurs = true;
+        if (k.kind !== 'defer') found.push(k);
+      }
+      // Pages holding nothing of ours are consumed for good. The first page holding something of
+      // ours is where the cursor STAYS until a build has taken it in — so closing the app in between
+      // cannot lose a file: the next launch simply reads that page again.
+      if (!sawOurs && !pageOurs) keep = j.newStartPageToken || j.nextPageToken || null;
+      if (pageOurs) sawOurs = true;
+      if (j.newStartPageToken) { drained = true; break; }
+      page = j.nextPageToken || null;
+    }
+    if (keep) autoFeed.token = keep;
+    // Read to the end and nothing of ours: the index still matches Drive, as of this poll.
+    if (drained && !sawOurs) autoFeed.syncedAt = Math.max(autoFeed.syncedAt || 0, startedAt);
+    persistAutoFeed();
+    if (found.length) { persistAutoWatch(); noteAutoChanges(found); }
+    else { renderHealth(); renderIndexStamp(); }
+  } catch (e) {
+    /* a failed poll must never disturb what is already loaded — the next one simply tries again */
+  } finally { autoPollBusy = false; }
+}
+// No usable cursor (first run on this device, another folder, or one Drive has expired): take a new
+// one from now, and — because nothing then says whether files landed since this index was built —
+// check the index against Drive once.
+async function autoResetFeed() {
+  let tok = null;
+  try { tok = await driveChangesStartToken(); } catch (e) { return; }
+  if (!tok || !savedRootHandle) return;
+  autoFeed = { rootId: savedRootHandle.id, token: tok, syncedAt: 0, sharedOk: !!autoFeed.sharedOk };
+  persistAutoFeed();
+  noteAutoChanges([{ id: '__check', kind: 'check', name: '', at: Date.now() }]);
+}
+function noteAutoChanges(items) {
+  const now = Date.now();
+  if (!autoPending) autoPending = { firstAt: now, lastAt: 0, dueAt: 0, items: {} };
+  items.forEach(it => {
+    autoPending.items[it.id] = it;
+    autoPending.lastAt = Math.max(autoPending.lastAt, Math.min(it.at || 0, now));
+  });
+  scheduleAutoIndex();
+}
+// When to build: once the burst has gone quiet, never later than maxWaitMs after it was first seen,
+// never sooner than minGapMs after the previous automatic build, and not before a failed one's retry.
+function scheduleAutoIndex(notBeforeMs) {
+  if (!autoPending) return;
+  const now = Date.now();
+  const extra = isPhoneDevice() ? AUTOIDX.phoneExtraMs : 0;
+  let at = Math.min((autoPending.lastAt || now) + AUTOIDX.quietMs + extra,
+                    autoPending.firstAt + AUTOIDX.maxWaitMs + extra);
+  at = Math.max(at, autoLastRunAt + AUTOIDX.minGapMs, autoRetryAt || 0);
+  if (typeof notBeforeMs === 'number') at = Math.max(at, now + notBeforeMs);
+  if (autoTimer) clearTimeout(autoTimer);
+  autoPending.dueAt = at;
+  autoTimer = setTimeout(() => { autoTimer = null; runAutoIndex(); }, Math.max(250, at - now));
+  if (typeof renderIndexStamp === 'function') renderIndexStamp();
+  if (typeof renderHealth === 'function') renderHealth();
+}
+async function runAutoIndex() {
+  if (!autoPending || !autoIndexActive()) return;
+  // Never started off screen: a hidden page is frozen and throttled. The return-to-foreground hook
+  // in startMasterPolling picks it straight back up.
+  if (document.visibilityState !== 'visible') return;
+  if (indexBuilding || challanIndexBuilding || connectInFlight || masterPollBusy || navigator.onLine === false) {
+    scheduleAutoIndex(AUTOIDX.busyRetryMs);
+    return;
+  }
+  // Data Saver is the phone saying "do not spend my data on your own initiative". Honoured.
+  if (navigator.connection && navigator.connection.saveData) {
+    autoBlocked = { why: 'saveData', at: Date.now() };
+    renderIndexStamp(); renderHealth();
+    return;
+  }
+  // Already found to need a big download on this connection: do not list the whole folder again
+  // for every new file only to reach the same answer. Wi-Fi, the laptop's index, or the button
+  // each clear this at once; otherwise it is looked at again after half an hour.
+  if (autoBlocked && autoBlocked.why === 'reads' && !autoOnWifi() && Date.now() - autoBlocked.at < 30 * 60000) {
+    renderIndexStamp(); renderHealth();
+    return;
+  }
+  const phone = isPhoneDevice();
+  if (phone) {
+    // The laptop may already have done it: one metadata request, and a download only if it has.
+    // Adopting its index moves the cursor on and empties the waiting list (autoFeedAdvanced).
+    try { await checkForNewerSharedIndex(); } catch (e) { /* advisory */ }
+    if (!autoPending) { renderIndexStamp(); renderHealth(); return; }
+  }
+  const maxReads = phone ? (autoOnWifi() ? AUTOIDX.phoneMaxReadsWifi : AUTOIDX.phoneMaxReadsCell) : Infinity;
+  const work = async () => {
+    autoBuildRunning = true;
+    autoLastRunAt = Date.now();
+    if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; }
+    renderIndexStamp(); renderHealth();
+    try {
+      const res = await buildStyleIndex({ auto: true, maxReads });
+      autoFailCount = 0; autoRetryAt = 0; autoBlocked = null;
+      if (res && res.changed) {
+        autoLastResult = { at: Date.now(), summary: res.summary };
+        notify('build', `Indexed automatically: ${res.summary}.`);
+      }
+    } catch (e) {
+      // The build never swapped anything in, so the index in use is untouched. Only its own
+      // bookkeeping needs putting back.
+      indexBuilding = false;
+      buildIndexBtn.disabled = false;
+      if (e && e.autoSkip) {
+        autoBlocked = { why: 'reads', reads: e.reads, at: Date.now() };
+        notify('build', `${e.reads} work order file(s) have never been read on this phone. Rather than download them over mobile data, the automatic index waits for Wi-Fi or the laptop \u2014 or press \u201cIndex PI + challans\u201d to read them now.`, true);
+      } else {
+        autoFailCount++;
+        autoRetryAt = Date.now() + Math.min(AUTOIDX.retryMs * Math.pow(2, autoFailCount - 1), 3600000);
+        const mins = Math.max(1, Math.round((autoRetryAt - Date.now()) / 60000));
+        notify('error', `Automatic indexing stopped (${e && e.message ? e.message : e}). It will try again by itself in ${mins} minute${mins === 1 ? '' : 's'}; nothing already indexed was lost.`, true);
+        if (autoPending) scheduleAutoIndex();
+      }
+    } finally {
+      autoBuildRunning = false;
+      renderIndexStamp(); renderHealth();
+    }
+  };
+  // Two copies of the app open on one device (two tabs, or the installed app and a browser tab)
+  // would otherwise both do the same build. One per device is enough.
+  if (navigator.locks && navigator.locks.request) {
+    await navigator.locks.request('olisa-auto-index', { ifAvailable: true }, async lock => {
+      if (!lock) { scheduleAutoIndex(AUTOIDX.busyRetryMs * 2); return; }   // the other tab is on it
+      await work();
+    });
+  } else await work();
+}
+// A phone that was waiting for Wi-Fi (or for Data Saver to be switched off) goes the moment it can.
+if (typeof navigator !== 'undefined' && navigator.connection && navigator.connection.addEventListener) {
+  navigator.connection.addEventListener('change', () => {
+    if (!autoBlocked || !autoPending) return;
+    const clear = (autoBlocked.why === 'reads' && autoOnWifi())
+      || (autoBlocked.why === 'saveData' && !navigator.connection.saveData);
+    if (clear) { autoBlocked = null; scheduleAutoIndex(); }
+  });
+}
+// Called once a folder is connected (both the instant resume and the full connect).
+async function autoIndexStart() {
+  if (!autoIndexActive()) return;
+  if (autoStarted && autoFeed.rootId === savedRootHandle.id && autoFeed.token) {
+    setTimeout(pollDriveChanges, 3000);
+    return;
+  }
+  autoStarted = true;
+  try {
+    const f = await idbGet('autoIndexFeed');
+    // Whichever is further along wins: an index adopted while this was loading may already have
+    // moved the cursor on.
+    if (f && f.token && f.rootId === savedRootHandle.id &&
+        (!autoFeed.token || autoFeed.rootId !== f.rootId || (f.syncedAt || 0) > (autoFeed.syncedAt || 0))) {
+      autoFeed = { rootId: f.rootId, token: f.token, syncedAt: f.syncedAt || 0, sharedOk: !!f.sharedOk };
+    }
+    const w = await idbGet('autoIndexWatch');
+    if (w && w.rootId === savedRootHandle.id) {
+      const cur = autoWatch.rootId === w.rootId ? autoWatch : { folders: {}, files: {} };
+      autoWatch = { rootId: w.rootId, chRootId: cur.chRootId || w.chRootId || null,
+                    folders: { ...(w.folders || {}), ...cur.folders }, files: { ...(w.files || {}), ...cur.files } };
+    }
+  } catch (e) { /* first run on this device */ }
+  if (autoWatch.rootId !== savedRootHandle.id) autoWatch = { rootId: savedRootHandle.id, chRootId: null, folders: {}, files: {} };
+  // The Challans folder's id is what lets a new challan be recognised without any listing at all.
+  if (!autoWatch.chRootId) {
+    try { const r = await findChallanRoot(); if (r && r.id) { autoWatch.chRootId = r.id; persistAutoWatch(); } }
+    catch (e) { /* recognised through the ancestry check instead */ }
+  }
+  if (!autoFeed.token || autoFeed.rootId !== savedRootHandle.id) await autoResetFeed();
+  else setTimeout(pollDriveChanges, 3000);
+}
+// ---- What an automatic build changed, in words ----
+// Compared as fingerprints, not contents, so it is cheap: a PI's set of styles, each invoice's
+// source file, each challan's source file.
+function indexSnapshot() {
+  const byPi = {};
+  Object.entries(styleIndex || {}).forEach(([style, refs]) => {
+    (Array.isArray(refs) ? refs : []).forEach(ref => { (byPi[ref] = byPi[ref] || []).push(style); });
+  });
+  const wo = {};
+  Object.keys(byPi).forEach(ref => { wo[ref] = byPi[ref].sort().join(','); });
+  const qty = {};
+  Object.entries(piIndex || {}).forEach(([ref, e]) => { qty[ref] = (e && (e.srcFp || e.fileName)) || ''; });
+  const ch = {};
+  Object.entries(challanIndex || {}).forEach(([no, e]) => { ch[no] = (e && e.fp) || ''; });
+  return { wo, qty, ch };
+}
+function indexDiff(a, b) {
+  const added = (x, y) => Object.keys(y).filter(k => !(k in x));
+  const gone = (x, y) => Object.keys(x).filter(k => !(k in y));
+  const moved = (x, y) => Object.keys(y).filter(k => (k in x) && x[k] !== y[k]);
+  const d = {
+    chNew: added(a.ch, b.ch), chGone: gone(a.ch, b.ch), chChanged: moved(a.ch, b.ch),
+    woNew: added(a.wo, b.wo), woGone: gone(a.wo, b.wo), woChanged: moved(a.wo, b.wo),
+    qtyNew: added(a.qty, b.qty), qtyChanged: moved(a.qty, b.qty)
+  };
+  d.changed = Object.keys(d).some(k => d[k].length);
+  return d;
+}
+function describeIndexDiff(d) {
+  const byNum = arr => arr.slice().sort((x, y) => (parseInt(x, 10) || 0) - (parseInt(y, 10) || 0));
+  const list = (arr, n) => arr.slice(0, n).join(', ') + (arr.length > n ? ` and ${arr.length - n} more` : '');
+  const bits = [];
+  if (d.chNew.length) bits.push(`${d.chNew.length} new challan${d.chNew.length > 1 ? 's' : ''} (${list(d.chNew, 4)})`);
+  if (d.chChanged.length) bits.push(`${d.chChanged.length} challan cop${d.chChanged.length > 1 ? 'ies' : 'y'} re-read after the file changed`);
+  if (d.chGone.length) bits.push(`${d.chGone.length} challan${d.chGone.length > 1 ? 's' : ''} no longer in the Challans folder (${list(d.chGone, 3)})`);
+  if (d.woNew.length) bits.push(`work orders for PI ${list(byNum(d.woNew), 5)}`);
+  if (d.woChanged.length) bits.push(`updated work orders for PI ${list(byNum(d.woChanged), 5)}`);
+  if (d.woGone.length) bits.push(`no work orders left for PI ${list(byNum(d.woGone), 5)}`);
+  const qtyOnly = byNum(d.qtyNew.filter(r => d.woNew.indexOf(r) === -1));
+  if (qtyOnly.length) bits.push(`PI quantities for PI ${list(qtyOnly, 5)}`);
+  if (d.qtyChanged.length) bits.push(`invoice re-read for PI ${list(byNum(d.qtyChanged), 5)}`);
+  return bits.join('; ');
 }
 
 // ==================== ONE CONNECT AT A TIME, AND IT KEEPS GOING ====================
@@ -4066,6 +4509,7 @@ async function connectFolderInner(existingHandle, forceNew) {
           loadStatus.textContent = `Master File loaded ("${warm.masterName}") \u00b7 ${piRootHandle ? 'Work Orders folder ready' : 'Work Orders folder not found'} \u00b7 resumed instantly (no rescan for another ${warmMinutesLeft(warm)} min).`;
           loadStatus.className = 'status ok';
           startMasterPolling();
+          autoIndexStart();   // and new challans/work orders are picked up on their own from here
 
           // THE PHONE-NEVER-CATCHES-UP BUG. This warm path returned right here, and the shared
           // index file in Drive was only ever looked at on the FULL connect below. On a phone the
@@ -4149,7 +4593,7 @@ async function connectFolderInner(existingHandle, forceNew) {
     void (async () => {
       try {
         const adoptedShared = await tryLoadIndexFromFolder(dirHandle);
-        if (!adoptedShared && Object.keys(piIndex).length) await reportIndexFreshness(false);
+        if (!adoptedShared && Object.keys(piIndex).length && !autoIndexActive()) await reportIndexFreshness(false);
       } catch (e) { /* advisory only — never allowed to fail a connect */ }
       if (typeof renderHealth === 'function') renderHealth();
     })();
@@ -4205,7 +4649,8 @@ async function connectFolderInner(existingHandle, forceNew) {
     if (masterFileBytes) await saveWarmSession(dirHandle, masterFileName, masterFileBytes);
     if (stopConnectProgress) stopConnectProgress();
     startMasterPolling();   // from here on, a newer Master File is picked up on its own
-    loadStatus.textContent = bits.join(' · ') + ' · watching Drive for a newer Master File and for new PIs/work orders.';
+    autoIndexStart();       // and so are new challans and work orders
+    loadStatus.textContent = bits.join(' · ') + ' · watching Drive: a newer Master File, new challans and new work orders are all picked up automatically.';
     loadStatus.className = masterSearch.handle ? 'status ok' : 'status err';
   } catch (err) {
     if (stopConnectProgress) stopConnectProgress();
@@ -5008,6 +5453,39 @@ let lastCheckpoint = { style: 0, pi: 0, fileCache: 0 };
 const STYLE_FILE_CACHE_MAX = 20000;
 let styleFileCache = {};        // "path|size|mtime" -> { t: [tokens], at: lastSeenMs }
 let styleFileCacheDirty = false;
+// When the last complete build started. Every file that build saw was touched at or after this
+// moment, so it separates "these are the work orders as they are now" from older readings of files
+// that have since been replaced.
+let styleFilesFrom = 0;
+// ==================== WHY THE PHONE USED TO HAVE TO READ EVERYTHING ====================
+// The index file carried the RESULTS of reading the work orders but never the readings themselves,
+// so a phone that loaded the laptop's index still had an empty per-file cache. The moment it tried
+// to update that index by itself, every single work order looked unread and had to be downloaded —
+// hundreds of files, on mobile data, to add one challan. These two functions are the fix: the
+// per-file readings travel with the index, so any device can carry on incrementally from any other.
+function shippedStyleFiles() {
+  const out = {};
+  if (!styleFilesFrom) return out;
+  let n = 0;
+  for (const [fp, v] of Object.entries(styleFileCache)) {
+    if (!v || (v.at || 0) < styleFilesFrom) continue;   // an older reading of a file since replaced
+    out[fp] = Array.from(v.t || []);                    // a Set does not survive JSON; an array does
+    if (++n >= STYLE_FILE_CACHE_MAX) break;
+  }
+  return out;
+}
+function mergeShippedStyleFiles(sf) {
+  if (!sf || typeof sf !== 'object') return 0;
+  const now = Date.now();
+  let n = 0;
+  for (const [fp, toks] of Object.entries(sf)) {
+    if (!Array.isArray(toks) || styleFileCache[fp]) continue;   // never overwrite a local reading
+    styleFileCache[fp] = { t: toks, at: now };
+    n++;
+  }
+  if (n) { styleFileCacheDirty = true; checkpointStyleFileCache(true); }
+  return n;
+}
 async function checkpointStyleFileCache(force) {
   if (!styleFileCacheDirty) return;
   const now = Date.now();
@@ -5020,12 +5498,15 @@ async function checkpointStyleFileCache(force) {
         .forEach(k => { delete styleFileCache[k]; });
   }
   styleFileCacheDirty = false;
-  try { await idbSet('styleFileCache', { data: styleFileCache, at: now }); } catch (e) { /* quota — only costs a re-read */ }
+  try { await idbSet('styleFileCache', { data: styleFileCache, at: now, from: styleFilesFrom }); } catch (e) { /* quota — only costs a re-read */ }
 }
 (async function initStyleFileCache() {
   try {
     const c = await idbGet('styleFileCache');
-    if (c && c.data && typeof c.data === 'object') styleFileCache = c.data;
+    // Folded in, not assigned over: an index adopted from Drive during these first milliseconds has
+    // already put readings here, and replacing the object would throw them away.
+    if (c && c.data && typeof c.data === 'object') styleFileCache = Object.assign(c.data, styleFileCache);
+    if (c && c.from) styleFilesFrom = c.from;
   } catch (e) { /* first run — nothing banked yet */ }
 })();
 async function checkpointStyleIndex(index, force) {
@@ -5040,18 +5521,38 @@ async function checkpointPiIndex(force) {
   lastCheckpoint.pi = now;
   try { await idbSet('piIndex', { data: piIndex, builtAt: now, version: PI_CACHE_VERSION, partial: !force }); } catch (e) { /* quota */ }
 }
-async function buildStyleIndex() {
+async function buildStyleIndex(opts) {
   if (!piRootHandle) return;
+  opts = opts || {};
+  // The SAME pipeline runs whether a person pressed the button or the auto-index started it. An
+  // automatic run differs in four ways only: it is silent, searches keep the complete old style
+  // index until this one is finished, the invoice hunt outside PI folders is limited to PIs that
+  // actually changed, and nothing is uploaded or announced when it turns out nothing changed.
+  const auto = !!opts.auto;
+  const { wrap: progressWrap, bar: progressBar, text: progressText } = auto ? SILENT_PROGRESS : progressEls();
   buildIndexBtn.disabled = true;
   indexBuilding = true;
+  // Pressing the button covers whatever the auto-index was waiting to do.
+  if (!auto) autoCancelPending();
   // Hold the screen awake for the duration. Nothing else keeps a long Drive read alive on a phone:
   // the screen sleeps, the page is frozen and then evicted, and the whole build is genuinely lost.
-  acquireBuildWakeLock();
+  // An automatic build does not take the lock: nobody asked for it, it is short, and if the phone
+  // sleeps through it nothing is lost — it simply runs again.
+  if (!auto) acquireBuildWakeLock();
   renderIndexStamp();
   progressWrap.classList.remove('hidden');
+  // The change cursor is taken BEFORE a single folder is listed. Anything that lands while this
+  // build runs therefore still shows up in the next poll rather than falling into the gap between
+  // the listing and the cursor.
+  let feedTok = null;
+  if (savedRootHandle && savedRootHandle.isDrive) {
+    try { feedTok = await driveChangesStartToken(); } catch (e) { feedTok = null; }
+  }
+  const listedAt = Date.now();
+  const before = indexSnapshot();
   piQtyMisses.clear(); rootPdfCatalog = null; piInvoiceCatalog = null; driveListCache.clear(); // a rebuild re-tries everything from scratch
   const diagBox = document.getElementById('askPiDiag');
-  if (diagBox) { diagBox.classList.add('hidden'); diagBox.innerHTML = ''; }
+  if (diagBox && !auto) { diagBox.classList.add('hidden'); diagBox.innerHTML = ''; }
   const index = {};
   let filesScanned = 0, foldersScanned = 0;
 
@@ -5110,6 +5611,28 @@ async function buildStyleIndex() {
   progressBar.style.width = '0%';
   setProgress(progressText, `Found ${readTasks.length} work-order file(s) across ${piFolders.length} PI folder(s). Reading\u2026`, true);
 
+  // ==================== DECIDED BEFORE A SINGLE BYTE MOVES ====================
+  // The listing already carries every file's size and date, so which work orders actually need
+  // reading is arithmetic, not a download. Two things come out of it: which PIs changed (the invoice
+  // hunt below only bothers with those on an automatic build), and how big this job is — which is
+  // what lets a phone decline a hundred-file catch-up on mobile data instead of silently spending it.
+  const changedPiRefs = new Set();
+  let unreadCount = 0;
+  readTasks.forEach(t => {
+    const fp0 = metaFp(t.path, t.fhandle);
+    if (fp0 && styleFileCache[fp0]) return;
+    unreadCount++;
+    changedPiRefs.add(normPiKey(t.piRef) || String(t.piRef));
+  });
+  if (auto && opts.maxReads !== undefined && unreadCount > opts.maxReads) {
+    // The folder tree has been listed by this point, so the watch list is worth keeping even though
+    // the build itself is being abandoned.
+    refreshAutoWatch();
+    const err = new Error(`${unreadCount} work-order file(s) would have to be downloaded`);
+    err.autoSkip = true; err.reads = unreadCount;
+    throw err;
+  }
+
   const READ_CONCURRENCY = 8;
   const scanStart = newEtaClock();
   let filesDone = 0, filesReused = 0;
@@ -5162,8 +5685,14 @@ async function buildStyleIndex() {
     const pct = readTasks.length ? Math.round((filesDone / readTasks.length) * 100) : 100;
     progressBar.style.width = pct + '%';
     setProgress(progressText, `Scanning work orders: ${filesDone} / ${readTasks.length} file(s) across ${piFolders.length} PI folder(s) (${filesScanned} read${filesReused ? `, ${filesReused} unchanged` : ''})${etaText(scanStart, filesDone, readTasks.length)}`);
-    styleIndex = index;                 // searchable as it grows, not only when the whole scan ends
-    await checkpointStyleIndex(index);  // banked every few seconds — see CHECKPOINT_MS
+    // A build you started is searchable as it grows, and banked every few seconds (see
+    // CHECKPOINT_MS) so being killed costs nothing. An automatic one does neither on purpose: the
+    // complete index you already have keeps answering until the new one is finished, and a build
+    // nobody asked for has no business leaving a half-finished index on disk.
+    if (!auto) {
+      styleIndex = index;                 // searchable as it grows, not only when the whole scan ends
+      await checkpointStyleIndex(index);  // banked every few seconds — see CHECKPOINT_MS
+    }
     await checkpointStyleFileCache();
     await yieldSoon();                  // hand the thread back: eight lanes must not block as one
   });
@@ -5185,11 +5714,18 @@ async function buildStyleIndex() {
   // the whole connected folder for it before declaring anything missing.
   const missingRefs = [];
   piResult.entries.forEach(e => { if (!e.ok && e.ref && !piIndex[e.ref] && missingRefs.indexOf(e.ref) === -1) missingRefs.push(e.ref); });
+  // A PI whose invoice was hunted for across the whole folder last time, and not found, is in
+  // exactly the same state today unless something in it changed. Walking the entire connected folder
+  // again for it every time a challan arrives is the one genuinely expensive thing an automatic
+  // build could do, so it hunts only for PIs this build actually saw change.
+  const hunted = auto
+    ? missingRefs.filter(r => changedPiRefs.has(r) || !(r in before.wo) && !(r in before.qty))
+    : missingRefs;
   let sweep = null;
-  if (missingRefs.length && savedRootHandle) {
+  if (hunted.length && savedRootHandle) {
     progressBar.style.width = '0%';
-    progressText.textContent = `${missingRefs.length} PI folder(s) had no invoice inside. Searching the whole connected folder...`;
-    sweep = await fillPiQtyFromRoot(savedRootHandle, missingRefs, msg => { progressText.textContent = msg; });
+    progressText.textContent = `${hunted.length} PI folder(s) had no invoice inside. Searching the whole connected folder...`;
+    sweep = await fillPiQtyFromRoot(savedRootHandle, hunted, msg => { progressText.textContent = msg; });
     progressBar.style.width = '100%';
     piResult.entries.forEach(e => { if (!e.ok && e.ref && piIndex[e.ref]) { e.ok = true; e.foundAt = sweep.foundAt[e.ref] || ''; } });
   }
@@ -5217,24 +5753,44 @@ async function buildStyleIndex() {
   if (typeof renderIndexStamp === 'function') renderIndexStamp();
   if (typeof renderHealth === 'function') renderHealth();
   let challanResult = null, challanError = '';
+  // "Read my challan copies now" writes the very same index. Letting it run on top of this phase
+  // would have two readers building one map, so it is told the folder is busy while this runs — and
+  // if it got in first, this waits for it rather than fighting it.
+  await waitWhileChallanRead();
+  challanIndexBuilding = true;
   try {
     progressBar.style.width = '0%';
     progressText.textContent = 'Style index ready. Now reading your challan copies\u2026';
     challanResult = await buildChallanIndex((d, total, found, eta) => {
       progressBar.style.width = Math.round((d / total) * 100) + '%';
       progressText.textContent = `Reading challan copies: ${d} / ${total} document(s) \u2014 ${found} challan(s) found${eta || ''}`;
-    });
+    }, { auto });
   } catch (e) {
     challanError = e.message;
+  } finally {
+    challanIndexBuilding = false;
   }
 
   challanBuildError = challanError;   // remembered so the health line can say WHY there are none
   if (typeof clearNewWorkOrderFlag === 'function') clearNewWorkOrderFlag();
+  // The index now matches Drive as it stood when the listing began, and the cursor taken at that
+  // moment lists everything since. Anything the auto-index was waiting for is covered by this.
+  if (feedTok) autoFeedAdvanced(feedTok, listedAt);
+  refreshAutoWatch(challanResult && challanResult.folderId);
+  styleFilesFrom = listedAt;   // which cached work-order readings are current, for the shared index
   if (typeof renderIndexStamp === 'function') renderIndexStamp();
   if (typeof renderHealth === 'function') renderHealth();
   const chCount = Object.keys(challanIndex).length;
-  if (typeof notify === 'function') notify('build', `Index built: ${withPi} PI(s), ${Object.keys(index).length} style(s)${chCount ? `, ${chCount} challan copies` : ''}.`);
-  if (typeof uploadIndexToDrive === 'function') uploadIndexToDrive(); // fire-and-forget; notifies on its own
+  const diff = indexDiff(before, indexSnapshot());
+  if (!auto) {
+    if (typeof notify === 'function') notify('build', `Index built: ${withPi} PI(s), ${Object.keys(index).length} style(s)${chCount ? `, ${chCount} challan copies` : ''}.`);
+    if (typeof uploadIndexToDrive === 'function') uploadIndexToDrive(); // fire-and-forget; notifies on its own
+  } else if (diff.changed || !autoFeed.sharedOk) {
+    // Nothing changed and the other device already has an index carrying a cursor? Then there is
+    // nothing to send, and re-uploading the same megabytes every time a build runs would only make
+    // the other device download them again.
+    uploadIndexToDrive({ quiet: true });
+  }
   // Say plainly how much of this build was reused rather than re-read. Without it an incremental
   // build that finished in twenty seconds looks like one that silently skipped the work.
   const reuseNote = filesReused
@@ -5247,11 +5803,21 @@ async function buildStyleIndex() {
     + (challanError ? `challan copies NOT read (${challanError})`
        : challanResult ? `${challanResult.challans} challan copies read from ${challanResult.files} document(s)`
        : 'no challan copies found') + '.' + reuseNote + chNote, true);
-  renderPiIndexDiagnostics(piFolders.length, withPi, b, sweep);
+  if (!auto) renderPiIndexDiagnostics(piFolders.length, withPi, b, sweep);
   indexBuilding = false;
-  releaseBuildWakeLock();
+  if (!auto) releaseBuildWakeLock();
   buildIndexBtn.disabled = false;
   renderIndexStamp();
+  // What the caller needs to know, and nothing more: did this build actually change the index, and
+  // how would you say that to a person.
+  return { changed: !!diff.changed, summary: describeIndexDiff(diff), diff,
+           read: unreadCount, challanError, listedAt };
+}
+// One challan read at a time. The full build waits here for a "Read my challan copies now" that got
+// in first, rather than the two of them writing one index between them.
+async function waitWhileChallanRead(maxMs) {
+  const until = Date.now() + (maxMs || 600000);
+  while (challanIndexBuilding && Date.now() < until) await new Promise(r => setTimeout(r, 400));
 }
 // When some PIs come back without quantities, say exactly which ones and why. Each bucket is a
 // different real-world cause with a different fix, so lumping them into one number hides the problem.
@@ -5331,7 +5897,8 @@ async function ensureNamedFolder(name) {
   });
   return made.id;
 }
-async function uploadIndexToDrive() {
+async function uploadIndexToDrive(opts) {
+  opts = opts || {};
   if (!(savedRootHandle && savedRootHandle.isDrive)) return; // office/local mode: nothing to do
   if (!Object.keys(piIndex).length) return;
   try {
@@ -5346,22 +5913,51 @@ async function uploadIndexToDrive() {
     if (!driveToken) await requestDriveToken(false);
     let res;
     if (existing.files && existing.files.length) {
-      res = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${existing.files[0].id}?uploadType=media&supportsAllDrives=true`, {
+      res = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${existing.files[0].id}?uploadType=media&fields=id,modifiedTime&supportsAllDrives=true`, {
         method: 'PATCH', headers: { Authorization: 'Bearer ' + driveToken }, body: blob
       });
     } else {
       const form = new FormData();
       form.append('metadata', new Blob([JSON.stringify({ name, parents: [folderId] })], { type: 'application/json' }));
       form.append('file', blob);
-      res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id&supportsAllDrives=true', {
+      res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,modifiedTime&supportsAllDrives=true', {
         method: 'POST', headers: { Authorization: 'Bearer ' + driveToken }, body: form
       });
     }
     if (!res.ok) throw new Error('upload ' + res.status);
-    notify('drive', `Index uploaded to Drive ("${INDEX_UPLOAD_FOLDER}") \u2014 your phone will load it automatically for a faster start.`);
+    // Our own file, as it now stands. Without this the poller five minutes later sees a file newer
+    // than this device's index and downloads the whole thing back again — every five minutes, for
+    // ever, on mobile data too. See sharedIdxAlreadySeen.
+    try {
+      const made = await res.json();
+      if (made && made.id) rememberSharedIdx(made.id, made.modifiedTime ? Date.parse(made.modifiedTime) : Date.now());
+    } catch (e) { /* the upload itself succeeded, which is what matters */ }
+    if (autoFeed.token) { autoFeed.sharedOk = true; persistAutoFeed(); }
+    notify('drive', `Index uploaded to Drive ("${INDEX_UPLOAD_FOLDER}") \u2014 your phone will load it automatically for a faster start.`, !!opts.quiet);
   } catch (e) {
-    notify('error', `Automatic index upload failed (${e.message}). You can still use \u201cSave index file\u201d manually.`);
+    notify('error', `Automatic index upload failed (${e.message}). You can still use \u201cSave index file\u201d manually.`, !!opts.quiet);
   }
+}
+// ==================== READING THE SAME INDEX FILE OVER AND OVER ====================
+// The shared-index poller compared the file's date against the date of the index in memory. Our own
+// upload is always a few seconds newer than the index it contains, so that test passed for ever:
+// every poll, and every return to the app, downloaded the whole index file again, merged nothing
+// (it is our own build) and threw it away. On a phone that is megabytes of mobile data a day for
+// literally nothing. Remembering which exact version was last read settles it in one comparison.
+let lastSharedIdx = null;       // { id, stamp }
+let lastSharedIdxLoaded = false;
+async function loadSharedIdxSeen() {
+  if (lastSharedIdxLoaded) return;
+  lastSharedIdxLoaded = true;
+  try { const v = await idbGet('sharedIdxSeen'); if (v && v.id) lastSharedIdx = v; } catch (e) { /* first run */ }
+}
+function sharedIdxAlreadySeen(id, stamp) {
+  return !!(lastSharedIdx && lastSharedIdx.id === id && lastSharedIdx.stamp === stamp);
+}
+function rememberSharedIdx(id, stamp) {
+  lastSharedIdx = { id, stamp: stamp || 0 };
+  lastSharedIdxLoaded = true;
+  idbSet('sharedIdxSeen', lastSharedIdx).catch(() => {});
 }
 // ==================== VERSIONED MASTER-FILE BACKUPS TO DRIVE ====================
 // Your edits live in this browser. If the laptop is wiped, that copy goes with it — so every set
@@ -6059,8 +6655,31 @@ function renderIndexStamp() {
   if (!el) return;
   const n = Object.keys(piIndex).length;
   if (indexBuilding) {
-    el.innerHTML = `<span style="color:var(--accent-dark);font-weight:700;">\u27f3 Indexing in the background \u2014 you can keep searching; results may be incomplete until it finishes.</span>`;
+    // An automatic build is a different promise: it swaps in only when finished, so what is on
+    // screen now is the complete index, not a partial one.
+    el.innerHTML = autoBuildRunning
+      ? `<span style="color:var(--accent-dark);font-weight:700;">\u27f3 New files found in Drive \u2014 adding them to the index automatically. Searches keep using the current index until it is ready.</span>`
+      : `<span style="color:var(--accent-dark);font-weight:700;">\u27f3 Indexing in the background \u2014 you can keep searching; results may be incomplete until it finishes.</span>`;
     return;
+  }
+  // ---- what the auto-index is doing, when there is anything to say ----
+  if (autoIndexActive() && autoFeed.token) {
+    if (autoBlocked && autoBlocked.why === 'reads' && n) {
+      el.innerHTML = `<span style="color:var(--warn,#B45309);font-weight:600;">${autoBlocked.reads} work-order file(s) have never been read on this phone, so they are not being downloaded over mobile data. They go in by themselves on Wi-Fi or when the laptop indexes \u2014 or press \u201cIndex PI + challans\u201d to read them now.</span>`;
+      return;
+    }
+    if (autoBlocked && autoBlocked.why === 'saveData' && n) {
+      el.innerHTML = `<span style="color:var(--warn,#B45309);font-weight:600;">New files are waiting in Drive, but Data Saver is on, so nothing is being downloaded automatically. Turn it off, or press \u201cIndex PI + challans\u201d.</span>`;
+      return;
+    }
+    const waiting = autoPendingCount();
+    if (waiting) {
+      el.innerHTML = `<span style="color:var(--accent-dark);font-weight:600;">\u27f3 ${waiting} new or changed file(s) in Drive \u2014 they will be added to the index automatically in a moment.</span>`;
+      return;
+    }
+    // Checked against Drive within the last half hour: the index IS current, whatever its age says,
+    // so none of the "rebuild it" lines below apply.
+    if (n && autoFeed.syncedAt && Date.now() - autoFeed.syncedAt < 30 * 60000) { el.textContent = ''; return; }
   }
   // Deliberately silent when everything is fine. The health strip above already carries the
   // "N PI(s), built at…" figure permanently; repeating it here just gave the same fact twice.
@@ -6105,7 +6724,14 @@ function renderHealth() {
   // freshly-built index 34 minutes old showed the same warning colour as one five days stale —
   // two completely different problems wearing the same face, and the one it actually meant
   // ("no challans here") was never spelled out. Absent challans are now said in words instead.
+  // ==================== AGE IS NOT THE QUESTION ANY MORE ====================
+  // Age was a proxy for "might Drive have something this index has not seen?". While the auto-index
+  // is running that question has a real answer, so a five-day-old index that Drive was checked
+  // against a minute ago is current, and saying "rebuild recommended" would be plainly wrong.
+  const autoFresh = autoIndexActive() && autoFeed.token && autoFeed.syncedAt
+    && (Date.now() - autoFeed.syncedAt) < 30 * 60000;
   const idxDot = piCount === 0 ? 'hgrey'
+    : autoFresh ? 'hgreen'
     : days === null ? 'hgreen'
     : days >= IDX_STALE_DAYS ? 'hred'
     : days >= IDX_WARN_DAYS ? 'hyellow'
@@ -6118,8 +6744,12 @@ function renderHealth() {
   const chPart = chCount ? ` and ${chCount} challan copies`
     : challanBuildError ? ` \u2014 challan copies NOT read: ${challanBuildError}`
     : ' \u2014 no challan copies indexed yet';
+  const autoTail = autoBuildRunning ? ' \u2014 adding new files now'
+    : autoPendingCount() ? ` \u2014 ${autoPendingCount()} new file(s) found, indexing shortly`
+    : autoFresh ? ` \u2014 up to date with Drive (checked ${agoText(autoFeed.syncedAt)})`
+    : '';
   const idxTxt = piCount === 0 ? 'Index: not built'
-    : `Index: ${piCount} PI(s)${chPart} \u2014 ${stampText(piIndexBuiltAt)} (${agoText(piIndexBuiltAt)})${days !== null && days >= IDX_STALE_DAYS ? ' \u2014 rebuild recommended' : ''}${newPiHint()}`;
+    : `Index: ${piCount} PI(s)${chPart} \u2014 ${stampText(piIndexBuiltAt)} (${agoText(piIndexBuiltAt)})${!autoFresh && days !== null && days >= IDX_STALE_DAYS ? ' \u2014 rebuild recommended' : ''}${autoTail}${newPiHint()}`;
   el.innerHTML = [
     `<span><span class="hdot ${online ? 'hgreen' : 'hred'}"></span>${online ? 'Online' : 'Offline \u2014 waiting for connection'}</span>`,
     `<span><span class="hdot ${driveOn ? 'hgreen' : localOn ? 'hgreen' : 'hgrey'}"></span>${driveOn ? 'Drive connected' : localOn ? 'Local folder connected' : 'No folder connected'}</span>`,
@@ -6188,10 +6818,21 @@ function currentIndexPayload() {
     // phone quietly had nothing to search. It is the same build, so it travels with the same file.
     challanIndex: challanIndex || {},
     challanCount: Object.keys(challanIndex || {}).length,
-    // Only the FAILURES ride along, never the per-file token cache: these are small (a handful of
-    // unreadable files) where that one is a second copy of the whole style index by another name.
+    // Only the FAILURES ride along for challans: a handful of unreadable files, where the challan
+    // token cache would be a second copy of the whole index by another name.
     challanMisses,
     piPdfDuds,
+    piFolderDuds,
+    // ==================== WHERE THIS INDEX IS UP TO, IN DRIVE'S OWN TERMS ====================
+    // Not a clock reading: a cursor into Drive's changes feed, plus the moment this index was known
+    // to match. The device that loads this file asks Drive for exactly the changes made after that
+    // cursor — so two devices with disagreeing clocks still cannot lose a file between them, and a
+    // phone that has just loaded the laptop's index re-checks nothing the laptop already did.
+    changesToken: autoFeed.token || null,
+    listedAt: autoFeed.syncedAt || 0,
+    // What each work-order file was read to contain. Without this a device that has never read them
+    // itself has to download every one of them before it can add a single new file to the index.
+    styleFiles: shippedStyleFiles(),
     acceptedShorts, // travel with the index so a decision made on the laptop reaches the phone
     remarkOverrides,
     // Undos travel too — otherwise an undo on one device never reached the other, and that
@@ -6284,6 +6925,10 @@ function adoptIndexPayload(data, sourceLabel) {
   if (overlaysMerged) {
     notify('info', `${overlaysMerged} remark/acceptance update(s) picked up from ${sourceLabel}.`, true);
   }
+  // Readings merge before the gates too, and for the same reason: they are per-file facts about
+  // Drive, not part of the index format. Even an index this device decides to keep its own version
+  // of can spare it from downloading work orders the other device has already read.
+  mergeShippedStyleFiles(data.styleFiles);
   if (data.version !== PI_CACHE_VERSION) { toast(`Index file is from an older version — rebuild on the device that made it.`); return false; }
   const incoming = data.builtAt || 0;
   if (piIndexBuiltAt && incoming <= piIndexBuiltAt) return false; // ours is same age or newer
@@ -6316,12 +6961,20 @@ function adoptIndexPayload(data, sourceLabel) {
   // was hopeless. Merged rather than replaced: each device may have seen files the other has not.
   if (data.challanMisses) { Object.assign(challanMisses, data.challanMisses); saveChallanMisses(); }
   if (data.piPdfDuds) { Object.assign(piPdfDuds, data.piPdfDuds); piPdfDudsDirty = true; savePiPdfDuds(); }
+  if (data.piFolderDuds) { Object.assign(piFolderDuds, data.piFolderDuds); piFolderDudsDirty = true; savePiFolderDuds(); }
   piIndexBuiltAt = incoming;
   piIndexRestoredAt = incoming;
   piQtyMisses.clear();
   idbSet('piIndex', { data: piIndex, builtAt: incoming, version: PI_CACHE_VERSION }).catch(() => {});
   if (styleIndex) idbSet('styleIndex', { data: styleIndex, builtAt: incoming }).catch(() => {});
   renderIndexStamp(); renderHealth();
+  // This index knows where it is up to in Drive's changes feed. Carrying on from THAT cursor is
+  // what makes the phone continue the laptop's work instead of re-checking it: the very next poll
+  // asks only for what has changed since the laptop listed the folders.
+  if (data.changesToken && data.listedAt && data.listedAt > (autoFeed.syncedAt || 0)
+      && savedRootHandle && savedRootHandle.isDrive) {
+    autoFeedAdvanced(data.changesToken, data.listedAt, true);
+  }
   notify('build', `Index loaded from ${sourceLabel}: ${Object.keys(clean).length} PI(s), built ${agoText(incoming)}.`, true);
   return true;
 }
@@ -6406,13 +7059,24 @@ async function tryLoadIndexFromFolder(rootHandle) {
   try {
     const found = await findIndexFileHandle(rootHandle);
     if (!found) return false;
+    // Reading this on every launch is what made an app open cost megabytes on the phone even when
+    // the file had not changed since the last one. Its id and date say whether there is anything
+    // new in it before a byte is fetched.
+    const meta = found.handle && found.handle.meta;
+    const stamp = meta && meta.modifiedTime ? Date.parse(meta.modifiedTime) : 0;
+    await loadSharedIdxSeen();
+    if (meta && meta.id && sharedIdxAlreadySeen(meta.id, stamp)) return false;
     const data = await readIndexFile(found);
+    if (meta && meta.id) rememberSharedIdx(meta.id, stamp);
     const adopted = adoptIndexPayload(data, 'the shared index file in your folder');
     if (!adopted && data && data.kind === 'olisa-index') {
       // Not adopted because this device already holds an index at least as new — still worth saying.
       notify('build', `Found the index file in your folder, but this device already has an index that is just as recent (${Object.keys(piIndex).length} PI(s)).`, true);
     }
-    await reportIndexFreshness(true);
+    // "N PI folders are new since this index was built — click Build" is the right thing to say only
+    // when nothing is going to act on it. With the auto-index running, something is: it checks the
+    // same question against Drive's changes feed and simply does the work.
+    if (!autoIndexActive()) await reportIndexFreshness(true);
     return adopted;
   } catch (e) {
     notify('error', `An index file was found but could not be read (${e.message}). Re-save it from the device that built it.`);
@@ -7142,7 +7806,8 @@ async function topLevelFolderNames(handle, limit) {
   } catch (e) { /* unreadable root — the caller still reports the failure */ }
   return out;
 }
-async function buildChallanIndex(onProgress) {
+async function buildChallanIndex(onProgress, opts) {
+  opts = opts || {};
   const root = await findChallanRoot();
   if (!root) {
     const seen = await topLevelFolderNames(savedRootHandle, 12);
@@ -7336,9 +8001,22 @@ async function buildChallanIndex(onProgress) {
         if (fp) freshMisses[fp] = { path: f.path, why, ocrTried: true, at: Date.now() };
         continue;
       }
+      // ==================== TWO DEVICES, ONE SCAN ====================
+      // The listing this build works from was taken minutes ago. In between, the laptop (or the
+      // phone, or an earlier build whose rename failed) may have produced the -Improved twin
+      // already — and OCR-ing anyway would put a SECOND file of the same name in the folder and
+      // pay for Drive to read the same page twice. One small listing settles it. The file is
+      // recorded as already attempted so it is not downloaded again next build either; the twin
+      // itself is new, so the next build reads that instead.
+      let twin = false;
+      try { twin = await improvedTwinExists(f); } catch (e) { twin = false; }
+      if (twin) {
+        if (fp) freshMisses[fp] = { path: f.path, why, ocrTried: true, at: Date.now() };
+        continue;
+      }
       try {
         const r = await improveOneChallanFile(f);
-        r.found.forEach(c => { next[c.no] = { ...c, fp: `${r.improved}|ocr|${Date.now()}`, viaOcr: true }; challans++; });
+        r.found.forEach(c => { next[c.no] = { ...c, fp: r.fp || `${r.improved}|ocr|${Date.now()}`, viaOcr: true }; challans++; });
         improved.push(r);
       } catch (e) {
         improveFailed.push({ name: f.name, why: e.message });
@@ -7362,7 +8040,7 @@ async function buildChallanIndex(onProgress) {
   await checkpointChallanIndex(next, true);
   const unverified = Object.values(next).filter(c => Array.isArray(c.lines) && c.lines.length && !c.verified).map(c => c.no);
   const withLines = Object.values(next).filter(c => Array.isArray(c.lines) && c.lines.length).length;
-  return { files: pdfs.length, challans, failed, skipped, binaryDoc, scanned, noFont, unverified, withLines, improved, improveFailed, folder: root.name, reusedFiles, skippedKnownBad, readNow: pdfs.length - reusedFiles - skippedKnownBad, fpMismatch: challanFpMismatch, indexedBefore: indexedCount, ocrJunk };
+  return { files: pdfs.length, challans, failed, skipped, binaryDoc, scanned, noFont, unverified, withLines, improved, improveFailed, folder: root.name, folderId: root.id || null, reusedFiles, skippedKnownBad, readNow: pdfs.length - reusedFiles - skippedKnownBad, fpMismatch: challanFpMismatch, indexedBefore: indexedCount, ocrJunk };
 }
 let lastChallanCheckpoint = 0;
 // ==================== MAKING AN UNREADABLE CHALLAN READABLE ====================
@@ -7498,13 +8176,19 @@ async function improveOneChallanFile(entry) {
   const boundary = 'olisaimp' + Math.random().toString(36).slice(2);
   const head = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${boundary}\r\nContent-Type: application/pdf\r\n\r\n`;
   if (!driveToken) await requestDriveToken(false);
-  const up = await ocrFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name&supportsAllDrives=true', {
+  // size and modifiedTime come back too, so the new file can be fingerprinted exactly the way the
+  // next listing will fingerprint it. Without them the index held a made-up fingerprint for the
+  // Improved file and the very next build downloaded it all over again to find out it was the same.
+  const up = await ocrFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,size,modifiedTime,parents&supportsAllDrives=true', {
     method: 'POST',
     headers: { Authorization: 'Bearer ' + driveToken, 'Content-Type': `multipart/related; boundary=${boundary}` },
     body: new Blob([head, new Blob([bytes], { type: 'application/pdf' }), `\r\n--${boundary}--\r\n`])
   });
   if (!up.ok) throw new Error(`could not save ${improvedName} (${up.status})`);
   const madeFile = await up.json();
+  // Ours, not news: the changes feed will report this file within seconds, and without this the
+  // auto-index would treat the tool's own output as a reason to run again.
+  noteSelfWrite(madeFile && madeFile.id);
   // Read the new file back and prove a challan can be found in it. Only a file that actually works
   // earns the right to have the original renamed.
   const check = await driveFetch(`https://www.googleapis.com/drive/v3/files/${madeFile.id}?alt=media&supportsAllDrives=true`, true);
@@ -7514,11 +8198,26 @@ async function improveOneChallanFile(entry) {
   let renamed = '';
   if (srcId) {
     renamed = ocrOriginalName(entry.name);
+    noteSelfWrite(srcId);
     await driveApi(`https://www.googleapis.com/drive/v3/files/${srcId}?supportsAllDrives=true`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: renamed })
     });
   }
-  return { improved: improvedName, renamed, found };
+  // The Improved file's own path and metadata, in the same form metaFp() builds from a listing, so
+  // the next build recognises it as already read.
+  const dir = String(entry.path || '').slice(0, String(entry.path || '').length - String(entry.name || '').length);
+  return { improved: improvedName, renamed, found, fp: metaFp(dir + improvedName, { meta: madeFile }) };
+}
+// Has the -Improved twin appeared since this build listed the folder? Asked fresh, never from the
+// listing cache, because the whole point is to see what has happened in the meantime.
+async function improvedTwinExists(entry) {
+  const meta = entry && entry.handle && entry.handle.meta;
+  const parent = meta && meta.parents && meta.parents[0];
+  if (!parent || !(savedRootHandle && savedRootHandle.isDrive)) return false;
+  const want = ocrImprovedName(entry.name).toLowerCase();
+  const q = encodeURIComponent(`'${parent}' in parents and trashed=false`);
+  const j = await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true`);
+  return (j.files || []).some(x => String(x.name).toLowerCase() === want);
 }
 // ==================== OUR RECORD vs OLISA'S RECORD ====================
 // The Master File is Olisa's book. A challan is ours. They are never added together into one
@@ -8932,6 +9631,17 @@ async function parsePiFolderPdf(piRef, folderHandle) {
         const metaFp0 = `${cand.path}|${cand.handle.meta.size}|${cand.handle.meta.modifiedTime ? Date.parse(cand.handle.meta.modifiedTime) : 0}`;
         if (cached0.srcFp === metaFp0) return { ok: true, ref, ...cached0, fileName: cached0.fileName };
       }
+      // Read on an earlier build and found not to be this PI's invoice. Nothing about it has
+      // changed since (the fingerprint is in the key), so there is nothing to learn by downloading
+      // it again — but what it taught us is kept, so the diagnostics still say WHY this PI has no
+      // quantities.
+      const dudKey = folderDudKey(ref, cand);
+      if (dudKey && piFolderDuds[dudKey]) {
+        const d = piFolderDuds[dudKey];
+        if (d.text) sawText = true;
+        if (!best) best = { cand, charCount: d.chars || 0 };
+        continue;
+      }
       let lines, srcFp = null;
     try {
       const file = await getFileWithRetry(cand.handle);
@@ -8952,6 +9662,10 @@ async function parsePiFolderPdf(piRef, folderHandle) {
       piIndex[ref] = { ...parsed, fileName: cand.path, srcFp, builtAt: Date.now() };
       return { ok: true, ref, ...parsed, fileName: cand.path };
     }
+    // Opened cleanly, read cleanly, and it is not an invoice for this PI. Only a result that was
+    // actually reached is remembered — a download or parse that FAILED is never written off this
+    // way, or one bad connection would hide a real invoice for good.
+    markFolderDud(dudKey, { text: charCount > 40, chars: charCount });
     if (!best) best = { cand, charCount };
   }
 
@@ -8959,13 +9673,25 @@ async function parsePiFolderPdf(piRef, folderHandle) {
   // folders too, so only sheets that actually parse into PI item rows are accepted.
   for (const sh of acc.sheets) {
     if (!/proforma|invoice|700768|\bPI\b/i.test(sh.name)) continue;
+    // Work orders are named after the customer code too, so this test lets most of them through —
+    // which is why the two guards below matter. An entry that CAME from this sheet is reused from
+    // its fingerprint, and a sheet already read and found not to be an invoice is not read again.
+    const shFp = metaFp(sh.path, sh.handle);
+    const cachedSheet = piIndex[ref];
+    if (shFp && cachedSheet && cachedSheet.rowCount > 0 && cachedSheet.srcFp === shFp) {
+      return { ok: true, ref, ...cachedSheet, fileName: cachedSheet.fileName };
+    }
+    const shDud = folderDudKey(ref, sh);
+    if (shDud && piFolderDuds[shDud]) continue;
     try {
       const file = await getFileWithRetry(sh.handle);
+      const srcFpSheet = shFp || `${sh.path}|${file.size}|${file.lastModified}`;
       const parsed = parsePiLines(sheetToPiLines(await file.arrayBuffer()));
       if (parsed.rowCount > 0) {
-        piIndex[ref] = { ...parsed, fileName: sh.path, builtAt: Date.now() };
+        piIndex[ref] = { ...parsed, fileName: sh.path, srcFp: srcFpSheet, builtAt: Date.now() };
         return { ok: true, ref, ...parsed, fileName: sh.path };
       }
+      markFolderDud(shDud, { sheet: true });
     } catch (e) { /* not a readable invoice sheet — keep looking */ }
   }
 
@@ -8984,6 +9710,7 @@ async function parsePiFolderPdf(piRef, folderHandle) {
         const metaFpS = `${cand.path}|${cand.handle.meta.size}|${cand.handle.meta.modifiedTime ? Date.parse(cand.handle.meta.modifiedTime) : 0}`;
         if (cachedS.srcFp === metaFpS) return { ok: true, ref, ...cachedS };
       }
+      if (piFolderDuds[folderDudKey(ref, cand)]) continue;   // sniffed before, and it was nothing
       let file, buf;
       try {
         file = await getFileWithRetry(cand.handle);
@@ -9007,10 +9734,13 @@ async function parsePiFolderPdf(piRef, folderHandle) {
           const parsed = parsePiLines(sheetToPiLines(buf));
           if (parsed.rowCount > 0) {
             const fileName = cand.path + ' (content-detected sheet)';
-            piIndex[ref] = { ...parsed, fileName, builtAt: Date.now() };
+            // Fingerprinted like every other source, or this one file would be downloaded and
+            // sniffed again on every build for ever.
+            piIndex[ref] = { ...parsed, fileName, srcFp: `${cand.path}|${file.size}|${file.lastModified}`, builtAt: Date.now() };
             return { ok: true, ref, ...parsed, fileName };
           }
         }
+        markFolderDud(folderDudKey(ref, cand), { sniffed: true });
       } catch (e) { /* not readable as that type — try the next candidate */ }
     }
   }
@@ -9210,7 +9940,7 @@ function releaseBuildWakeLock() {
 }
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && typeof indexBuilding !== 'undefined' && indexBuilding) acquireBuildWakeLock();
+    if (document.visibilityState === 'visible' && typeof indexBuilding !== 'undefined' && indexBuilding && !autoBuildRunning) acquireBuildWakeLock();
   });
 }
 // Every PDF under the connected root, with its relative path.
@@ -9381,6 +10111,46 @@ async function savePiPdfDuds() {
     if (c && c.data && typeof c.data === 'object') piPdfDuds = c.data;
   } catch (e) { /* first run */ }
 })();
+// ==================== THE OTHER FILES THAT CAME DOWN EVERY SINGLE BUILD ====================
+// The root-wide hunt above has remembered its rejects for a while. The per-FOLDER invoice read had
+// no memory at all: for every PI whose invoice cannot be parsed — no invoice filed, a scan with no
+// text, a purchase order sitting where the invoice should be — it downloaded that folder's PDFs and
+// its work-order sheets again on every build, parsed them again, and reached the same answer again.
+// Invisible when a build was a rare, deliberate act. Not invisible now that the index updates by
+// itself whenever a challan arrives.
+//
+// Keyed by PI + path + size + date, so it remembers a RESULT about one exact version of one file.
+// Re-save that file and the key changes and it is read again at once; the memory never writes a
+// file off, and the app version is in the key so a better parser re-reads everything.
+const PI_FOLDER_DUDS_MAX = 8000;
+let piFolderDuds = {};
+let piFolderDudsDirty = false;
+function folderDudKey(ref, cand) {
+  const fp = metaFp(cand.path, cand.handle);
+  return fp ? `v${PI_CACHE_VERSION}|${ref}|${fp}` : '';
+}
+function markFolderDud(key, info) {
+  if (!key) return;
+  piFolderDuds[key] = { at: Date.now(), ...(info || {}) };
+  piFolderDudsDirty = true;
+}
+async function savePiFolderDuds() {
+  if (!piFolderDudsDirty) return;
+  piFolderDudsDirty = false;
+  const keys = Object.keys(piFolderDuds);
+  if (keys.length > PI_FOLDER_DUDS_MAX) {
+    keys.sort((a, b) => (piFolderDuds[a].at || 0) - (piFolderDuds[b].at || 0))
+        .slice(0, keys.length - PI_FOLDER_DUDS_MAX)
+        .forEach(k => { delete piFolderDuds[k]; });
+  }
+  try { await idbSet('piFolderDuds', { data: piFolderDuds, at: Date.now() }); } catch (e) { /* quota */ }
+}
+(async function initPiFolderDuds() {
+  try {
+    const c = await idbGet('piFolderDuds');
+    if (c && c.data && typeof c.data === 'object') piFolderDuds = c.data;
+  } catch (e) { /* first run */ }
+})();
 // The root-wide PDF catalog, swept once per session and reused. Building it lazily means a single
 // "PI 138" query gets the same reach as a full index build without paying for it up front.
 let rootPdfCatalog = null;
@@ -9488,6 +10258,7 @@ async function buildPiQtyIndex(piFolders, onProgress) {
     // Bank what has been read so far. If the page dies now, the next build skips every PI whose
     // fingerprint still matches instead of downloading and parsing all of them again.
     await checkpointPiIndex();
+    await savePiFolderDuds();
     if (onProgress) onProgress(done, piFolders.length, withData, etaText(startMs, done, piFolders.length));
     await yieldSoon();   // PDF text extraction is synchronous too — let the page paint between PIs
     return entry;
@@ -10490,7 +11261,7 @@ async function handleAsk() {
   // Searching during a build is allowed on purpose — the build yields between files, so the box
   // stays live. But a partial index can under-report, so say so rather than let a half-built
   // answer look final.
-  const askedDuringBuild = indexBuilding;
+  const askedDuringBuild = indexBuilding && !autoBuildRunning;
   const question = askInput.value.trim();
   if (!question) return;
   resetChat(); // only the current search is shown — no leftovers from the previous one
