@@ -771,6 +771,86 @@ function parseDateToken(tok,order){
   return{date:null,ambiguous:false};
 }
 var DATE_TOKEN='(\\d{1,2}[\\-\\/.\\s][A-Za-z]{3,}[\\-\\/.,\\s]*\\d{2,4}|[A-Za-z]{3,}[\\-\\/.\\s]*\\d{1,2}[\\-\\/.,\\s]*\\d{2,4}|\\d{4}[\\-\\/.]\\d{1,2}[\\-\\/.]\\d{1,2}|\\d{1,2}[\\-\\/.]\\d{1,2}[\\-\\/.]\\d{2,4})';
+/* ---------------------------------------------------------------------------
+   READING BY COLUMN, NOT JUST BY LINE
+   A two-column PI header prints the left and right blocks at almost the same
+   height. On the Pretty Group form "PACKMAT Industries Ltd." sits 2.2pt away
+   from "Nur Nobi", and "PI NO:" shares its line with "Ship To" — so any sane
+   line grouping fuses the two columns and a label picks up its neighbour's
+   words. These read the x position as well, so a column keeps to itself:
+   the value is taken from the same line until the page jumps a column, and
+   when the label ends its line the value is taken from straight below it. */
+var COL_GAP=22;      /* a horizontal jump this wide is a new column, not a space */
+function rowPieces(r){
+  var parts=r.parts.slice().sort(function(a,b){return a.x-b.x;});
+  var s='',map=[],prevEnd=null;
+  for(var i=0;i<parts.length;i++){
+    var p=parts[i];
+    if(prevEnd!==null&&p.x-prevEnd>1.2)s+=' ';
+    map.push({a:s.length,b:s.length+String(p.s).length,x:p.x,xe:p.x+(p.w||0)});
+    s+=p.s; prevEnd=p.x+(p.w||0);
+  }
+  return {s:s,map:map,parts:parts};
+}
+function runFrom(R,startIdx,startOff){
+  var out='',prevEnd=null;
+  for(var i=startIdx;i<R.parts.length;i++){
+    var m=R.map[i];
+    if(prevEnd!==null&&m.x-prevEnd>COL_GAP)break;
+    var piece=String(R.parts[i].s);
+    if(i===startIdx&&startOff!=null&&startOff>m.a)piece=piece.slice(startOff-m.a);
+    if(out&&prevEnd!==null&&m.x-prevEnd>1.2)out+=' ';
+    out+=piece; prevEnd=m.xe;
+  }
+  return normSpace(out);
+}
+function layoutLabelValue(layout,labels){
+  if(!layout||!layout.length)return null;
+  for(var k=0;k<labels.length;k++){
+    for(var i=0;i<layout.length;i++){
+      var R=rowPieces(layout[i]);
+      var m=R.s.match(labels[k]);
+      if(!m)continue;
+      var end=m.index+m[0].length,idx=-1,j;
+      for(j=0;j<R.map.length;j++){ if(R.map[j].b>end){idx=j;break;} }
+      if(idx>=0){
+        var same=runFrom(R,idx,end);
+        if(same&&/[A-Za-z0-9]/.test(same))return{value:same,rule:k};
+      }
+      /* the label ends its own line, so the value is the block below it */
+      var lx=null;
+      for(j=0;j<R.map.length;j++){ if(R.map[j].b>m.index){lx=R.map[j].x;break;} }
+      if(lx==null)continue;
+      for(var n=i+1;n<Math.min(i+4,layout.length);n++){
+        var S=rowPieces(layout[n]),st=-1;
+        for(var t=0;t<S.map.length;t++){ if(S.map[t].x>=lx-8){st=t;break;} }
+        if(st<0)continue;
+        if(S.map[st].x>lx+90)continue;      /* that is a further column, not this one */
+        var v=runFrom(S,st,null);
+        if(v&&/[A-Za-z0-9]/.test(v))return{value:v,rule:k};
+      }
+    }
+  }
+  return null;
+}
+var PI_LABELS=[
+  /\bP\.?\s?I\.?\s*(?:No|Number|#)\s*\.?\s*[:#-]\s*/i,
+  /\bProforma\s*Invoice\s*(?:No|Number|#)\s*\.?\s*[:#-]\s*/i,
+  /\bInvoice\s*(?:No|Number|#)\s*\.?\s*[:#-]\s*/i
+];
+var CONCERN_LABELS=[
+  /Concern(?:ed)?\s*Person\s*[:\-]\s*/i,
+  /Contact\s*Person\s*[:\-]\s*/i,
+  /Attention\s*[:\-]\s*/i,
+  /\bAttn\.?\s*[:\-]\s*/i,
+  /Marketing\s*Person\s*[:\-]\s*/i
+];
+/* "Shipment To" is a delivery instruction, not a company — \b keeps it out */
+var SHIPTO_LABELS=[
+  /\bShip\s*[-\u2013]?\s*To\s*[:\-]?\s*/i,
+  /\bSold\s*To\s*[:\-]?\s*/i,
+  /\bConsignee\s*[:\-]?\s*/i
+];
 function firstMatch(text,patterns){
   for(var i=0;i<patterns.length;i++){
     var m=text.match(patterns[i]);
@@ -778,7 +858,16 @@ function firstMatch(text,patterns){
   }
   return null;
 }
-function extractPI(text){
+function cleanPI(v){
+  v=normSpace(v)
+    .replace(/\s*\b(date|dated|dt)\b.*$/i,'')
+    .replace(/\s+(ship\s*[-\u2013]?\s*to|sold\s*to|consignee|buyer|supplier)\b.*$/i,'')
+    .replace(/[.,;:\s]+$/,'').trim();
+  return v;
+}
+function extractPI(text,layout){
+  var lay=layoutLabelValue(layout,PI_LABELS);
+  if(lay){ var lv=cleanPI(lay.value); if(lv)return{value:lv}; }
   var r=firstMatch(text,[
     /\bP\.?\s?I\.?\s*(?:No|Number|#)\s*\.?\s*[:#-]?\s*([A-Za-z0-9][A-Za-z0-9\/\\.\- ]{2,40})/i,
     /\bProforma\s*Invoice\s*(?:No|Number|#)\s*\.?\s*[:#-]?\s*([A-Za-z0-9][A-Za-z0-9\/\\.\- ]{2,40})/i,
@@ -786,7 +875,7 @@ function extractPI(text){
     /\b(\d{5,}\/\d{1,6}\/\d{4})\b/
   ]);
   if(!r)return null;
-  var v=r.value.replace(/\s*\b(date|dated|dt)\b.*$/i,'').trim().replace(/[.,;:\s]+$/,'').trim();
+  var v=cleanPI(r.value);
   return v?{value:v}:null;
 }
 function extractDate(text,order){
@@ -819,13 +908,22 @@ function looksLikeCompany(s){
   if(/^[\d\s.,\-\/]+$/.test(v))return false;
   return true;
 }
-function extractParty(text,rightColumnLines){
+function extractParty(text,rightColumnLines,layout){
   var lines=toLines(text);
   if(rightColumnLines&&rightColumnLines.length){
     for(var q=0;q<rightColumnLines.length;q++){
       var c0=normSpace(rightColumnLines[q]).replace(/[;,]\s*$/,'');
       if(looksLikeCompany(c0)&&!/^factory\s*\/?\s*delivery/i.test(c0))return{value:c0};
     }
+  }
+  /* the company under "Ship To" is the party. It is read by column, so the
+     left-hand block on the same line cannot be mistaken for it, and it is
+     tried before Factory/Delivery Place — that line names a place (INNOVA),
+     not the customer the money is owed by. */
+  var st=layoutLabelValue(layout,SHIPTO_LABELS);
+  if(st){
+    var sv=normSpace(st.value).replace(/[;,]\s*$/,'');
+    if(looksLikeCompany(sv)&&!/^factory\s*\/?\s*delivery/i.test(sv))return{value:sv};
   }
   var m=text.match(/Factory\s*\/?\s*Delivery\s*Place\s*[:\-]\s*([^\n]+)/i);
   if(m&&looksLikeCompany(m[1]))return{value:normSpace(m[1]).replace(/[;,]\s*$/,'')};
@@ -862,7 +960,20 @@ function extractBuyer(text){
   }
   return null;
 }
-function extractConcern(text){
+/* A concern person is a person. Anything ahead of a company suffix belongs to the
+   supplier block that bled in from the other column, and a phone number is not a name. */
+function cleanConcern(v){
+  v=normSpace(v)
+    .replace(/\s*\b(ref|reference|cell|mobile|phone|email|e-mail)\b\s*[:\-].*$/i,'')
+    .replace(/^[\s\S]*\b(?:industries|ltd|limited|inc|incorporated|pvt|corporation)\b\.\s+/i,'')
+    .replace(/\+?\d[\d\s\-()]{5,}\d/g,' ')
+    .replace(/^[\s:;,\-]+/,'').replace(/[;,]\s*$/,'').trim();
+  if(v.length>60)v=v.slice(0,60).trim();
+  return v;
+}
+function extractConcern(text,layout){
+  var lay=layoutLabelValue(layout,CONCERN_LABELS);
+  if(lay){ var lv=cleanConcern(lay.value); if(lv)return{value:lv}; }
   var r=firstMatch(text,[
     /Concern(?:ed)?\s*Person\s*[:\-]\s*([^\n]+)/i,
     /Contact\s*Person\s*[:\-]\s*([^\n]+)/i,
@@ -871,15 +982,14 @@ function extractConcern(text){
     /Marketing\s*Person\s*[:\-]\s*([^\n]+)/i
   ]);
   if(!r)return null;
-  var v=r.value.replace(/\s*\b(ref|reference|cell|mobile|phone|email|e-mail)\b\s*[:\-].*$/i,'').replace(/[;,]\s*$/,'').trim();
-  if(v.length>60)v=v.slice(0,60).trim();
+  var v=cleanConcern(r.value);
   return v?{value:v}:null;
 }
 function extractRecord(text,opts){
   opts=opts||{};
   var order=opts.dateOrder||'DMY',issues=[];
-  var party=extractParty(text,opts.rightColumnLines),buyer=extractBuyer(text),pi=extractPI(text);
-  var dateRes=extractDate(text,order),concern=extractConcern(text);
+  var party=extractParty(text,opts.rightColumnLines,opts.layout),buyer=extractBuyer(text),pi=extractPI(text,opts.layout);
+  var dateRes=extractDate(text,order),concern=extractConcern(text,opts.layout);
   var vWords=amountFromWords(text),vDigits=amountFromDigits(text);
   var li=amountFromLineItems(text),vItems=li?li.sum:null;
   var value=null,valueSource=null,confidence='low';
@@ -1225,7 +1335,7 @@ function buildSummaryWorkbook(groups,opts){
       if(d.value!=null)sum+=d.value;
     }
     var totalRow=rows.length+1,first=headerRow+1,last=totalRow-1;
-    rows.push([{t:'s',v:'TOTAL - ',s:7},{t:'s',v:'',s:7},
+    rows.push([{t:'s',v:'TOTAL - '+grp.party,s:7},{t:'s',v:'',s:7},
       grp.rows.length?{t:'f',f:'SUM(C'+first+':C'+last+')',v:Math.round(sum*100)/100,s:8}:{t:'n',v:0,s:8},
       null,null,null]);
     merges.push('A'+totalRow+':B'+totalRow);
@@ -1245,7 +1355,7 @@ function buildSummaryWorkbook(groups,opts){
     ageingBlock('AGEING OF PENDING VALUE \u2014 ALL PARTIES',ageing(all));
     rows.push([]);
     var gt=rows.length+1;
-    rows.push([{t:'s',v:'GRAND TOTAL - ',s:7},{t:'s',v:'',s:7},{t:'n',v:Math.round(grand*100)/100,s:8},null,null,null]);
+    rows.push([{t:'s',v:'GRAND TOTAL - ALL PARTIES',s:7},{t:'s',v:'',s:7},{t:'n',v:Math.round(grand*100)/100,s:8},null,null,null]);
     merges.push('A'+gt+':B'+gt);
   }
   return makeWorkbook(sheetTitle(groups),buildSheet(rows,merges,COL_W,heights));
@@ -1310,24 +1420,25 @@ function renderPageText(items,viewport){
       if(right.length)rightLines.push(right.map(function(p){return p.s;}).join(' '));
     });
   }
-  return {lineText:lineText, flowText:flow.join(' ').replace(/ *\n */g,'\n'), rightLines:rightLines.slice(0,8)};
+  return {lineText:lineText, flowText:flow.join(' ').replace(/ *\n */g,'\n'),
+          rightLines:rightLines.slice(0,8), layout:rows};
 }
 async function readPdf(file){
   var buf=await file.arrayBuffer();
   var doc=await pdfjsLib.getDocument({data:new Uint8Array(buf),isEvalSupported:false,useSystemFonts:false}).promise;
-  var lineParts=[],flowParts=[],rightLines=[];
+  var lineParts=[],flowParts=[],rightLines=[],layout=[];
   for(var p=1;p<=doc.numPages;p++){
     var page=await doc.getPage(p);
     var tc=await page.getTextContent();
     var vp=page.getViewport({scale:1});
     var out=renderPageText(tc.items,vp);
     lineParts.push(out.lineText); flowParts.push(out.flowText);
-    if(p===1)rightLines=out.rightLines;
+    if(p===1){rightLines=out.rightLines;layout=out.layout;}
     page.cleanup();
   }
   var pages=doc.numPages;
   try{await doc.destroy();}catch(e){}
-  return {lineText:lineParts.join('\n'),flowText:flowParts.join('\n'),rightLines:rightLines,pages:pages};
+  return {lineText:lineParts.join('\n'),flowText:flowParts.join('\n'),rightLines:rightLines,layout:layout,pages:pages};
 }
 
 /* ============================================================
@@ -1410,7 +1521,7 @@ async function ingest(fileList){
         rec={party:'',buyer:'',pi:'',value:null,date:null,concern:'',confidence:'low',valueSource:null,
           issues:['This PDF has no text in it — it is a scan or an image. Type the details in by hand.']};
       }else{
-        rec=extractBest(out.lineText,out.flowText,{dateOrder:state.dateOrder,rightColumnLines:out.rightLines});
+        rec=extractBest(out.lineText,out.flowText,{dateOrder:state.dateOrder,rightColumnLines:out.rightLines,layout:out.layout});
       }
       rec.file=f.name; rec.text=out.lineText; rec.touched={}; rec.id=++uid;
       var existing=state.rows.findIndex(function(r){return r.file===f.name;});
@@ -1673,6 +1784,7 @@ function startEdit(td,r,key){
   inp.focus(); inp.select();
   var cancelled=false;
   function commit(){
+    var renamedFrom=r.party;
     if(cancelled)return;
     var v=inp.value.trim();
     if(key==='value'){
@@ -1691,6 +1803,19 @@ function startEdit(td,r,key){
       }
     } else {
       r[key]=(key==='buyer')?upperBuyer(v):v;
+      /* the party name is what the rows are grouped and totalled by, so renaming it on
+         one row renames it on every row that carried the same name. A PI form often
+         prints the shipping company where the trading house is meant — one edit,
+         not one per invoice. */
+      if(key==='party'&&v&&renamedFrom&&groupKey(renamedFrom)!==groupKey(v)){
+        var n=0;
+        state.rows.forEach(function(o){
+          if(o!==r&&o.party&&groupKey(o.party)===groupKey(renamedFrom)){
+            o.party=v; o.touched=o.touched||{}; o.touched.party=true; n++;
+          }
+        });
+        if(n)toast('Party renamed on '+(n+1)+' rows');
+      }
     }
     r.touched=r.touched||{}; r.touched[key]=true;
     /* an edited field settles its own complaint */
@@ -2047,7 +2172,7 @@ function buildSummaryPdf(groups,opts){
     var th=20;
     need(th);
     box(pg,x0,y,tableW,th,HEADFILL);
-    pg.text('TOTAL -',cellX(0)+6,y+13.5,9,true,INK,'l',PDF_COLS[0].w+PDF_COLS[1].w-12);
+    pg.text('TOTAL - '+grp.party,cellX(0)+6,y+13.5,9,true,INK,'l',PDF_COLS[0].w+PDF_COLS[1].w-12);
     pg.text(fmtMoney(Math.round(sum*100)/100),cellX(2)+5,y+13.5,10,true,INK,'r',PDF_COLS[2].w-10);
     pg.line(cellX(2),y,cellX(2),y+th,RULE,.5); pg.line(cellX(3),y,cellX(3),y+th,RULE,.5);
     y+=th;
@@ -2058,7 +2183,7 @@ function buildSummaryPdf(groups,opts){
     y+=16;
     need(26);
     box(pg,x0,y,tableW,26,BAND);
-    pg.text('GRAND TOTAL -',cellX(0)+6,y+17,11,true,NAVY,'l',PDF_COLS[0].w+PDF_COLS[1].w-12);
+    pg.text('GRAND TOTAL - ALL PARTIES',cellX(0)+6,y+17,11,true,NAVY,'l',PDF_COLS[0].w+PDF_COLS[1].w-12);
     pg.text(fmtMoney(Math.round(grand*100)/100),cellX(2)+5,y+17,12,true,NAVY,'r',PDF_COLS[2].w-10);
     pg.line(cellX(2),y,cellX(2),y+26,RULE,.5); pg.line(cellX(3),y,cellX(3),y+26,RULE,.5);
     y+=26;
