@@ -42,9 +42,10 @@ piWrites.forEach((w, i) => {
 ok('the challan cache reader still checks the version',
   /cached\.version\s*!==\s*CHALLAN_CACHE_VERSION/.test(SRC));
 // Adopting a shared index must also set the in-memory stamp, or the UI reports "never read".
-const adopt = SRC.slice(SRC.indexOf('data.challanIndex && Object.keys(data.challanIndex).length'));
+// v137: challans merge in mergeIncomingChallans (before the PI gate), which sets the stamp.
+const adopt = SRC.slice(SRC.indexOf('function mergeIncomingChallans'));
 ok('adopting a shared index sets challanIndexBuiltAt',
-  /challanIndexBuiltAt\s*=\s*incoming/.test(adopt.slice(0, 1200)));
+  /challanIndexBuiltAt\s*=\s*Math\.max\(localAt, incAt\)/.test(adopt.slice(0, 2600)));
 
 section('2. Unchanged files are recognised WITHOUT being downloaded');
 const bci = fnBody('buildChallanIndex');

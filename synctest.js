@@ -32,11 +32,15 @@ t('it also runs every time the app returns to the foreground',
 t('and once shortly after connecting', /setTimeout\(checkForNewerSharedIndex, \d+\)/.test(src));
 
 console.log('\n4. The poll is cheap — this runs on mobile data');
-const poll = src.slice(src.indexOf('async function checkForNewerSharedIndex'), src.indexOf('async function checkForNewerSharedIndex') + 2200);
+const poll = src.slice(src.indexOf('async function checkForNewerSharedIndex'), src.indexOf('async function checkForNewerSharedIndex') + 3400);
 t('it asks only for metadata, not the file', /fields=files\(id,name,modifiedTime\)/.test(poll));
-t('the index is downloaded ONLY when the stamp is newer',
-  poll.indexOf('if (!stamp || stamp <=') < poll.indexOf('readIndexFile('), 'download happens before the freshness check');
-t('a clock-skew margin prevents a download loop', /\+ 1000\) return;/.test(poll));
+// v137: no longer "only when newer than this device's PI index" — that gate is what kept the laptop's
+// challans off the phone. Each distinct upload is downloaded ONCE; that is the loop guard now.
+t('each upload is downloaded once only (seen-check before the download)',
+  poll.indexOf('sharedIdxAlreadySeen(f.id, stamp)') > 0 && poll.indexOf('sharedIdxAlreadySeen(f.id, stamp)') < poll.indexOf('readIndexFile('),
+  'download happens before the seen check');
+t('the device remembers its own upload, so it never downloads it back',
+  /rememberSharedIdx\(made\.id/.test(src));
 t('it never fights a running build', /indexBuilding\) return;/.test(poll));
 t('it is skipped while offline', /navigator\.onLine === false\) return;/.test(poll));
 t('overlapping runs are prevented', /if \(sharedIdxBusy\) return;/.test(poll));
@@ -50,10 +54,11 @@ console.log('\n4b. The challan index travels too (it did not before)');
 t('challanIndex is packed into the shared payload', /challanIndex: challanIndex \|\| \{\}/.test(src),
   'phone adopts an index with zero challans and challan lookups find nothing');
 t('a challan count rides along for the status line', /challanCount: Object\.keys\(challanIndex/.test(src));
-t('the receiving device adopts it', /challanIndex = data\.challanIndex;/.test(src));
+t('the receiving device merges it, whichever PI index is newer',
+  /mergeIncomingChallans\(data\);\s*\n\s*if \(data\.version !== PI_CACHE_VERSION\)/.test(src));
 t('it is persisted locally so it survives a reload', /idbSet\('challanIndex', \{ data: challanIndex/.test(src));
 t('an OLD index file without challans cannot wipe a good local copy',
-  /if \(data\.challanIndex && Object\.keys\(data\.challanIndex\)\.length\) \{/.test(src),
+  /if \(!next\[key\]\) \{ next\[key\] = v; added\+\+; \}/.test(src) && !/challanIndex = data\.challanIndex;/.test(src),
   'adopting an empty challanIndex would be worse than the bug');
 
 console.log('\n4c. The freshness dot means ONE thing: age');

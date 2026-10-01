@@ -1260,7 +1260,7 @@ function switchTab(which) {
 // immediately, so the whole script threw on load. Evaluation stopped there, which meant every
 // `let` below it never initialised either, and the first thing to notice was an unrelated
 // "cannot access 'piIndex' before initialization". One misplaced constant, entire tool dead.
-const APP_VERSION = 136;
+const APP_VERSION = 137;
 // ==================== WHAT KIND OF CARTON IS THIS LINE? ====================
 // This lived inside the Undelivered Report's IIFE, so the Ask tab could not reach it and simply
 // printed the Master File's Item column as-is. That column says "Master Carton" on punch lines
@@ -3853,7 +3853,8 @@ let sharedIdxBusy = false;
 // Deliberately CHEAP: one metadata query for the file's modifiedTime. The index itself — which can
 // be megabytes — is only downloaded when that stamp is actually newer than what this device holds,
 // so an idle phone on mobile data costs one tiny request every five minutes and nothing else.
-async function checkForNewerSharedIndex() {
+async function checkForNewerSharedIndex(opts) {
+  opts = opts || {};
   if (sharedIdxBusy) return;
   if (!savedRootHandle || !savedRootHandle.isDrive) return;
   if (typeof indexBuilding !== 'undefined' && indexBuilding) return;   // never fight a running build
@@ -3871,9 +3872,14 @@ async function checkForNewerSharedIndex() {
     // A file merely re-saved without a rebuild has a newer modifiedTime but the same builtAt
     // inside, and adoptIndexPayload rejects that on its own — so this is a cheap pre-filter, not
     // the decision. Small margin so a clock skew between devices cannot cause a download loop.
-    if (!stamp || stamp <= (piIndexBuiltAt || 0) + 1000) return;
+    // v137: no longer skipped just because THIS device's PI index is newer. The file may still
+    // carry challan copies this device has never read (the laptop's, typically), and those merge
+    // regardless of PI age. Each distinct upload is still downloaded once only — see below.
+    if (!stamp) return;
     await loadSharedIdxSeen();
-    if (sharedIdxAlreadySeen(f.id, stamp)) return;   // this exact file has been read already
+    // A forced check (a challan was clicked and is missing) reads the file again even if seen: it
+    // costs one download, and older builds may have thrown its challan copies away on first read.
+    if (!opts.force && sharedIdxAlreadySeen(f.id, stamp)) return;   // this exact file has been read already
     // DriveFileHandle takes the RAW metadata object from the Drive listing, not (id, name) —
     // getting that wrong throws inside getFile() and the poll would fail silently every time.
     const data = await readIndexFile({ handle: new DriveFileHandle(f), gz: /\.gz$/i.test(f.name) });
@@ -6744,8 +6750,16 @@ function renderHealth() {
     : autoPendingCount() ? ` \u2014 ${autoPendingCount()} new file(s) found, indexing shortly`
     : autoFresh ? ` \u2014 up to date with Drive (checked ${agoText(autoFeed.syncedAt)})`
     : '';
+  // v137: "01:21 (12 minutes ago) \u2014 up to date with Drive (checked just now)" put two clocks
+  // side by side with nothing saying what either measured, and the older one read like a warning.
+  // They are different facts: when a new file last went IN, and when Drive was last CHECKED. While
+  // Drive is being watched, the check is the one that says whether the index is current, so it
+  // leads, and the build time is labelled for what it is. Without the watcher, age is still the
+  // only freshness signal there is, so it stays exactly as it was.
   const idxTxt = piCount === 0 ? 'Index: not built'
-    : `Index: ${piCount} PI(s)${chPart} \u2014 ${stampText(piIndexBuiltAt)} (${agoText(piIndexBuiltAt)})${!autoFresh && days !== null && days >= IDX_STALE_DAYS ? ' \u2014 rebuild recommended' : ''}${autoTail}${newPiHint()}`;
+    : (autoFresh && !autoBuildRunning && !autoPendingCount())
+      ? `Index: ${piCount} PI(s)${chPart} \u2014 up to date with Drive (checked ${agoText(autoFeed.syncedAt)}; last file added ${stampText(piIndexBuiltAt)})${newPiHint()}`
+      : `Index: ${piCount} PI(s)${chPart} \u2014 ${stampText(piIndexBuiltAt)} (${agoText(piIndexBuiltAt)})${!autoFresh && days !== null && days >= IDX_STALE_DAYS ? ' \u2014 rebuild recommended' : ''}${autoTail}${newPiHint()}`;
   el.innerHTML = [
     `<span><span class="hdot ${online ? 'hgreen' : 'hred'}"></span>${online ? 'Online' : 'Offline \u2014 waiting for connection'}</span>`,
     `<span><span class="hdot ${driveOn ? 'hgreen' : localOn ? 'hgreen' : 'hgrey'}"></span>${driveOn ? 'Drive connected' : localOn ? 'Local folder connected' : 'No folder connected'}</span>`,
@@ -6814,6 +6828,9 @@ function currentIndexPayload() {
     // phone quietly had nothing to search. It is the same build, so it travels with the same file.
     challanIndex: challanIndex || {},
     challanCount: Object.keys(challanIndex || {}).length,
+    // When the challan list itself was last read — separate from the PI build time, so the other
+    // device can tell whose challan copies are newer even when whose PI index is newer differs.
+    challanBuiltAt: challanIndexBuiltAt || 0,
     // Only the FAILURES ride along for challans: a handful of unreadable files, where the challan
     // token cache would be a second copy of the whole index by another name.
     challanMisses,
@@ -6912,6 +6929,52 @@ function mergeOverlays(data) {
   }
   return merged;
 }
+// ==================== "THE LAPTOP OPENS IT, THE PHONE NEVER DOES" (v137) ====================
+// Both devices write the SAME shared index file, and the phone only took the challan copies from
+// it when the file's PI index was newer than the phone's own. The phone auto-indexes by itself, so
+// from its first automatic build onward its PI index was always the newer one — and every challan
+// the laptop read after that (1173272701 in the report) was rejected along with the PI part. Worse,
+// when it WAS taken it replaced the phone's list wholesale, dropping anything the phone had read.
+// And a "could not read this file" note that had travelled over from the laptop was merged in and
+// never removed, so the phone skipped that file on every build of its own — even after the laptop
+// had read it fine. Three separate ways for one challan to stay out of reach on one device only.
+//
+// Challan copies are facts about files in Drive, not a version of the PI index, so they now merge
+// on their own terms, whichever PI index is newer: every challan either device has read is kept;
+// where both have the same challan the more recently read one wins; and any failure note for a
+// file that one device has since read successfully is dropped on both.
+function mergeIncomingChallans(data) {
+  if (!data || data.kind !== 'olisa-index') return 0;
+  const inc = data.challanIndex;
+  const incAt = data.challanBuiltAt || data.builtAt || 0;
+  const localAt = challanIndexBuiltAt || 0;
+  let added = 0, replaced = 0;
+  if (inc && typeof inc === 'object') {
+    const next = { ...challanIndex };
+    Object.entries(inc).forEach(([k, v]) => {
+      const key = normChallanKey(k);
+      if (!key || !v || typeof v !== 'object') return;
+      if (!next[key]) { next[key] = v; added++; }
+      else if (incAt > localAt && JSON.stringify(next[key]) !== JSON.stringify(v)) { next[key] = v; replaced++; }
+    });
+    if (added || replaced) challanIndex = next;
+  }
+  // Failure notes: take the other device's, then drop every one whose file is now indexed.
+  let missesChanged = false;
+  if (data.challanMisses && typeof data.challanMisses === 'object') {
+    Object.entries(data.challanMisses).forEach(([fp, m]) => { if (!challanMisses[fp]) { challanMisses[fp] = m; missesChanged = true; } });
+  }
+  const indexedFps = new Set();
+  Object.values(challanIndex).forEach(e => { if (e && e.fp) indexedFps.add(e.fp); });
+  Object.keys(challanMisses).forEach(fp => { if (indexedFps.has(fp)) { delete challanMisses[fp]; missesChanged = true; } });
+  if (missesChanged) saveChallanMisses();
+  if (added || replaced) {
+    challanIndexBuiltAt = Math.max(localAt, incAt) || Date.now();
+    idbSet('challanIndex', { data: challanIndex, builtAt: challanIndexBuiltAt, version: CHALLAN_CACHE_VERSION }).catch(() => {});
+    if (typeof renderHealth === 'function') renderHealth();
+  }
+  return added + replaced;
+}
 function adoptIndexPayload(data, sourceLabel) {
   if (!data || data.kind !== 'olisa-index') return false;
   // Notes merge before ANY other gate, including the version check: the overlay format is
@@ -6925,6 +6988,8 @@ function adoptIndexPayload(data, sourceLabel) {
   // Drive, not part of the index format. Even an index this device decides to keep its own version
   // of can spare it from downloading work orders the other device has already read.
   mergeShippedStyleFiles(data.styleFiles);
+  // Challan copies merge before the PI gate as well. See mergeIncomingChallans for why.
+  mergeIncomingChallans(data);
   if (data.version !== PI_CACHE_VERSION) { toast(`Index file is from an older version — rebuild on the device that made it.`); return false; }
   const incoming = data.builtAt || 0;
   if (piIndexBuiltAt && incoming <= piIndexBuiltAt) return false; // ours is same age or newer
@@ -6935,27 +7000,7 @@ function adoptIndexPayload(data, sourceLabel) {
   });
   piIndex = clean;
   if (data.styleIndex && Object.keys(data.styleIndex).length) styleIndex = data.styleIndex;
-  // Only replace the challan index when the file actually carries one. An index file written by an
-  // older build has no challanIndex at all, and adopting an empty object from it would wipe a
-  // perfectly good local copy — worse than the bug this fixes.
-  if (data.challanIndex && Object.keys(data.challanIndex).length) {
-    challanIndex = data.challanIndex;
-    challanIndexBuiltAt = incoming;
-    // ==================== "IT ASKS ME TO RESCAN THE CHALLANS EVERY TIME" ====================
-    // THE version STAMP WAS MISSING HERE. initChallanIndex refuses any cached challan index whose
-    // version is not CHALLAN_CACHE_VERSION, and undefined is not 2 — so this write was thrown away
-    // on the very next app open, every time, without a word. The index was adopted from Drive
-    // perfectly, saved to IndexedDB, and silently discarded seconds later; the tool then said the
-    // challan copies had never been read and offered a full rescan. Doing that rescan wrote a
-    // PROPERLY stamped record, which is why it sometimes seemed to stick, until the next sync
-    // adopted an index over the top of it and dropped the stamp again.
-    //
-    // One missing property, and it cost a full re-read of every challan on every launch.
-    idbSet('challanIndex', { data: challanIndex, builtAt: incoming, version: CHALLAN_CACHE_VERSION }).catch(() => {});
-  }
-  // The failure memories travel too, so the phone does not repeat work the laptop already proved
-  // was hopeless. Merged rather than replaced: each device may have seen files the other has not.
-  if (data.challanMisses) { Object.assign(challanMisses, data.challanMisses); saveChallanMisses(); }
+  // (Challan copies and their failure memories were merged above, before the gate.)
   if (data.piPdfDuds) { Object.assign(piPdfDuds, data.piPdfDuds); piPdfDudsDirty = true; savePiPdfDuds(); }
   if (data.piFolderDuds) { Object.assign(piFolderDuds, data.piFolderDuds); piFolderDudsDirty = true; savePiFolderDuds(); }
   piIndexBuiltAt = incoming;
@@ -7514,7 +7559,29 @@ function parseDMY(s) {
   if (m) return new Date(+m[1], +m[2] - 1, +m[3]).getTime();
   // dd/mm/yyyy, dd-mm-yyyy, dd.mm.yyyy
   m = str.match(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})/);
-  return m ? new Date(+m[3], +m[2] - 1, +m[1]).getTime() : 0;
+  if (m) return new Date(+m[3], +m[2] - 1, +m[1]).getTime();
+  // ==================== v137: DATES TYPED AS TEXT ====================
+  // Only the two forms above were understood. A date typed into the Master File the way the
+  // challans print it \u2014 "27-SEP-26", "27 Sep 2026" \u2014 or with a two-digit year ("27/09/26"),
+  // stays TEXT in Excel, and this returned 0 for it. For a manual challan, 0 means "no readable
+  // date", so it was skipped by the settling pass entirely and the short it re-delivered stayed
+  // red, with nothing on screen saying why.
+  const MON = { JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5, JUL: 6, AUG: 7, SEP: 8, SEPT: 8, OCT: 9, NOV: 10, DEC: 11 };
+  const yr = y => { const n = +y; return y.length <= 2 ? 2000 + n : n; };
+  m = str.match(/(\d{1,2})\s*[\/\-. ]\s*([A-Za-z]{3,9})\.?\s*[\/\-.,' ]\s*(\d{4}|\d{2})\b/);
+  if (m) {
+    const mo = MON[m[2].toUpperCase().slice(0, 4)] ?? MON[m[2].toUpperCase().slice(0, 3)];
+    if (mo !== undefined) return new Date(yr(m[3]), mo, +m[1]).getTime();
+  }
+  m = str.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2})$/);
+  if (m && +m[2] >= 1 && +m[2] <= 12) return new Date(yr(m[3]), +m[2] - 1, +m[1]).getTime();
+  // An Excel date serial that arrived as a bare number (a cell formatted General).
+  m = str.match(/^(\d{5})(?:\.\d+)?$/);
+  if (m && +m[1] > 36000 && +m[1] < 73000) {
+    const d = new Date(Date.UTC(1899, 11, 30) + (+m[1]) * 86400000);
+    return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()).getTime();
+  }
+  return 0;
 }
 function fmtNoteDate(d) { return String(d || '').trim().replace(/\//g, '-'); }
 function combinedRemarks(r) {
@@ -7978,6 +8045,10 @@ async function buildChallanIndex(onProgress, opts) {
   // every file walked every challan ever indexed. At a few hundred challans that is invisible; at
   // the thousands this has to scale to it is millions of comparisons on the thread that is also
   // trying to keep the page alive. Build the lookup once, use it in constant time per file.
+  // v137: a missing challan was clicked. Failure notes that never went through Drive's OCR are
+  // given one more read — they are few, and a stale note (another device's, or an older build's)
+  // is exactly what can hide one specific challan on one device for ever.
+  const retryMiss = fp => !!(opts.retryMisses && challanMisses[fp] && !challanMisses[fp].ocrTried);
   const byFp = new Map();
   Object.values(challanIndex).forEach(e => {
     if (!e || !e.fp) return;
@@ -7997,7 +8068,7 @@ async function buildChallanIndex(onProgress, opts) {
     const fp = metaFp(f.path, f.handle);
     if (!fp) { plan.noFp.push(f); plan.read.push(f); return; }
     if (byFp.has(fp)) plan.reuse.push(f);
-    else if (challanMisses[fp]) plan.bad.push(f);
+    else if (challanMisses[fp] && !retryMiss(fp)) plan.bad.push(f);
     else plan.read.push(f);
   });
   // The smoking gun, when there is one. If every file claims to be new even though the index is
@@ -8024,7 +8095,7 @@ async function buildChallanIndex(onProgress, opts) {
       // Known-bad, remembered by fingerprint. Re-downloading a photo of a challan to discover for
       // the ninth time that it is still a photo — and then paying for another round of Drive OCR
       // on it — is the single most expensive thing this build used to do.
-      const bad = challanMisses[fp];
+      const bad = retryMiss(fp) ? null : challanMisses[fp];
       if (bad) {
         skippedKnownBad++;
         freshMisses[fp] = bad;
@@ -8529,6 +8600,7 @@ async function challanTreeDelta() {
   Object.values(challanIndex).forEach(e => { if (e && e.fp) known.add(e.fp); });
   Object.keys(challanMisses).forEach(fp => known.add(fp));
   const unknown = [];
+  const retryable = [];   // v137: noted unreadable, but never through Drive's OCR — worth one more read
   let total = 0, unfingerprinted = 0;
   async function walk(dir, prefix, depth) {
     if (depth > 4) return;
@@ -8543,6 +8615,7 @@ async function challanTreeDelta() {
       // Counted separately and reported honestly rather than guessed at either way.
       if (!fp) { unfingerprinted++; continue; }
       if (!known.has(fp)) unknown.push(prefix + name);
+      else if (challanMisses[fp] && !challanMisses[fp].ocrTried) retryable.push(prefix + name);
     }
     for (const [name, h] of subs) {
       try { await walk(h, prefix + name + '/', depth + 1); } catch (e) { /* unreadable subfolder */ }
@@ -8550,7 +8623,7 @@ async function challanTreeDelta() {
     await yieldSoon();
   }
   await walk(root, '', 0);
-  return { total, unknown, unfingerprinted, folder: root.name };
+  return { total, unknown, retryable, unfingerprinted, folder: root.name };
 }
 async function checkpointChallanIndex(data, force) {
   const now = Date.now();
@@ -8562,8 +8635,11 @@ async function checkpointChallanIndex(data, force) {
   try {
     const cached = await idbGet('challanIndex');
     if (!cached || !cached.data || cached.version !== CHALLAN_CACHE_VERSION) return;
-    challanIndex = cached.data;
-    challanIndexBuiltAt = cached.builtAt || null;
+    // A merge from the shared file can land before this slow read does; never let the older
+    // on-disk copy overwrite what has already arrived in memory.
+    if (Object.keys(challanIndex).length && (challanIndexBuiltAt || 0) >= (cached.builtAt || 0)) return;
+    challanIndex = { ...cached.data, ...challanIndex };
+    challanIndexBuiltAt = Math.max(cached.builtAt || 0, challanIndexBuiltAt || 0) || null;
   } catch (e) { /* no cached challan index yet */ }
 })();
 // Pull one challan out of its file as a standalone PDF: only its own pages, nothing else.
@@ -8649,18 +8725,64 @@ function nearMissChallans(key) {
   if (!/^\d{4,20}$/.test(k)) return [];
   return Object.keys(challanIndex).filter(c => oneDigitApart(k, String(c))).slice(0, 12);
 }
-async function openChallanCopy(challanNo) {
+// ==================== "WHY DO I HAVE TO INDEX EVERY TIME I CLICK?" (v137) ====================
+// A missing challan used to stop at a message and a button, every click, on every device that
+// lacked it. The tool can answer the question itself, cheapest step first, and only speaks when it
+// has an answer: (1) the index the other device saved to Drive — one download, and usually the
+// whole answer; (2) the Challans folder listing — seconds, no downloads; (3) reading only the
+// files that are new, or were once noted unreadable without ever going through Drive's OCR.
+// If the challan is still not there after all three, it is not printed on any copy in Drive, and
+// the final message says that plainly rather than suggesting yet another rebuild.
+let challanAutoFindBusy = false;
+async function autoFindChallan(key, challanNo) {
+  if (challanAutoFindBusy) return;
+  challanAutoFindBusy = true;
+  const b = addBubble(`Challan <b>${escHtml(key)}</b> is not on this device's challan list yet \u2014 looking for it now\u2026`, 'askA');
+  let checked = { shared: false, folder: null, read: 0 };
+  try {
+    if (savedRootHandle && savedRootHandle.isDrive && navigator.onLine !== false) {
+      b.innerHTML = `Challan <b>${escHtml(key)}</b>: checking the index your other device saved to Drive\u2026`;
+      try { await checkForNewerSharedIndex({ force: true }); checked.shared = true; } catch (e) { /* advisory */ }
+      if (challanIndex[key]) { b.remove(); challanAutoFindBusy = false; return openChallanCopy(key); }
+    }
+    b.innerHTML = `Challan <b>${escHtml(key)}</b>: checking the Challans folder for new files\u2026`;
+    let d = null;
+    try { d = await challanTreeDelta(); } catch (e) { d = null; }
+    // A local-disk folder reports no size or date, so its listing proves nothing either way; it is
+    // not claimed as "checked" in the final message, which then offers the button as before.
+    checked.folder = (d && !d.unfingerprinted) ? d : null;
+    const toRead = d ? d.unknown.length + (d.retryable ? d.retryable.length : 0) : 0;
+    if (toRead) {
+      b.remove();
+      checked.read = toRead;
+      challanAutoFindBusy = false;
+      await runChallanIndexBuild(null, { retryMisses: true });
+      challanAutoFindBusy = true;
+      if (challanIndex[key]) { challanAutoFindBusy = false; return openChallanCopy(key); }
+    } else b.remove();
+  } finally { challanAutoFindBusy = false; }
+  return openChallanCopy(challanNo, { final: true, checked });
+}
+async function openChallanCopy(challanNo, opts) {
+  opts = opts || {};
   const key = normChallanKey(challanNo);
   const entry = challanIndex[key];
   if (!entry) {
     const n = Object.keys(challanIndex).length;
+    if (n && !opts.final && savedRootHandle && !challanIndexBuilding) return autoFindChallan(key, challanNo);
     const near = nearMissChallans(key);
     const nearNote = near.length === 1
-      ? `<br><span class="sub-note">The only challan on file that is one digit away is <b>${escHtml(near[0])}</b>${challanIndex[near[0]] && challanIndex[near[0]].date ? `, dated ${escHtml(challanIndex[near[0]].date)}` : ''}. If the Master File number has a typo, correct it there \\u2014 nothing is linked automatically, because matching the wrong delivery is worse than matching none.</span>`
+      ? `<br><span class="sub-note">The only challan on file that is one digit away is <b>${escHtml(near[0])}</b>${challanIndex[near[0]] && challanIndex[near[0]].date ? `, dated ${escHtml(challanIndex[near[0]].date)}` : ''}. If the Master File number has a typo, correct it there \u2014 nothing is linked automatically, because matching the wrong delivery is worse than matching none.</span>`
       : near.length > 1
-        ? `<br><span class="sub-note">${near.length} challans on file are one digit away (${escHtml(near.slice(0, 6).join(', '))}), so none can be picked safely \\u2014 check the number against the paper copy.</span>`
+        ? `<br><span class="sub-note">${near.length} challans on file are one digit away (${escHtml(near.slice(0, 6).join(', '))}), so none can be picked safely \u2014 check the number against the paper copy.</span>`
         : '';
-    const reason = n
+    const c = opts.checked;
+    const how = c ? [c.shared ? 'the index your other device saved' : '',
+                     c.folder ? `all ${c.folder.total} document(s) in "${escHtml(c.folder.folder)}"` : '',
+                     c.read ? `${c.read} of them read just now` : ''].filter(Boolean).join(', ') : '';
+    const reason = n && opts.final && how
+      ? `Challan <b>${escHtml(String(challanNo))}</b> is not printed on any challan copy in Drive. Checked just now: ${how} \u2014 ${n} challan(s) known in total.${nearNote}`
+      : n
       ? `Challan <b>${escHtml(String(challanNo))}</b> is not in the challan index (${n} challan(s) indexed${challanIndexBuiltAt ? `, read ${dmyFromMs(challanIndexBuiltAt)}` : ''}). If its PDF was added since, rebuild below.${nearNote}`
       : challanBuildError
         ? `The challan copies could not be read: ${escHtml(challanBuildError)}`
@@ -8668,7 +8790,10 @@ async function openChallanCopy(challanNo) {
     // With an index already in place the right first move is the cheap one: list the folder and
     // see whether anything is actually new. A full re-read is offered only when it is warranted,
     // instead of being the only thing on offer.
-    const b = addBubble(`${reason}<br><button class="secondary chCheckBtn" style="margin-top:8px;padding:7px 12px;font-size:12.5px;">${n ? 'Check for new challans' : 'Read my challan copies now'}</button>`, 'askA');
+    // Nothing left to press once all of it has been checked automatically: another button there
+    // would only repeat the same search and send the same answer back.
+    const showBtn = !(n && opts.final && how);
+    const b = addBubble(`${reason}${showBtn ? `<br><button class="secondary chCheckBtn" style="margin-top:8px;padding:7px 12px;font-size:12.5px;">${n ? 'Check for new challans' : 'Read my challan copies now'}</button>` : ''}`, 'askA');
     b.querySelectorAll('.chCheckBtn').forEach(btn => btn.addEventListener('click', () => (n ? checkChallansForChanges(key) : runChallanIndexBuild(key))));
     return;
   }
@@ -8687,61 +8812,67 @@ async function openChallanCopy(challanNo) {
     }
     return;
   }
-  const note = addBubble(`Pulling out ${escHtml(label)} \\u2014 page${entry.pages.length > 1 ? 's' : ''} ${entry.pages.join(' & ')} of <code>${escHtml(entry.path)}</code>\\u2026`, 'askA');
+  const note = addBubble(`Pulling out ${escHtml(label)} \u2014 page${entry.pages.length > 1 ? 's' : ''} ${entry.pages.join(' & ')} of <code>${escHtml(entry.path)}</code>\u2026`, 'askA');
   try {
     const { bytes, pageCount } = await extractChallanPdf(entry);
     const fileName = `Challan ${key}${entry.piRef ? ` - PI ${entry.piRef}` : ''}.pdf`;
-    note.innerHTML = `<div class="summary-line">${escHtml(label)}${entry.date ? ` \\u2014 dated ${escHtml(entry.date)}` : ''}</div>` +
+    note.innerHTML = `<div class="summary-line">${escHtml(label)}${entry.date ? ` \u2014 dated ${escHtml(entry.date)}` : ''}</div>` +
       `<div class="sub-note">${pageCount} page${pageCount > 1 ? 's' : ''}, taken from <code>${escHtml(entry.path)}</code> (page${entry.pages.length > 1 ? 's' : ''} ${entry.pages.join(' & ')}). Other challans in that file are not included.</div>`;
     // A real handle, so the existing preview does the rendering, Download and native Share for free.
     await openFilePreview({ name: fileName, getFile: async () => new File([bytes], fileName, { type: 'application/pdf' }) });
   } catch (e) {
-    note.innerHTML = `Couldn't open challan <b>${escHtml(key)}</b> \\u2014 ${escHtml(e.message)}`;
+    note.innerHTML = `Couldn't open challan <b>${escHtml(key)}</b> \u2014 ${escHtml(e.message)}`;
   }
 }
 // The listing-only check, wired to a button. Seconds, no downloads, and it either says "nothing
 // has changed" — which is an answer, not a chore — or names exactly what is new and offers to read
 // just that. This is the loop Sadi asked for: scan once, then only ever look for changes.
 async function checkChallansForChanges(retryChallan) {
-  if (challanIndexBuilding) { addBubble('The challan index is already being read \\u2014 one moment.', 'askA'); return; }
+  if (challanIndexBuilding) { addBubble('The challan index is already being read \u2014 one moment.', 'askA'); return; }
   if (!savedRootHandle) { addBubble('Connect your Olisa Group folder first.', 'askA'); return; }
-  const bubble = addBubble('Checking the Challans folder for anything new\\u2026', 'askA');
+  const bubble = addBubble('Checking the Challans folder for anything new\u2026', 'askA');
   let d;
   try { d = await challanTreeDelta(); }
-  catch (e) { bubble.innerHTML = `Couldn't check the Challans folder \\u2014 ${escHtml(e.message)}`; return; }
+  catch (e) { bubble.innerHTML = `Couldn't check the Challans folder \u2014 ${escHtml(e.message)}`; return; }
   if (!d.unknown.length) {
-    bubble.innerHTML = `Nothing new in "<b>${escHtml(d.folder)}</b>" \\u2014 all <b>${d.total}</b> challan document(s) there have already been read.` +
+    bubble.innerHTML = `Nothing new in "<b>${escHtml(d.folder)}</b>" \u2014 all <b>${d.total}</b> challan document(s) there have already been read.` +
       (d.unfingerprinted ? `<br><span class="sub-note">${d.unfingerprinted} file(s) sit on a folder that reports no size or date, so those can only be confirmed by reading them.</span>` : '') +
-      (retryChallan ? `<br><span class="sub-note">Challan <b>${escHtml(retryChallan)}</b> is therefore not printed on any document in that folder \\u2014 check the number, or that its copy was filed.</span>` : '');
+      (retryChallan ? `<br><span class="sub-note">Challan <b>${escHtml(retryChallan)}</b> is therefore not printed on any document in that folder \u2014 check the number, or that its copy was filed.</span>` : '');
     return;
   }
   const list = d.unknown.slice(0, 10).map(escHtml).join('<br>');
   bubble.innerHTML = `<b>${d.unknown.length}</b> new or changed document(s) in "<b>${escHtml(d.folder)}</b>" (of ${d.total}):<br>` +
-    `<span class="sub-note">${list}${d.unknown.length > 10 ? `<br>\\u2026and ${d.unknown.length - 10} more` : ''}</span>` +
+    `<span class="sub-note">${list}${d.unknown.length > 10 ? `<br>\u2026and ${d.unknown.length - 10} more` : ''}</span>` +
     `<br><button class="secondary chBuildBtn" style="margin-top:8px;padding:7px 12px;font-size:12.5px;">Read the ${d.unknown.length} new document(s)</button>` +
-    `<br><span class="sub-note">Only these are read \\u2014 everything already scanned is reused untouched.</span>`;
+    `<br><span class="sub-note">Only these are read \u2014 everything already scanned is reused untouched.</span>`;
   bubble.querySelectorAll('.chBuildBtn').forEach(btn => btn.addEventListener('click', () => runChallanIndexBuild(retryChallan)));
 }
-async function runChallanIndexBuild(retryChallan) {
-  if (challanIndexBuilding) { addBubble('The challan index is already being read \\u2014 one moment.', 'askA'); return; }
+async function runChallanIndexBuild(retryChallan, opts) {
+  opts = opts || {};
+  if (challanIndexBuilding) { addBubble('The challan index is already being read \u2014 one moment.', 'askA'); return; }
   if (!savedRootHandle) { addBubble('Connect your Olisa Group folder first.', 'askA'); return; }
   challanIndexBuilding = true;
   acquireBuildWakeLock();
-  const bubble = addBubble('Reading your challan copies\\u2026', 'askA');
+  const bubble = addBubble('Reading your challan copies\u2026', 'askA');
   try {
     const res = await buildChallanIndex((done, total, challans, eta) => {
-      bubble.innerHTML = `Reading challan copies: ${done} / ${total} PDF(s) \\u2014 ${challans} challan(s) found${escHtml(eta || '')}`;
-    });
+      bubble.innerHTML = `Reading challan copies: ${done} / ${total} PDF(s) \u2014 ${challans} challan(s) found${escHtml(eta || '')}`;
+    }, { retryMisses: !!opts.retryMisses });
+    // v137: what one device reads, the other gets. This path never uploaded, so a challan read on
+    // the phone (or the laptop) through this button stayed on that device only.
+    if (res && res.readNow > 0 && savedRootHandle && savedRootHandle.isDrive && typeof uploadIndexToDrive === 'function') {
+      uploadIndexToDrive({ quiet: true });
+    }
     challanBuildError = '';   // this run worked; any previous reason no longer applies
-    bubble.innerHTML = `Challan copies ready \\u2014 <b>${res.challans}</b> challan(s) across ${res.files} PDF(s) in "${escHtml(res.folder)}", <b>${res.withLines}</b> with readable item lines.` +
+    bubble.innerHTML = `Challan copies ready \u2014 <b>${res.challans}</b> challan(s) across ${res.files} PDF(s) in "${escHtml(res.folder)}", <b>${res.withLines}</b> with readable item lines.` +
       (res.reusedFiles || res.skippedKnownBad
-        ? `<br><span class="sub-note" style="color:var(--ok);">${res.readNow} file(s) actually needed reading this time \\u2014 ${res.reusedFiles} were unchanged since the last scan${res.skippedKnownBad ? ` and ${res.skippedKnownBad} were already known to be unreadable` : ''}, so they were not downloaded at all.</span>`
+        ? `<br><span class="sub-note" style="color:var(--ok);">${res.readNow} file(s) actually needed reading this time \u2014 ${res.reusedFiles} were unchanged since the last scan${res.skippedKnownBad ? ` and ${res.skippedKnownBad} were already known to be unreadable` : ''}, so they were not downloaded at all.</span>`
         : '') +
       // When the index was full and still nothing matched, say so loudly and show BOTH
       // fingerprints. A silent full re-read is what wasted fifteen minutes with no clue as to why;
       // this turns it into one line that can be read, and sent on.
       (res.fpMismatch
-        ? `<br><span class="sub-note" style="color:var(--bad);">Every document had to be re-read even though ${res.indexedBefore} challan(s) were already indexed \\u2014 the file fingerprints no longer match.<br>now: <code>${escHtml(res.fpMismatch.now)}</code><br>stored: <code>${escHtml(res.fpMismatch.stored)}</code></span>`
+        ? `<br><span class="sub-note" style="color:var(--bad);">Every document had to be re-read even though ${res.indexedBefore} challan(s) were already indexed \u2014 the file fingerprints no longer match.<br>now: <code>${escHtml(res.fpMismatch.now)}</code><br>stored: <code>${escHtml(res.fpMismatch.stored)}</code></span>`
         : '') +
       // Name the files the old runaway loop left behind. Not deleted automatically: they are in
       // YOUR Drive, and a tool that quietly removes files is a tool you cannot trust with a folder.
@@ -8749,9 +8880,9 @@ async function runChallanIndexBuild(retryChallan) {
         ? `<br><span class="sub-note" style="color:var(--warn);"><b>${res.ocrJunk.length}</b> leftover "-Improved-Improved\u2026" copies were skipped. Older builds re-read their own OCR output and made a new copy each time; that is fixed, but the files it already made are still in your Challans folder and can be deleted:<br>${res.ocrJunk.slice(0, 8).map(escHtml).join('<br>')}${res.ocrJunk.length > 8 ? `<br>\u2026and ${res.ocrJunk.length - 8} more` : ''}</span>`
         : '') +
       (res.improved.length ? `<br><span class="sub-note" style="color:var(--ok);">Drive read <b>${res.improved.length}</b> file(s) that had no readable text. Each one now has an <b>-Improved.pdf</b> beside it and the original was renamed to <b>-Original</b>:<br>${res.improved.slice(0, 6).map(r => escHtml(r.improved)).join('<br>')}</span>` : '') +
-      (res.improveFailed.length ? `<br><span class="sub-note" style="color:var(--bad);">${res.improveFailed.length} file(s) could not be recovered even through Drive. Nothing was renamed for these:<br>${res.improveFailed.slice(0, 6).map(r => escHtml(r.name + ' \\u2014 ' + r.why)).join('<br>')}</span>` : '') +
+      (res.improveFailed.length ? `<br><span class="sub-note" style="color:var(--bad);">${res.improveFailed.length} file(s) could not be recovered even through Drive. Nothing was renamed for these:<br>${res.improveFailed.slice(0, 6).map(r => escHtml(r.name + ' \u2014 ' + r.why)).join('<br>')}</span>` : '') +
       (res.scanned.length && !res.improved.length ? `<br><span class="sub-note" style="color:var(--bad);">${res.scanned.length} file(s) are pictures of a challan with no text in them. Connect Drive and go online to have them read automatically:<br>${res.scanned.slice(0, 6).map(escHtml).join('<br>')}</span>` : '') +
-      (res.noFont.length && !res.improved.length ? `<br><span class="sub-note" style="color:var(--bad);">${res.noFont.length} file(s) have text but no usable font encoding, so nothing in them can be read \\u2014 not even the challan number:<br>${res.noFont.slice(0, 6).map(escHtml).join('<br>')}</span>` : '') +
+      (res.noFont.length && !res.improved.length ? `<br><span class="sub-note" style="color:var(--bad);">${res.noFont.length} file(s) have text but no usable font encoding, so nothing in them can be read \u2014 not even the challan number:<br>${res.noFont.slice(0, 6).map(escHtml).join('<br>')}</span>` : '') +
       (res.unverified.length ? `<br><span class="sub-note" style="color:var(--bad);">${res.unverified.length} challan(s) were read but did not add up to their own printed Total Line / Total Qty, so nothing on them will be claimed: ${escHtml(res.unverified.slice(0, 12).join(', '))}.</span>` : '') +
       (res.failed ? `<br><span class="sub-note" style="color:var(--bad);">${res.failed} file(s) could not be read (scanned image, corrupt, or still a cloud placeholder).</span>` : '') +
       (res.binaryDoc.length ? `<br><span class="sub-note" style="color:var(--bad);">${res.binaryDoc.length} file(s) are old binary Word documents, which no browser can open. Re-save these as PDF and rebuild:<br>${res.binaryDoc.slice(0, 6).map(escHtml).join('<br>')}</span>` : '') +
@@ -8763,7 +8894,7 @@ async function runChallanIndexBuild(retryChallan) {
     // this the status went back to a bland "no challan copies indexed yet" the moment the message
     // was out of sight, and the reason was lost.
     challanBuildError = e.message;
-    bubble.innerHTML = `Couldn't read the challan copies \\u2014 ${escHtml(e.message)}`;
+    bubble.innerHTML = `Couldn't read the challan copies \u2014 ${escHtml(e.message)}`;
     if (typeof renderHealth === 'function') renderHealth();
   } finally {
     challanIndexBuilding = false;
@@ -9148,7 +9279,7 @@ function remarkCell(r) {
   const txt = combinedRemarks(r);
   const edited = r.remarkEdited ? ' <span class="sub-note" title="Edited by you">\u270e</span>' : '';
   return `<td class="rmk-cell" data-k="${escHtml(acceptKey(r))}" title="Click to edit. Type green or red to colour this line."
-    style="cursor:text;min-width:150px;">${escHtml(txt)}${edited}${whyBtn(r)}</td>`;
+    style="cursor:text;min-width:150px;">${escHtml(txt)}${edited}${whyBtn(r)}${openWhyHtml(r)}</td>`;
 }
 // One delegated listener for the whole page rather than one per row: these tables can hold hundreds
 // of lines, and a listener each would be exactly the kind of cost that made the previews freeze.
@@ -9230,6 +9361,22 @@ function rowClass(r) {
 // preferred invDate — so challans could be processed in a different order than the matching
 // assumed. Challan date is the real re-delivery date, so it leads; inventory date is the fallback.
 function manualTime(r) { return parseDMY(r.challanDate) || parseDMY(r.invDate) || 0; }
+// v137: the same style, even when one line was typed "M82039-1B1-5" and the other "M82039-1B1 -5".
+// This is the format-variant tier of the style ladder ONLY — every letter and digit must match.
+// Prefix tiers are deliberately not used here: settling a short against a different style is the
+// one mistake this pass must never make.
+// v137: WHEN A SHORT BEGAN. The manual pass dated a short by its inventory date first, the excess
+// pass by its challan date first — two rules for one question. When Olisa counted the original
+// delivery a day or two after the manual challan's date, the manual pass refused a re-delivery the
+// excess pass would have accepted. The short exists from the moment the original goods went out,
+// so a re-delivery only has to come on or after the EARLIER of the two dates.
+function shortTime(r) {
+  const a = parseDMY(r.challanDate), b = parseDMY(r.invDate);
+  return (a && b) ? Math.min(a, b) : (a || b || 0);
+}
+function sameStyleToSettle(a, b) {
+  return a.styleNorm === b.styleNorm || normHard(a.styleNorm || '') === normHard(b.styleNorm || '');
+}
 function reconcileManualChallans() {
   // Cleared here because this is the entry point of a full reconciliation pass — it resets the
   // computed fields below and then calls the excess pass. Without this, running reconciliation a
@@ -9237,7 +9384,7 @@ function reconcileManualChallans() {
   // the first and every conservation check would read double.
   resetReconEvents();
   // reset any previous computation
-  allRecords.forEach(r => { delete r.autoNotes; delete r.autoNote; delete r.resolved; delete r._covered; delete r._consumed; delete r.accepted; delete r.forceColor; delete r.remarkEdited; });
+  allRecords.forEach(r => { delete r.autoNotes; delete r.autoNote; delete r.resolved; delete r._covered; delete r._consumed; delete r.accepted; delete r.forceColor; delete r.remarkEdited; delete r.openWhy; });
   // Overlay first: an accepted line is settled and must not also be "covered" by a manual challan.
   // Re-attach your remark edits to whatever Master File is currently loaded. A fresh export from
   // Olisa arrives without them; this puts them straight back on the matching lines.
@@ -9280,9 +9427,9 @@ function reconcileManualChallans() {
       // they still counted as open shortages and quietly ate manual-challan quantity that
       // belonged to a genuinely outstanding short, starving the real one.
       if (r.accepted) return false;
-      if (r.styleNorm !== m.styleNorm || !sameCartonItem(r, m)) return false;
+      if (!sameStyleToSettle(r, m) || !sameCartonItem(r, m)) return false;
       if (r.manualCh && manualTime(r) >= mTime) return false;   // only EARLIER manual challans
-      const rTime = parseDMY(r.invDate) || parseDMY(r.challanDate) || 0;
+      const rTime = shortTime(r);
       if (!mTime) return false;          // undated manual challan — cannot be ordered, so no claim
       return rTime <= mTime;
     }).sort((a, b) => {
@@ -9331,6 +9478,52 @@ function reconcileManualChallans() {
     }
   }
   reconcileExcessAgainstShorts();
+  explainOpenShorts();
+}
+// ==================== "WHY IS THIS STILL SHORT?" (v137) ====================
+// A short that stays red while a later delivery of the same style sits two lines below it, with no
+// word as to why, looks exactly like a bug — and sometimes is one, and sometimes is the Master File.
+// This names the later deliveries that COULD have settled the line and the one condition each
+// failed. It changes nothing: no matching rule is relaxed here, it only says what was checked.
+// Kept on r.openWhy, never in autoNotes, because autoNotes are written into the Olisa-facing
+// "Update" column of the Master File backup — a diagnostic for Sadi does not belong there.
+function explainOpenShorts() {
+  const meas = r => extractMeasurement(r.itemDesc) || String(r.itemDesc || '').trim() || '(none)';
+  const ch = r => challanDisp(r) || 'a line with no challan number';
+  allRecords.forEach(r => {
+    if ((r.short || 0) >= 0 || r.accepted || r.resolved) return;
+    const need = Math.abs(r.short) - (r._covered || 0);
+    if (need <= 0) return;
+    const rTime = shortTime(r);
+    const why = [];
+    for (const c of allRecords) {
+      if (why.length >= 3) break;
+      if (c === r || !sameStyleToSettle(c, r)) continue;
+      const cTime = manualTime(c);
+      const later = !rTime || !cTime || cTime >= rTime;
+      if (!later) continue;
+      const delivered = (c.delQty || 0) > 0 || (c.recQty || 0) > 0;
+      if (!delivered) continue;
+      const sameItem = sameCartonItem(c, r);
+      if (c.manualCh) {
+        if (!sameItem) why.push(`manual challan ${ch(c)} is for measurement ${meas(c)}, this line is ${meas(r)}`);
+        else if (!cTime) why.push(`manual challan ${ch(c)} has no date the tool can read (Challan Date "${c.challanDate || ''}", Inventory Date "${c.invDate || ''}")`);
+        else if (rTime && cTime < rTime) why.push(`manual challan ${ch(c)} is dated before this delivery`);
+        else if (!((c.recQty || 0) > 0)) why.push(`manual challan ${ch(c)} has no Received Qty filled in`);
+        else why.push(`manual challan ${ch(c)}'s ${c.recQty} pcs were already used for earlier shorts of this item`);
+      } else if ((c.short || 0) > 0) {
+        if (!sameItem) continue;   // an excess on a different item is never a re-delivery
+        if (!cTime) why.push(`challan ${ch(c)} has +${c.short} excess but no readable date`);
+        else why.push(`challan ${ch(c)}'s +${c.short} excess was already used for earlier shorts`);
+      } else if (sameItem && (c.short || 0) === 0 && cTime && rTime && cTime > rTime) {
+        why.push(`challan ${ch(c)} (${c.challanDate || c.invDate}) delivered ${c.delQty || c.recQty} pcs of this same item, but it is not marked Manual and shows no excess, so it counts as its own delivery. If it was the re-delivery, mark it Manual in the Master File or settle this line by hand`);
+      }
+    }
+    if (why.length) r.openWhy = `Not settled: ${why.join('; ')}.`;
+  });
+}
+function openWhyHtml(r) {
+  return r && r.openWhy ? `<div class="sub-note" style="margin-top:3px;color:var(--warn,#B45309);">${escHtml(r.openWhy)}</div>` : '';
 }
 // ==================== UNFLAGGED RE-DELIVERIES (excess settles an earlier short) ====================
 // A shortage is not always made good by a challan somebody remembered to tick "Manual". The far
@@ -9372,7 +9565,7 @@ function recordReconEvent(source, target, applied, rule) {
     sourceDims: cartonDims(source), targetDims: cartonDims(target),
     sourceMeas: measNorm(source.itemDesc), targetMeas: measNorm(target.itemDesc),
     sourcePi: normPiKey(source.piRef), targetPi: normPiKey(target.piRef),
-    sourceTime: manualTime(source) || 0, targetTime: manualTime(target) || 0,
+    sourceTime: manualTime(source) || 0, targetTime: shortTime(target) || 0,
     sourceAvail: rule === 'manual-challan' ? (source.recQty || 0) : (source.short || 0),
     targetShort: Math.abs(target.short || 0),
     targetAccepted: !!target.accepted
@@ -9385,7 +9578,7 @@ function reconciliationInvariants() {
   const bySource = new Map(), byTarget = new Map();
   for (const e of reconEvents) {
     if (!(e.qty > 0)) problems.push(`non-positive coverage of ${e.qty} on ${e.targetKey}`);
-    if (e.sourceStyle !== e.targetStyle) problems.push(`cross-style match: ${e.sourceStyle} -> ${e.targetStyle}`);
+    if (normHard(e.sourceStyle) !== normHard(e.targetStyle)) problems.push(`cross-style match: ${e.sourceStyle} -> ${e.targetStyle}`);
     if (e.sourceDims && e.targetDims && e.sourceDims !== e.targetDims)
       problems.push(`cross-item match: ${e.sourceDims} -> ${e.targetDims} on ${e.targetKey}`);
     if (e.sourceKey === e.targetKey) problems.push(`line covered itself: ${e.sourceKey}`);
@@ -9477,9 +9670,9 @@ function reconcileExcessAgainstShorts() {
       if (r === x) return false;
       if ((r.short || 0) >= 0) return false;
       if (r.accepted) return false; // waived by agreement — nothing left to re-deliver against it
-      if (r.styleNorm !== x.styleNorm || !sameCartonItem(r, x)) return false;
+      if (!sameStyleToSettle(r, x) || !sameCartonItem(r, x)) return false;
       if (Math.abs(r.short || 0) - (r._covered || 0) <= 0) return false; // already fully covered
-      return (manualTime(r) || 0) <= xTime;   // only shorts that happened BEFORE this delivery
+      return shortTime(r) <= xTime;   // only shorts that happened BEFORE this delivery
     }).sort((a, b) => {
       // Same PI first, exactly as the manual-challan pass does: a late delivery almost always
       // belongs to its own PI, and only the surplus spills elsewhere — said out loud when it does.
@@ -11293,7 +11486,7 @@ async function showPiDetails(refRaw) {
   // Coverage no longer comes only from manual challans — an excess on a later ordinary challan of
   // the same item settles a short too — so this line no longer names one source. Each row's own
   // remark says exactly which challan and which date covered it.
-  if (resolvedCount) html += `<div class="sub-note" style="margin-top:5px;">${resolvedCount} short line${resolvedCount > 1 ? 's have' : ' has'} since been re-delivered and no longer counts as outstanding \\u2014 see the remark on each line for the covering challan.</div>`;
+  if (resolvedCount) html += `<div class="sub-note" style="margin-top:5px;">${resolvedCount} short line${resolvedCount > 1 ? 's have' : ' has'} since been re-delivered and no longer counts as outstanding \u2014 see the remark on each line for the covering challan.</div>`;
   if (piQty !== null && entry && entry.items && entry.items.length && rows.length) {
     html += `<div class="sub-note" style="margin-top:3px;">Balance is PI Qty minus everything dispatched against PI ${escHtml(ref)} in the Master File. Item-by-item split isn't shown \u2014 that needs challan-level detail.</div>`;
   }
@@ -11306,7 +11499,7 @@ async function showPiDetails(refRaw) {
     html += `<div class="previewbox" style="margin-top:5px;max-height:300px;"><table class="preview"><tr><th>PI Ref</th><th>PI Date</th><th>PI Qty</th><th>Inventory Date</th><th>Style</th><th>Item</th><th>Measurement</th><th>Delivered Qty</th><th>Received Qty</th><th>Short&amp;Exs</th><th>Challan No</th><th>Challan Date</th><th>Remarks</th></tr>`;
     rows.slice(0, MAX_TABLE_ROWS).forEach(r => {
       const piQ = piQtyForRow(r.piRef, r.styleNorm, r.itemDesc);
-      html += `<tr class="${rowClass(r)}"><td><a href="#" class="pi-link" data-pi="${escHtml(ref)}">${escHtml(String(r.piRef))}</a></td><td>${escHtml(String(piDateFor(r.piRef) ?? ''))}</td><td>${escHtml(String(piQ !== null ? piQ : ''))}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(itemLabel(r))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${escHtml(String(r.delQty ?? ''))}</td><td>${escHtml(String(r.recQty ?? ''))}</td><td>${escHtml(String(r.short ?? ''))}</td><td>${challanCell(r)}</td><td>${escHtml(String(r.challanDate ?? ''))}</td><td>${escHtml(combinedRemarks(r))}${whyBtn(r)}</td></tr>`;
+      html += `<tr class="${rowClass(r)}"><td><a href="#" class="pi-link" data-pi="${escHtml(ref)}">${escHtml(String(r.piRef))}</a></td><td>${escHtml(String(piDateFor(r.piRef) ?? ''))}</td><td>${escHtml(String(piQ !== null ? piQ : ''))}</td><td>${escHtml(String(r.invDate ?? ''))}</td><td>${escHtml(String(r.style))}</td><td>${escHtml(itemLabel(r))}</td><td>${escHtml(extractMeasurement(r.itemDesc))}</td><td>${escHtml(String(r.delQty ?? ''))}</td><td>${escHtml(String(r.recQty ?? ''))}</td><td>${escHtml(String(r.short ?? ''))}</td><td>${challanCell(r)}</td><td>${escHtml(String(r.challanDate ?? ''))}</td><td>${escHtml(combinedRemarks(r))}${whyBtn(r)}${openWhyHtml(r)}</td></tr>`;
     });
     html += tableCapNote(Math.min(rows.length, MAX_TABLE_ROWS), rows.length);
     html += `</table></div>`;

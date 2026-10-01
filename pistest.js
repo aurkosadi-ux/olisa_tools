@@ -181,7 +181,7 @@ check('no stray non-ASCII byte crept in', !/[^\x00-\x7f]/.test(txt));
 GROUPS = TWO;
 const pdf2 = Buffer.from(api.buildSummaryPdf(TWO, { asOf: '2026-09-19' })).toString('latin1');
 check('a second party is printed too', pdf2.includes('(Beximco Textiles Ltd.) Tj'));
-check('two parties earn a GRAND TOTAL', pdf2.includes('(GRAND TOTAL -) Tj'));
+check('two parties earn a GRAND TOTAL', pdf2.includes('(GRAND TOTAL - ALL PARTIES) Tj'));
 check('the grand total adds up', pdf2.includes('($23,900.75) Tj'));
 
 /* a long run has to break onto more pages, repeat the party band and number the pages */
