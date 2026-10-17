@@ -1275,6 +1275,10 @@ function sheetTitle(groups){
 function buildSummaryWorkbook(groups,opts){
   opts=opts||{};
   var rows=[],merges=[],heights={},grand=0,asOf=fmtISO(opts.asOf);
+  /* as-of = today -> live TODAY() so the sheet keeps ageing; any other chosen date -> fixed DATE(),
+     so the Excel days always agree with the "Pending as of" line and the PDF */
+  var ap=opts.asOf?String(opts.asOf).split('-'):null;
+  var daysBase=(!ap||opts.asOf===todayISO())?'TODAY()':'DATE('+(+ap[0])+','+(+ap[1])+','+(+ap[2])+')';
   var many=groups.length>1;
   /* the same block, laid out the same way, whether there is one party or six —
      a summary emailed to one party looks exactly like its page in the full sheet */
@@ -1329,7 +1333,7 @@ function buildSummaryWorkbook(groups,opts){
     for(var i=0;i<grp.rows.length;i++){
       var d=grp.rows[i],rn=rows.length+1;
       var dateCell=d.date?{t:'n',v:excelSerial(d.date),s:5}:{t:'s',v:'',s:3};
-      var daysCell=d.date?{t:'f',f:'TODAY()-D'+rn,v:d.pendingDays,s:6}:{t:'s',v:'',s:6};
+      var daysCell=d.date?{t:'f',f:daysBase+'-D'+rn,v:d.pendingDays,s:6}:{t:'s',v:'',s:6};
       rows.push([{t:'s',v:upperBuyer(d.buyer),s:3},{t:'s',v:d.pi,s:3},
         d.value==null?{t:'s',v:'',s:4}:{t:'n',v:d.value,s:4},dateCell,daysCell,{t:'s',v:d.concern,s:3}]);
       if(d.value!=null)sum+=d.value;
@@ -1484,7 +1488,9 @@ function load(){
     if(!raw)return;
     var d=JSON.parse(raw);
     if(!d||!Array.isArray(d.rows))return;
-    state.asOf=d.asOf||todayISO();
+    /* the as-of date is deliberately NOT restored from the saved copy: restoring it froze the
+       report on whatever day it was last used. It always starts at today's date. */
+    state.asOf=todayISO();
     state.dateOrder=d.dateOrder||'DMY';
     state.rows=d.rows.map(function(r){
       r.date=r.date?isoToUTC(r.date):null;
@@ -2300,7 +2306,17 @@ document.addEventListener('drop',function(e){
   if(e.dataTransfer.files&&e.dataTransfer.files.length)ingest(e.dataTransfer.files);
 });
 
-$('asof').onchange=function(e){ state.asOf=e.target.value||todayISO(); render(); save(); };
+var asOfManual=false;   /* true only while the user has deliberately picked a different date */
+$('asof').onchange=function(e){
+  var v=e.target.value;
+  asOfManual=!!v&&v!==todayISO();
+  state.asOf=v||todayISO(); render(); save();
+};
+function refreshAsOf(){
+  if(!asOfManual&&state.asOf!==todayISO()){ state.asOf=todayISO(); render(); }
+}
+window.addEventListener('focus',refreshAsOf);
+document.addEventListener('visibilitychange',function(){ if(!document.hidden)refreshAsOf(); });
 $('dfmt').onchange=function(e){
   state.dateOrder=e.target.value;
   var n=0;
