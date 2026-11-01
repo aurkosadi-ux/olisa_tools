@@ -1260,7 +1260,29 @@ function switchTab(which) {
 // immediately, so the whole script threw on load. Evaluation stopped there, which meant every
 // `let` below it never initialised either, and the first thing to notice was an unrelated
 // "cannot access 'piIndex' before initialization". One misplaced constant, entire tool dead.
-const APP_VERSION = 137;
+const APP_VERSION = 138;
+// ==================== A QUANTITY CELL, READ THE SAME WAY EVERYWHERE (v138) ====================
+// The challan and PI readers already stripped thousands separators, but the Master File, PO Summary
+// and Undelivered readers did not. A quantity that reached them as TEXT — pasted from another
+// sheet, or exported by a system that writes "1,200" — was read by parseFloat("1,200") as 1, and by
+// Number("1,200") as NaN, so the line was either silently wrong or silently dropped. One reader now:
+// real numbers pass through, text loses its separators/spaces, accounting brackets "(35)" and the
+// unicode minus mean negative, and a trailing unit word ("1,200 pcs") is allowed. Anything that is
+// still not a number comes back NaN, so every caller keeps its own "|| 0" / skip behaviour.
+function cellNum(v) {
+  if (typeof v === 'number') return v;
+  if (v === null || v === undefined) return NaN;
+  if (typeof v === 'object' && 'result' in v) return cellNum(v.result);   // ExcelJS formula cell
+  let s = String(v).replace(/[\u00a0\u2007\u202f\s]/g, '').replace(/[\u2212\u2012\u2013\u2014]/g, '-');
+  if (!s) return NaN;
+  let neg = false;
+  const br = s.match(/^\((.*)\)$/);
+  if (br) { neg = true; s = br[1]; }
+  s = s.replace(/(pcs|pc|pieces?|nos?)\.?$/i, '');
+  if (!/^[-+]?(\d{1,3}(,\d{2,3})+|\d+)(\.\d+)?$|^[-+]?\.\d+$/.test(s)) return NaN;
+  const n = parseFloat(s.replace(/,/g, ''));
+  return neg ? -n : n;
+}
 // ==================== WHAT KIND OF CARTON IS THIS LINE? ====================
 // This lived inside the Undelivered Report's IIFE, so the Ask tab could not reach it and simply
 // printed the Master File's Item column as-is. That column says "Master Carton" on punch lines
@@ -1319,6 +1341,7 @@ const dlAllBtn = document.getElementById('podlAllBtn');
 
 let selectedFiles = [];
 let generatedRows = null;
+let poAutoDate = '';       // what the tool last wrote into the Delivery Date box (v138)
 let dateGroups = [];        // [{ label, key, rows }] one per distinct delivery date, earliest first
 
 drop.addEventListener('click', () => fileInput.click());
@@ -1381,6 +1404,7 @@ function resetPo() {
   selectedFiles = [];
   fileInput.value = '';          // without this the SAME file re-picked fires no change event
   deliveryDateInput.value = '';
+  poAutoDate = '';
   renderFileList();
 }
 
@@ -1565,7 +1589,7 @@ function extractWeightRunMap(aoa) {
       if (!map.has(style)) map.set(style, new Map());
       const smap = map.get(style);
       weightCols.forEach(({ col, weight }) => {
-        const v = parseFloat(drow[col]);
+        const v = cellNum(drow[col]);
         const q = isNaN(v) ? 0 : v;
         const key = weightLabel(weight);
         smap.set(key, (smap.get(key) || 0) + q);
@@ -1670,9 +1694,9 @@ function tryAltFormat(aoa) {
     const oHit = idx.ORDERDATE !== undefined ? anyToDate(row[idx.ORDERDATE]) : null;
     if (oHit) lastOrder = oHit;
     if (!currentStyle) continue;
-    const qty = Number(row[idx.CARTONQTY]);
+    const qty = cellNum(row[idx.CARTONQTY]);
     if (!qty || qty <= 0) continue;
-    const L = Number(row[idx.L]), W = Number(row[idx.W]), H = Number(row[idx.H]);
+    const L = cellNum(row[idx.L]), W = cellNum(row[idx.W]), H = cellNum(row[idx.H]);
     if (!L || !W || !H) continue;
     raw.push({
       style: currentStyle, qty, L, W, H,
@@ -1705,6 +1729,21 @@ function tryAltFormat(aoa) {
   }));
 }
 
+function fillMergedColumn(aoa, merges, top, col, headerRowIdx) {
+  if (col === undefined || !merges || !merges.length) return;
+  for (const m of merges) {
+    if (!m || !m.s || !m.e || m.s.c > col || m.e.c < col || m.e.r <= m.s.r) continue;
+    const r0 = m.s.r - (top || 0);
+    if (r0 <= headerRowIdx) continue;
+    const src = aoa[r0] ? aoa[r0][m.s.c] : null;
+    if (src === null || src === undefined || String(src).trim() === '') continue;
+    for (let r = r0 + 1; r <= m.e.r - (top || 0) && r < aoa.length; r++) {
+      if (!aoa[r]) aoa[r] = [];
+      const cur = aoa[r][col];
+      if (cur === null || cur === undefined || String(cur).trim() === '') aoa[r][col] = src;
+    }
+  }
+}
 async function readOrderRows(file) {
   const buf = await file.arrayBuffer();
   const wb = XLSX.read(buf, { type: 'array', cellDates: true });
@@ -1716,7 +1755,9 @@ async function readOrderRows(file) {
   // sheet separately, so a five-sheet workbook was converted ten times.
   const sheets = [];
   for (const sheetName of wb.SheetNames) {
-    sheets.push({ name: sheetName, aoa: XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, defval: null, raw: true }) });
+    const wsh = wb.Sheets[sheetName];
+    sheets.push({ name: sheetName, aoa: XLSX.utils.sheet_to_json(wsh, { header: 1, defval: null, raw: true }),
+                  merges: wsh['!merges'] || [], top: wsh['!ref'] ? XLSX.utils.decode_range(wsh['!ref']).s.r : 0 });
     await poYield();
   }
   for (const { aoa } of sheets) {
@@ -1728,7 +1769,7 @@ async function readOrderRows(file) {
     }
   }
 
-  for (const { aoa } of sheets) {
+  for (const { aoa, merges, top } of sheets) {
     await poYield();   // one repaint per sheet, so a big workbook never looks frozen
     let headerRowIdx = -1;
     let colIdx = {};
@@ -1771,6 +1812,11 @@ async function readOrderRows(file) {
       continue;
     }
 
+    // v138: a style written once in a cell merged down across its size rows reached this loop only
+    // on the FIRST row — SheetJS leaves the other rows of a merge empty — so every other size under
+    // that style was skipped without a word. Only genuine merged regions of the STYLE column are
+    // filled; quantity cells are never copied, so nothing can be counted twice.
+    fillMergedColumn(aoa, merges, top, colIdx.STYLE, headerRowIdx);
     const recordsBefore = records.length;
     let lastDelivery = null, lastOrder = null;   // per sheet — a new sheet never inherits a date
     for (let r = headerRowIdx + 1; r < aoa.length; r++) {
@@ -1819,7 +1865,7 @@ async function readOrderRows(file) {
         }
       }
       if (!expanded) {
-        const qty = parseFloat(qtyVal);
+        const qty = cellNum(qtyVal);
         if (!qty || qty <= 0) continue;
         records.push({ style, sizeText, qty, deliveryDate, deliveryKey, orderDate, expanded: false });
       }
@@ -1890,7 +1936,15 @@ async function generate() {
     // sheet went out saying one date while most of its lines were due on others. Every date present
     // is shown now, in order, and stays editable.
     const labels = dateGroups.filter(g => g.label).map(g => g.label);
-    if (labels.length && !deliveryDateInput.value) deliveryDateInput.value = labels.join(', ');
+    // v138: this only filled an EMPTY box. Generate with one work order, then pick another, and the
+    // box still held the first file's dates — so the second summary went out with the wrong
+    // DELIVERY DATE in its header. The box is now refreshed whenever it still holds what the tool
+    // itself put there; a date the user typed by hand is never overwritten.
+    const autoText = labels.join(', ');
+    if (!deliveryDateInput.value || deliveryDateInput.value === poAutoDate) {
+      deliveryDateInput.value = autoText;
+      poAutoDate = autoText;
+    }
 
     statusEl.textContent = 'Drawing the preview\u2026';
     await poYield();
@@ -2211,7 +2265,6 @@ const previewNote = document.getElementById('undpreviewNote');
 
 let selectedFiles = [];
 let generatedRows = null;
-let generatedTitle = null;
 let generatedPiRows = null;   // one line per PI for the PI Wise sheet
 let dateTouched = false;      // true once the box has been typed in by hand
 
@@ -2343,6 +2396,12 @@ function formatDateValue(v) {
     return `${dd}/${mm}/${yyyy}`;
   }
   if (v && typeof v === 'object' && 'result' in v) return String(v.result);
+  // v138: a date cell the export did not FORMAT as a date arrives as its serial number (46327),
+  // which was printed as-is and then sorted and aged as "No delivery date given".
+  if (typeof v === 'number' && v > 30000 && v < 80000) {
+    const u = new Date(Date.UTC(1899, 11, 30) + Math.floor(v) * 86400000);
+    return `${String(u.getUTCDate()).padStart(2,'0')}/${String(u.getUTCMonth()+1).padStart(2,'0')}/${u.getUTCFullYear()}`;
+  }
   return v === null || v === undefined ? '' : String(v).trim();
 }
 
@@ -2396,7 +2455,7 @@ async function readWorkbookRows(file) {
     if (!row) continue;
     const piNo = row[colIdx.PI_NO];
     if (!piNo) continue;
-    const uQty = Number(row[colIdx.U_QTY]) || 0;
+    const uQty = cellNum(row[colIdx.U_QTY]) || 0;
     if (uQty <= 0) continue;
     const pSizeRaw = row[colIdx.P_SIZE];
     const countryCodeRaw = row[colIdx.COUNTRY_CODE];
@@ -2467,6 +2526,12 @@ function deliverySortKey(label) {
   if (m) return Date.UTC(+m[1], +m[2] - 1, +m[3]);
   m = t.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2})$/);            // dd/mm/yy
   if (m) return Date.UTC(2000 + +m[3], +m[2] - 1, +m[1]);
+  // v138: "15-Nov-2026" / "15 Nov 26" — text dates with a month name were "No delivery date given".
+  m = t.match(/^(\d{1,2})[\s\/.\-]*([A-Za-z]{3,9})\.?[\s\/.\-,]*(\d{4}|\d{2})$/);
+  if (m) {
+    const mi = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'].indexOf(m[2].slice(0, 3).toLowerCase());
+    if (mi >= 0) return Date.UTC(m[3].length === 2 ? 2000 + +m[3] : +m[3], mi, +m[1]);
+  }
   return null;
 }
 function piSortKey(ref) {
@@ -2564,7 +2629,6 @@ async function generate() {
     previewShowAll = false;      // a new report starts capped again, however big the last one was
     // Two lines inside ONE cell: the schedule name, then the date under it. Excel keeps the break
     // where "\n" sits as long as the cell wraps, which is why the row is given a height below.
-    generatedTitle = `OLISA's Undelivered Qty & Delivery Schedule\n(${dateInput.value})`;
 
     await undYield();
     renderPreview(rows, totalMaster, totalPunch, totalCross);
@@ -2689,7 +2753,10 @@ async function downloadXlsx() {
 
   ws.mergeCells(1, 1, 1, NCOL);
   const titleCell = ws.getCell(1, 1);
-  titleCell.value = generatedTitle;                  // "…Schedule\n(31st August 2026)"
+  // v138: built from the date box NOW. It was frozen at Generate time while the file name below
+  // read the box live, so correcting the date after generating gave a title and a file name that
+  // disagreed.
+  titleCell.value = `OLISA's Undelivered Qty & Delivery Schedule\n(${dateInput.value})`;                  // "…Schedule\n(31st August 2026)"
   titleCell.font = { bold: true, size: 13, name: 'Arial' };
   titleCell.alignment = UND_CENTER;                  // wrapText keeps the break inside the one cell
   // The YELLOW belongs to the heading, not the column names. Filling the merged title cell alone
@@ -3146,7 +3213,7 @@ function showShortageList() {
     const acceptedInScope = applyAskFilters(acceptedAll);
     const acceptedHidden = acceptedAll.length - acceptedInScope.length;
     const hiddenCount = shortRecords.length - shortRecordsInScope.length;
-    const sorted = [...shortRecordsInScope].sort((a, b) => (Number(b.piRef) || 0) - (Number(a.piRef) || 0));
+    const sorted = [...shortRecordsInScope].sort((a, b) => (piNumOf(b.piRef) || 0) - (piNumOf(a.piRef) || 0));
     const totalShort = sorted.reduce((s, r) => s + effectiveShort(r), 0);
 
     let html = '';
@@ -3157,7 +3224,7 @@ function showShortageList() {
       if (filterDesc) html += ` <span class="sub-note">(filter: ${escHtml(filterDesc)})</span>`;
       html += `</div>`;
     } else if (!sorted.length) {
-      const noPi = shortRecords.filter(r => !isFinite(parseFloat(r.piRef))).length;
+      const noPi = shortRecords.filter(r => !isFinite(piNumOf(r.piRef))).length;
       html += `<div>No outstanding shortage lines fall inside the active filter (<b>${escHtml(filterDesc || 'none')}</b>). `;
       html += `The Master File has ${shortRecords.length} outstanding short line(s) in total.`;
       if (noPi) html += `<br><span class="sub-note">Note: ${noPi} of those line(s) carry a blank or <b>#N/A</b> PI Ref, so they can never fall inside a PI range — clear the PI boxes to see them.</span>`;
@@ -3180,7 +3247,7 @@ function showShortageList() {
       // Newest settlement first: a line settled by mistake is the one just done, so it sits at the
       // top instead of somewhere in Master File order.
       const settled = [...acceptedInScope].sort((a, b) =>
-        ((b.accepted.at || 0) - (a.accepted.at || 0)) || ((Number(b.piRef) || 0) - (Number(a.piRef) || 0)));
+        ((b.accepted.at || 0) - (a.accepted.at || 0)) || ((piNumOf(b.piRef) || 0) - (piNumOf(a.piRef) || 0)));
       html += `<div class="summary-line" style="margin-top:14px;">Settled by agreement — ${settled.length} line(s), ${Math.abs(settled.reduce((s, r) => s + (r.short || 0), 0))} pcs no longer claimed`;
       if (acceptedHidden) html += ` <span class="sub-note">(${acceptedHidden} more settled line(s) outside this filter)</span>`;
       html += `</div>`;
@@ -7338,7 +7405,18 @@ async function loadFile(file) {
   try {
     const buf = await file.arrayBuffer();
     const wb = XLSX.read(buf, { type: 'array', cellDates: true });
-    const wantedSheets = wb.SheetNames.filter(n => /^2026-\s*Main$/i.test(n.trim()) || /^2025$/i.test(n.trim()));
+    // v138: the years were hard-coded ("2026- Main" and "2025"). From January the new "2027- Main"
+    // sheet would have been skipped while the two old ones still matched — every 2027 delivery
+    // silently missing from every answer. Any "YYYY- Main" is read now, plus any bare "YYYY" archive
+    // sheet — except a bare year that ALSO has its own Main sheet, so the same rows are never read
+    // twice if both copies sit in the workbook.
+    const mainYears = new Set(wb.SheetNames.map(n => (n.trim().match(/^(20\d\d)\s*-?\s*Main$/i) || [])[1]).filter(Boolean));
+    const wantedSheets = wb.SheetNames.filter(n => {
+      const t = n.trim();
+      if (/^20\d\d\s*-?\s*Main$/i.test(t)) return true;
+      const y = (t.match(/^(20\d\d)$/) || [])[1];
+      return !!y && !mainYears.has(y);
+    });
     const sheets = wantedSheets.length ? wantedSheets : wb.SheetNames;
 
     const records = [];
@@ -7366,9 +7444,9 @@ async function loadFile(file) {
           invDate: idx.INVDATE !== undefined ? fmtDate(row[idx.INVDATE]) : '',
           item: idx.ITEM !== undefined ? row[idx.ITEM] : '',
           itemDesc: idx.ITEMDESC !== undefined ? row[idx.ITEMDESC] : '',
-          delQty: idx.DELQTY !== undefined ? parseFloat(row[idx.DELQTY]) || 0 : null,
-          recQty: idx.RECQTY !== undefined ? parseFloat(row[idx.RECQTY]) || 0 : null,
-          short: idx.SHORT !== undefined ? parseFloat(row[idx.SHORT]) || 0 : null,
+          delQty: idx.DELQTY !== undefined ? cellNum(row[idx.DELQTY]) || 0 : null,
+          recQty: idx.RECQTY !== undefined ? cellNum(row[idx.RECQTY]) || 0 : null,
+          short: idx.SHORT !== undefined ? cellNum(row[idx.SHORT]) || 0 : null,
           challanNo: idx.CHALLANNO !== undefined ? row[idx.CHALLANNO] : '',
           challanDate: idx.CHALLANDATE !== undefined ? fmtDate(row[idx.CHALLANDATE]) : '',
           remarks: idx.REMARKS !== undefined ? row[idx.REMARKS] : '',
@@ -7819,7 +7897,9 @@ async function pdfPageText(pdf, n) {
 // "PI:121/700768/0144062026" -> 144. The third segment is a zero-padded 4-digit PI followed by
 // MMYYYY, so the PI is the first four digits of it — 0144|062026, 0124|042026.
 function piFromChallanText(txt) {
-  const m = txt.match(/PI\s*:\s*\d+\s*\/\s*\d+\s*\/\s*(\d{4})\d{6}/);
+  // v138: required EXACTLY four sequence digits before the 6-digit date, so a challan printing the
+  // PI without zero padding (…/174011025) lost its PI link. Same tolerance as the PI reader.
+  const m = txt.match(/PI\s*:\s*\d+\s*\/\s*\d+\s*\/\s*0*(\d{1,6})\d{6}(?!\d)/);
   return m ? String(parseInt(m[1], 10)) : '';
 }
 async function scanChallanPdf(file, path, driveId) {
@@ -8512,7 +8592,9 @@ function unbookedLinesForStyle(styleNorm) {
                  verified: !!c.verified, path: c.path });
     });
   });
-  return out.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  // v138: challan dates are stored as "05-Oct-2026", so comparing the TEXT sorted by day number —
+  // 31-Oct came above 01-Nov in a "newest first" list. Compare real dates.
+  return out.sort((a, b) => (parseDMY(b.date) || 0) - (parseDMY(a.date) || 0));
 }
 // The four-tier ladder the rest of the tool already uses, applied to a challan's style text.
 function styleMatches(challanStyle, styleNorm) {
@@ -8527,7 +8609,7 @@ function unbookedChallans() {
   return Object.values(challanIndex || {})
     .map(c => ({ entry: c, st: challanStatus(c) }))
     .filter(x => x.st && x.st.state !== 'booked')
-    .sort((a, b) => String(b.entry.date).localeCompare(String(a.entry.date)));
+    .sort((a, b) => (parseDMY(b.entry.date) || 0) - (parseDMY(a.entry.date) || 0));
 }
 // Which Master File the booking check just used, so "is it syncing?" is answered on the spot.
 function masterCheckedAgainst() {
@@ -9039,10 +9121,19 @@ function setRemark(r, text) {
 // only an explicit colour word counts, so ordinary notes ("70 pcs hole mark") never change a
 // colour by accident. Word-boundary matched, so "greenish" or a style code containing "red"
 // cannot trigger it.
+const RMK_GREEN = '(green|ok|okay|accepted|approved|settled|solved|resolved|cleared|done)';
+const RMK_RED = '(red|urgent|pending|problem|problems|issue|issues|hold|reject|rejected|critical)';
 function remarkColorWord(text) {
-  const t = String(text || '').toLowerCase();
-  if (/\b(green|ok|okay|accepted|approved|settled|solved|resolved|cleared|done)\b/.test(t)) return 'green';
-  if (/\b(red|urgent|pending|problem|issue|hold|reject|rejected|critical)\b/.test(t)) return 'red';
+  let t = String(text || '').toLowerCase().replace(/[\u2019']/g, "'");
+  // v138: the words were matched with no idea of "not". "Not OK", "not accepted" and "not settled
+  // yet" all painted the line GREEN — the colour that means settled — on screen and in the
+  // download; "no issue" painted it red. A negated settle word now means red (still open), and a
+  // negated problem word is simply ignored.
+  const NEG = "(not|no|never|isn't|wasn't|aren't|hasn't|haven't|yet to be|not yet)";
+  if (new RegExp('\\b' + NEG + '\\s+(?:be\\s+|been\\s+|yet\\s+)?' + RMK_GREEN + '\\b').test(t)) return 'red';
+  t = t.replace(new RegExp('\\b(no|not|without|never)\\s+(?:any\\s+)?' + RMK_RED + '\\b', 'g'), ' ');
+  if (new RegExp('\\b' + RMK_GREEN + '\\b').test(t)) return 'green';
+  if (new RegExp('\\b' + RMK_RED + '\\b').test(t)) return 'red';
   return null;
 }
 // The remark actually in force for a row: your edit if there is one, else Olisa's original.
@@ -9740,7 +9831,7 @@ function applyAskFilters(matches) {
     // means the same set of lines in both places.
     if (f.kind && rowKind(r) !== f.kind) return false;
     if (hasFrom || hasTo) {
-      const p = parseFloat(r.piRef);          // one parse per row, not two
+      const p = piNumOf(r.piRef);             // v138: same reader as everywhere else (was parseFloat)
       if (isNaN(p)) return false;             // blank / "#N/A" PI Ref can't sit in a numeric range
       if (hasFrom && p < f.from) return false;
       if (hasTo && p > f.to) return false;
@@ -9759,7 +9850,7 @@ function askFilterPassesPiLine(ref, ln, f) {
   if (f.kind && piLineKind(ln) !== f.kind) return false;
   const hasFrom = !isNaN(f.from), hasTo = !isNaN(f.to);
   if (hasFrom || hasTo) {
-    const p = parseFloat(ref);
+    const p = piNumOf(ref);
     if (isNaN(p)) return false;
     if (hasFrom && p < f.from) return false;
     if (hasTo && p > f.to) return false;
@@ -10031,9 +10122,14 @@ function sheetToPiLines(buf) {
   const wb = XLSX.read(buf, { type: 'array' });
   const lines = [];
   wb.SheetNames.forEach(sn => {
-    const csv = XLSX.utils.sheet_to_csv(wb.Sheets[sn], { blankrows: false });
+    // v138: rawNumbers. Without it the CSV carries the DISPLAYED text, so a quantity formatted
+    // "1,200" came out as the quoted field "1,200" — and the comma-to-space step below turned it into
+    // "1 200", which no longer reads as "<qty> Piece". Every PI line of 1,000 pcs or more vanished,
+    // and so did the "Total Qty (Pcs)" figure that should have flagged the gap. The quote marks CSV
+    // puts around a field holding a comma are dropped too, for the same reason.
+    const csv = XLSX.utils.sheet_to_csv(wb.Sheets[sn], { blankrows: false, rawNumbers: true });
     csv.split(/\r?\n/).forEach(row => {
-      const l = row.replace(/,+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+      const l = row.replace(/"/g, '').replace(/,+/g, ' ').replace(/\s{2,}/g, ' ').trim();
       if (l) lines.push(l);
     });
   });
@@ -10703,6 +10799,9 @@ function bucketPiEntries(entries) {
   });
   return buckets;
 }
+// v138: the PI-range filter read PI Refs with parseFloat, so "PI-174" or "PI 174" was NaN and
+// vanished from every filtered list while normPiKey() — used for everything else — read it as 174.
+function piNumOf(v) { const k = normPiKey(v); return k === null ? NaN : Number(k); }
 function normPiKey(piRefRaw) {
   if (piRefRaw === null || piRefRaw === undefined || piRefRaw === '') return null;
   const s = String(piRefRaw).trim();
@@ -10734,8 +10833,21 @@ function piLineForRow(entry, styleNorm, itemDesc) {
   const dk = dimKey(dims);
   // 1. exact style + exact dims
   let hit = entry.items.find(it => it.style === styleNorm && it.dims && dk && it.dims === dk);
-  // 2. exact style where one side has no dims to compare
-  if (!hit) hit = entry.items.find(it => it.style === styleNorm && (!it.dims || !dk));
+  // 2. exact style where one side has no dims to compare.
+  // v138: this tier ignored WHAT the line is. PI cross-divider lines carry no parsed dims (the PI
+  // pattern needs three numbers), so a Master Carton row whose dims differed from its PI line even
+  // slightly (56 vs 56.5) fell through to here and was handed the CROSS DIVIDER's PI quantity. A
+  // row with full L x W x H is a box, so it may not take a divider line here; a row that says it
+  // IS a divider may only take a divider line. A row that says nothing either way is unchanged.
+  const rowIsBox = !!(dims && dims.length >= 3);
+  const rowIsCross = kindWord(itemDesc) === 'cross';
+  const kindOk = it => {
+    const k = piLineKind(it);
+    if (rowIsCross) return k === 'cross';
+    if (rowIsBox) return k !== 'cross';
+    return true;
+  };
+  if (!hit) hit = entry.items.find(it => it.style === styleNorm && (!it.dims || !dk) && kindOk(it));
   // 3. same family + exact dims (PI names the parent code; Master File names the sub-code)
   if (!hit && dk) {
     const fam = styleFamily(styleNorm);
@@ -10751,6 +10863,17 @@ function piLineForRow(entry, styleNorm, itemDesc) {
 function piQtyForRow(piRefRaw, styleNorm, itemDesc) {
   const hit = piLineForRow(piEntryFor(normPiKey(piRefRaw)), styleNorm, itemDesc);
   return hit ? hit.qty : null;
+}
+// v138: WHICH PI line a delivered row was matched to, in the same shape piFillerLines() uses for
+// a not-yet-delivered line (PI|style|dims). "Covered" used to be keyed on the ROW's own dims, so a
+// row matched to its PI line through a fallback tier (dims slightly different) left that very PI
+// line looking undelivered: it was listed again as "Not delivered yet" and its quantity was added
+// to PI Qty a second time — on screen, in the download and in the request-file report.
+function piHitSig(r) {
+  const key = normPiKey(r && r.piRef);
+  if (!key) return null;
+  const hit = piLineForRow(piEntryFor(key), r.styleNorm, r.itemDesc);
+  return hit ? key + '|' + hit.style + '|' + (hit.dims || 'nodim') : null;
 }
 // ==================== ONE DEFINITION, USED BY SCREEN AND FILE ====================
 // The Ask table and its Excel download decided "has this PI line already been delivered?" with two
@@ -10776,7 +10899,8 @@ function piFillerLines(styles, filters) {
   const covered = new Set();
   allRecords.forEach(r => {
     if (!set.has(r.styleNorm) || !normPiKey(r.piRef)) return;
-    if (piQtyForRow(r.piRef, r.styleNorm, r.itemDesc) !== null) covered.add(piCoverKey(r));
+    const sig = piHitSig(r);
+    if (sig) { covered.add(piCoverKey(r)); covered.add(sig); }
   });
   const out = [];
   set.forEach(sn => piLinesForStyle(sn).forEach(g => g.lines.forEach(ln => {
@@ -10945,6 +11069,14 @@ function lookupStyle(code, opts) {
   const codeHard = normHard(code);
   // Tier 1 — exact match, tolerant of stray spaces ("M82036A6 - 1" === "M82036A6-1").
   let matches = allRecords.filter(r => normSp(r.styleNorm) === codeNorm);
+  // v138: spelling variants of the SAME style ("M81988-3A2" and "M81988 3A2" typed on different
+  // rows) were left out once the exact spelling had a hit — yet settling (sameStyleToSettle) treats
+  // them as one style. So a short on one spelling, settled by an excess on the other, showed up here
+  // as a consumed excess with no short beside it. Same rule as settling now: identical letters and
+  // digits, at least five of them, means the same style.
+  if (matches.length && codeHard.length >= 5) {
+    matches = allRecords.filter(r => normSp(r.styleNorm) === codeNorm || normHard(r.styleNorm) === codeHard);
+  }
   let fuzzy = false;
   // Is this a real style that lives in a PI (maybe not delivered yet)? If so, DON'T fuzzy-glue
   // it onto a similarly-named delivered style — show it as its own (undelivered) style instead.
@@ -11057,7 +11189,8 @@ async function downloadMatches(matches, code, opts) {
     const ck = piCoverKey(r);
     if (piQ !== null && refKey) {
       coveredXls.add(ck);
-      if (!piQtySeen.has(ck)) { piQtySeen.add(ck); totalPiQty += piQ; }
+      const sig = piHitSig(r) || ck;   // v138: one PI line counts once, however many rows hit it
+      if (!piQtySeen.has(sig)) { piQtySeen.add(sig); totalPiQty += piQ; }
     }
     const shortCell = shortageOnly ? effectiveShort(r) : r.short;
     const xr = ws.addRow([r.piRef, piDateFor(r.piRef), piQ !== null ? piQ : '', r.invDate, r.style, itemLabel(r), extractMeasurement(r.itemDesc), r.delQty, r.recQty, shortCell, challanDisp(r), r.challanDate, combinedRemarks(r)]);
@@ -11079,7 +11212,17 @@ async function downloadMatches(matches, code, opts) {
       xr.eachCell({ includeEmpty: true }, c => { c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF4DD' } }; });
     });
   }
-  const excessNote = totalExcess > 0 ? `Excess (separate, not netted): +${totalExcess} pcs` : '';
+  let excessNote = totalExcess > 0 ? `Excess (separate, not netted): +${totalExcess} pcs` : '';
+  // v138: the Short&Exs column shows each line's raw figure but this total is what is still
+  // OUTSTANDING after re-deliveries, so summing the column by hand gave a different number with no
+  // explanation. Say so on the row whenever the two differ.
+  if (!shortageOnly) {
+    const rawShortSum = matches.reduce((n, r) => n + Math.min(r.short || 0, 0), 0);
+    if (rawShortSum !== totalShort) {
+      excessNote = (excessNote ? excessNote + '; ' : '') +
+        `Short total is what is still outstanding after re-deliveries (raw column sum ${rawShortSum})`;
+    }
+  }
   const totalRow = ws.addRow(['Total', '', totalPiQty || '', '', '', '', '', totalDel, totalRec, totalShort, '', '', excessNote]);
   totalRow.font = { bold: true };
   // ==================== THE PHONE DELIVERED A ONE-LINE FILE ====================
@@ -11625,12 +11768,17 @@ async function renderSingleResult(result) {
   let html = `<div class="summary-line">${fuzzy ? 'Closest matches for' : 'Found ' + matches.length + ' record(s) for'} <b>${code}</b>${fuzzy ? ' (' + matches.length + ' record(s))' : ''}</div>`;
   html += `<div style="margin-bottom:4px;">PI: ` + piRefs.map(pi => `<a href="#" class="pi-link" data-pi="${escHtml(String(pi))}" style="font-weight:800;color:var(--accent-dark);">${escHtml(String(pi))}</a>`).join(', ') + `</div>`;
   let totalPiQty = 0, hasPiQty = false;
-  piLinesForStyle(codeNorm).forEach(g => g.lines.forEach(ln => { totalPiQty += ln.qty; hasPiQty = true; }));
+  // v138: the headline summed EVERY PI line of the style, ignoring the PI-range / item filter
+  // that the delivered, received and short figures beside it all obey.
+  piLinesForStyle(codeNorm).forEach(g => g.lines.forEach(ln => {
+    if (!askFilterPassesPiLine(g.ref, ln, askF)) return;
+    totalPiQty += ln.qty; hasPiQty = true;
+  }));
   if (!hasPiQty) {
     const seen = new Set();
     matches.forEach(r => {
       const rowDk = dimKey(dimsFromMasterText(r.itemDesc) || uqExtractDimsAny(r.itemDesc));
-      const k = normPiKey(r.piRef) + '|' + r.styleNorm + '|' + (rowDk || 'nodim');
+      const k = piHitSig(r) || (normPiKey(r.piRef) + '|' + r.styleNorm + '|' + (rowDk || 'nodim'));
       if (seen.has(k)) return; seen.add(k);
       const q = piQtyForRow(r.piRef, r.styleNorm, r.itemDesc);
       if (q !== null) { totalPiQty += q; hasPiQty = true; }
@@ -12075,8 +12223,18 @@ function uqRowsFromAoa(aoa, headerRowIdx, styleCol, headers, hiddenSet) {
     if (!row) continue;
     if (hiddenSet && hiddenSet.has(r)) continue; // filtered/hidden row — ignore it
     const styleVal = row[styleCol];
+    // v138: "Total" written IN the style column is a summary row too — it must neither become a
+    // request line nor be carried down as a style.
+    const TOTAL_RE = /^\s*(grand\s*|sub\s*-?\s*)?total\b|^\s*(合计|总计|小计)/i;
+    if (styleVal !== null && styleVal !== undefined && TOTAL_RE.test(String(styleVal))) continue;
     if (styleVal !== null && styleVal !== undefined && String(styleVal).trim() !== '') carry = String(styleVal).trim();
     if (row.every(c => c === null || c === undefined || String(c).trim() === '')) continue; // fully blank row
+    // v138: the style is carried down through blank cells (merged style cells), which also carried
+    // it into the sheet's TOTAL row — producing one extra request line for the last style whose
+    // "order qty" was the grand total. A row whose own style cell is blank and which says
+    // Total / Grand Total / Sub Total / 合计 / 总计 / 小计 is a summary, not a request.
+    if ((styleVal === null || styleVal === undefined || String(styleVal).trim() === '') &&
+        row.some(c => c !== null && c !== undefined && TOTAL_RE.test(String(c)))) continue;
     if (!carry) continue; // no style seen yet (forward-fill, matching Work Order parsing convention)
     rows.push({ style: carry, cells: headers.map((h, i) => (row[i] !== undefined ? row[i] : null)) });
   }
@@ -12353,14 +12511,20 @@ async function uqGenerateReport() {
           useMatches.forEach(r => {
             const dk = dimKey(dimsFromMasterText(r.itemDesc) || uqExtractDimsAny(r.itemDesc));
             const gk = (normPiKey(r.piRef) || '?') + '|' + r.styleNorm + '|' + (dk || 'nodim');
-            (groups[gk] = groups[gk] || { piRef: r.piRef, piQty: piQtyForRow(r.piRef, r.styleNorm, r.itemDesc), records: [] }).records.push(r);
+            (groups[gk] = groups[gk] || { piRef: r.piRef, piQty: piQtyForRow(r.piRef, r.styleNorm, r.itemDesc), sig: piHitSig(r), records: [] }).records.push(r);
           });
 
           let totalPiQty = 0, anyPiQtyKnown = false, totalDel = 0, totalRec = 0, totalShortRaw = 0, totalOutstandingShort = 0;
           const piRefs = new Set(), challanPairs = [], challanNos = [], challanDates = [], measurements = new Set();
           let latestDateStr = '', latestDateVal = null;
+          const countedPiLines = new Set();
           Object.values(groups).forEach(g => {
-            if (g.piQty !== null) { totalPiQty += g.piQty; anyPiQtyKnown = true; }
+            // v138: two groups whose rows reached the SAME PI line through different dims used to
+            // add that line's quantity twice.
+            if (g.piQty !== null && !(g.sig && countedPiLines.has(g.sig))) {
+              if (g.sig) countedPiLines.add(g.sig);
+              totalPiQty += g.piQty; anyPiQtyKnown = true;
+            }
             if (g.piRef !== null && g.piRef !== undefined && g.piRef !== '') piRefs.add(g.piRef);
             g.records.forEach(r => {
               totalDel += (r.delQty || 0);
@@ -12382,7 +12546,23 @@ async function uqGenerateReport() {
             });
           });
 
-          const undel = anyPiQtyKnown ? Math.max(0, (totalPiQty - totalRec) - totalOutstandingShort) : '';
+          // v138: PI lines of this style with NOTHING delivered yet. The PI Qty above only summed PIs
+          // that already had a delivery, so a style on PI 170 (delivered) and PI 180 (not started)
+          // reported "Covers the full order — nothing pending" with Undelivered 0. The single-style
+          // screen always added these "not delivered yet" lines; this report never did.
+          let pendingPi = piFillerLines(new Set(result.matches.map(r => r.styleNorm)), null);
+          if (inputDims) {
+            const inKey = dimKey(inputDims);
+            pendingPi = pendingPi.filter(p => p.ln.dims && (p.ln.dims === inKey || p.ln.dims.startsWith(inKey + 'x')));
+          }
+          const pendingPiQty = pendingPi.reduce((n, p) => n + (p.ln.qty || 0), 0);
+          const pendingRefs = [...new Set(pendingPi.map(p => String(p.ref)))];
+          if (pendingPiQty > 0 && !sizeFallback) {
+            totalPiQty += pendingPiQty; anyPiQtyKnown = true;
+            const have = new Set([...piRefs].map(normPiKey));
+            pendingRefs.forEach(k => { if (!have.has(k)) { piRefs.add(k); have.add(k); } });
+          }
+          let undel = anyPiQtyKnown ? Math.max(0, (totalPiQty - totalRec) - totalOutstandingShort) : '';
           const pairsTxt = [...new Set(challanPairs)].join('; ');
 
           // ---- Verdict: the reply Sadi would write after the manual check ----
@@ -12391,7 +12571,16 @@ async function uqGenerateReport() {
           // overstate (a short later re-delivered on a normal challan still looks "short" in the
           // Master File), so the short mention is capped by what's genuinely still owed.
           let verdict = '', cls = '';
-          if (sizeFallback) {
+          if (sizeFallback && pendingPiQty > 0) {
+            // The size asked about is not in the DELIVERY records — but it IS on order. That is
+            // "not delivered yet", not "recheck the size from your side".
+            const bits = [`Not delivered yet — ${pendingPiQty} pcs of this size are on PI ${pendingRefs.join(', ')} and will be delivered soon.`];
+            if (totalRec > 0) bits.push(`For this style we have delivered ${totalRec} pcs in other sizes — Challan ${pairsTxt}${latestDateStr ? ', inventory ' + latestDateStr : ''}.`);
+            verdict = bits.join(' ');
+            cls = 'review';
+            totalPiQty = pendingPiQty; anyPiQtyKnown = true; undel = pendingPiQty;
+            piRefs.clear(); pendingRefs.forEach(k => piRefs.add(k));
+          } else if (sizeFallback) {
             // Their claimed size has no matching record — totals below are for OTHER sizes of this
             // style, so never claim "already received" from them. Written to be sendable to Olisa.
             const bits = [`This size is not in our delivery records for this style — please recheck the size from your side (the carton size may have been revised).`];

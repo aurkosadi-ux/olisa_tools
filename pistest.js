@@ -23,7 +23,9 @@ const nameStart = code.indexOf('function safeFileName(');
 const nameEnd = code.indexOf('var savedCap,capAsked=false;');
 const nameCode = code.slice(nameStart, nameEnd);
 
+const todaySrc = (code.match(/function todayISO\(\)\{[^\n]*\}/) || [''])[0];
 const fn = new Function('TextEncoder', 'exportGroupsRef',
+  todaySrc + '\n' +
   logic + '\n' + pdfCode + '\nfunction exportGroups(){return exportGroupsRef();}\n' + nameCode +
   '\nreturn {buildSummaryWorkbook,buildSummaryPdf,exportBaseName,sheetTitle,safeFileName,' +
   'textWidth,pdfAscii,ageing,band,BANDS,fmtDate,fmtISO,fmtMoney,upperBuyer};');
@@ -88,7 +90,11 @@ check('the workbook writes dates day-month-year', styles.includes('formatCode="d
 check('buyers are set in capitals', /<is><t[^>]*>GILDAN<\/t>/.test(sheet) && !/>Gildan</.test(sheet));
 check('nothing says "Generated ..." any more', !/Generated /.test(sheet));
 check('no live-formula footnote survives', !/recalculates every time/.test(sheet));
-check('Pending Days is still =TODAY()-<PI date>', sheet.includes('<f>TODAY()-D4</f>'));
+// v138: the as-of date in this fixture (20-09-2026) is not today, and since the "fixed as-of" change
+// the sheet deliberately writes DATE(y,m,d) so Excel agrees with the "Pending as of" line and the
+// PDF. TODAY() is only used when the as-of date IS today. The old assertion predated that change.
+check('Pending Days counts from the as-of date (DATE() for a past as-of, TODAY() for today)',
+  sheet.includes('<f>DATE(2026,9,20)-D4</f>'));
 check('the per-party total sums the value column', sheet.includes('<f>SUM(C4:C6)</f>'));
 check('TOTAL - is merged across A:B', sheet.includes('<mergeCell ref="A7:B7"/>'));
 check('the sheet is exactly six columns wide', (sheet.match(/<col /g) || []).length === 6);

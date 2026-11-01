@@ -27,9 +27,10 @@ const st=src.indexOf('(function() { // PO Summary Generator'), en=src.indexOf('(
 let b=src.slice(st,en).replace(/^\(function\(\) \{ \/\/ PO Summary Generator/,'').replace(/\}\)\(\);\s*$/,'')
  .replace(/const \w+ = document\.getElementById\([^)]*\);\n/g,'').replace(/^\s*\w+\.addEventListener\([\s\S]*?\n\}\);\n/gm,'')
  .replace(/^\s*\['drag[^\n]*\n/gm,'').replace(/^\s*\w+\.addEventListener\([^\n]*\n/gm,'');
+// v138: cellNum() is a page-level helper (true top level), so lift it alongside the module.
 let captured='';
 const M=new Function('XLSX','snapToLocalMidnight','escHtml','previewTable','previewNote',
-  b+'\nreturn {readOrderRows,classifyRow,buildLine,renderPreview};')
+  (src.match(/function cellNum\(v\) \{[\s\S]*?\n\}/) || [''])[0]+'\n'+b+'\nreturn {readOrderRows,classifyRow,buildLine,renderPreview};')
   (XLSX,snap,esc,{set innerHTML(v){captured=v},get innerHTML(){return captured}},{style:{},innerHTML:'',addEventListener(){}});
 
 (async()=>{

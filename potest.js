@@ -39,7 +39,8 @@ body = body.replace(/const \w+ = document\.getElementById\([^)]*\);\n/g, '')
            .replace(/^\s*\['drag[^\n]*\n/gm, '')
            .replace(/^\s*\w+\.addEventListener\([^\n]*\n/gm, '');
 
-const M = new Function('XLSX', 'snapToLocalMidnight', 'escHtml', body + `
+// v138: cellNum() is a page-level helper (true top level), so lift it alongside the module.
+const M = new Function('XLSX', 'snapToLocalMidnight', 'escHtml', (src.match(/function cellNum\(v\) \{[\s\S]*?\n\}/) || [''])[0] + '\n' + body + `
   return { readOrderRows, anyToDate, anyToDateLabel, headerRole, readHeaderRow,
            groupByDeliveryDate, tryAltFormat, classifyRow, dateSuffix, poFileName };`
 )(XLSX, snapToLocalMidnight, s => String(s));

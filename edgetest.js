@@ -2,6 +2,7 @@ const fs=require('fs'),path=require('path'),XLSX=require('xlsx'),ExcelJS=require
 const html=fs.readFileSync('olisa.html','utf8');
 const src=[...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)].map(m=>m[1]).sort((a,b)=>b.length-a.length)[0];
 const snap=new Function('return '+src.match(/function snapToLocalMidnight[\s\S]*?\n\}/)[0].replace('function snapToLocalMidnight','function'))();
+// v138: cellNum() is a page-level helper (true top level), so lift it alongside the module.
 function lift(startMark,endMark,ret,extra){
   let b=src.slice(src.indexOf(startMark),src.indexOf(endMark))
     .replace(/^\(function\(\) \{ \/\/ [^\n]*/,'').replace(/\}\)\(\);\s*$/,'')
@@ -11,7 +12,7 @@ function lift(startMark,endMark,ret,extra){
     .replace(/^refreshDefaultDate\(\);\n/m,'');
   const { itemKind: _ik, KIND_LABEL: _kl } = require('./shared_kind.js');
   return new Function('XLSX','ExcelJS','snapToLocalMidnight','escHtml','dateInput','document','buyerInput','deliveryDateInput','itemKind','KIND_LABEL',
-    b+'\nreturn {'+ret+'};')(XLSX,ExcelJS,snap,x=>String(x),{value:'31st August 2026'},{addEventListener(){}},{value:'B'},{value:''},_ik,_kl);
+    (src.match(/function cellNum\(v\) \{[\s\S]*?\n\}/) || [''])[0]+'\n'+b+'\nreturn {'+ret+'};')(XLSX,ExcelJS,snap,x=>String(x),{value:'31st August 2026'},{addEventListener(){}},{value:'B'},{value:''},_ik,_kl);
 }
 const U=lift('(function() { // Undelivered Report Generator','(function() { // Ask — style lookup','readWorkbookRows,buildGroups,buildOutputRows,deliverySortKey,findCrossFileOverlaps');
 const P=lift('(function() { // PO Summary Generator','(function() { // Undelivered Report Generator','readOrderRows,groupByDeliveryDate,anyToDate,dateSuffix');
