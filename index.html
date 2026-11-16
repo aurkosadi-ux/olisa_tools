@@ -230,5 +230,14 @@
   </div>
 
   <footer>Courtesy of Sadi Mohammad</footer>
+<script>
+/* v139: only olisa.html ever registered the service worker. The app's start page is this menu,
+   so a phone that installed "Sadi's Universe" and opened only the calculator or the bill maker
+   never got an offline copy of anything. Each page now registers the same worker itself; it is
+   one shared worker for the whole folder, so registering it twice changes nothing. */
+if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  navigator.serviceWorker.register('sw.js').catch(function () { /* offline shell is optional */ });
+}
+</script>
 </body>
 </html>

@@ -1260,7 +1260,7 @@ function switchTab(which) {
 // immediately, so the whole script threw on load. Evaluation stopped there, which meant every
 // `let` below it never initialised either, and the first thing to notice was an unrelated
 // "cannot access 'piIndex' before initialization". One misplaced constant, entire tool dead.
-const APP_VERSION = 138;
+const APP_VERSION = 139;
 // ==================== A QUANTITY CELL, READ THE SAME WAY EVERYWHERE (v138) ====================
 // The challan and PI readers already stripped thousands separators, but the Master File, PO Summary
 // and Undelivered readers did not. A quantity that reached them as TEXT — pasted from another
@@ -1847,7 +1847,14 @@ async function readOrderRows(file) {
       if (wr && wr.b > wr.a && weightMap.has(style)) {
         const smap = weightMap.get(style);
         const availableWeights = [...smap.keys()].map(k => parseFloat(k)).sort((x,y)=>x-y);
-        const subset = availableWeights.filter(w => w >= wr.a - 1e-6 && w <= wr.b + 1e-6);
+        // v139: only sizes that actually carry an order. A size column that is blank or zero used
+        // to become a work-order line of "0 pcs", and when EVERY column read as zero (the size run
+        // typed as text, or left empty) the row's own QTY \u2014 the real figure \u2014 was thrown away
+        // in favour of a list of zeros. With nothing usable in the size run, the row now falls back
+        // to its own quantity exactly like a row that has no size run at all.
+        const subset = availableWeights
+          .filter(w => w >= wr.a - 1e-6 && w <= wr.b + 1e-6)
+          .filter(w => (smap.get(weightLabel(w)) || 0) > 0);
         if (subset.length) {
           subset.forEach(w => {
             const q = smap.get(weightLabel(w)) || 0;
@@ -3538,7 +3545,10 @@ function isMasterOrToolCopyName(name) {
 // between two files modified within a couple of minutes of each other, which is what a sync burst
 // looks like; the modified time is the primary signal.
 function masterVersionOf(name) {
-  const m = String(name).match(/\bv\s*(\d{1,4})\b/i);
+  // v139: \b treats "_" as a letter, so a copy saved as "Olisa_Master_Inventory___v8.xlsx" (what a
+  // download or a chat upload turns the dashes and spaces into) read as version 0 and lost every
+  // tie-break. The boundary is now "anything that is not a letter or a digit", underscores included.
+  const m = String(name).match(/(?:^|[^A-Za-z0-9])v\s*(\d{1,4})(?![A-Za-z0-9])/i);
   return m ? parseInt(m[1], 10) : 0;
 }
 function masterRankOf(cand) {
@@ -5655,6 +5665,16 @@ async function buildStyleIndex(opts) {
   const LIST_CONCURRENCY = 8;
   const listStart = newEtaClock();
   let foldersListed = 0;
+  // ==================== v139: UNREACHABLE IS NOT THE SAME AS EMPTY ====================
+  // A PI folder whose listing failed, or a work order that would not download, used to be skipped
+  // in silence — and because the finished index REPLACES the old one, every style that PI was
+  // known to carry vanished from the answers until some later build happened to succeed. On a
+  // connection that drops for ten seconds mid-build that is dozens of PIs at once, with "Done"
+  // on the screen. The PIs this run could not reach are collected here; what the previous index
+  // already knew about them is carried into the new one at the end, and the report says so.
+  // prevStyleIndex is captured now because a manual build re-points styleIndex as it goes.
+  const prevStyleIndex = styleIndex || {};
+  const styleUnreached = new Set();
   const perFolder = await runPool(piFolders, LIST_CONCURRENCY, async ({ name, handle }) => {
     const piRef = parsePiNumber(name);
     const files = [];
@@ -5665,7 +5685,7 @@ async function buildStyleIndex(opts) {
         // uploads. Reading those wasted a download and a parse each and could never yield a style.
         if (fhandle.kind === 'file' && isSpreadsheetName(fname)) files.push({ fhandle, path: name + '/' + fname });
       }
-    } catch (e) { /* this folder is unreadable — its files are simply absent, the rest continue */ }
+    } catch (e) { /* this folder is unreadable — its files are absent from THIS run, the rest continue */ styleUnreached.add(piRef); }
     foldersListed++;
     setProgress(progressText, `Listing PI folders: ${foldersListed} / ${piFolders.length}${etaText(listStart, foldersListed, piFolders.length)}`);
     return { piRef, files };
@@ -5714,6 +5734,7 @@ async function buildStyleIndex(opts) {
     });
   };
   await runPool(readTasks, READ_CONCURRENCY, async ({ piRef, fhandle, path }) => {
+    let fetched = false;   // v139: only a file that never ARRIVED counts as unreached, not one that arrived broken
     try {
       // Unchanged since the last build? Then its styles are already known. No download, no parse,
       // no frozen thread — this is the whole reason a second build finishes in seconds.
@@ -5733,6 +5754,7 @@ async function buildStyleIndex(opts) {
           filesScanned++; filesReused++;
         } else {
           const buf = await file.arrayBuffer();
+          fetched = true;
           await yieldSoon();   // a frame before the parse: XLSX.read cannot be interrupted once it starts
           // Formulas, styles, HTML and blank stubs are all work this scan throws away — turning
           // them off is a straight cut to the time the main thread spends frozen inside XLSX.read.
@@ -5749,7 +5771,7 @@ async function buildStyleIndex(opts) {
           filesScanned++;
         }
       }
-    } catch (e) { /* skip unreadable file */ }
+    } catch (e) { if (!fetched) styleUnreached.add(piRef); /* a file that arrived but would not parse is skipped as before */ }
     filesDone++;
     const pct = readTasks.length ? Math.round((filesDone / readTasks.length) * 100) : 100;
     progressBar.style.width = pct + '%';
@@ -5766,6 +5788,18 @@ async function buildStyleIndex(opts) {
     await yieldSoon();                  // hand the thread back: eight lanes must not block as one
   });
 
+  // v139: what the previous index knew about every PI this run could not reach goes into the new
+  // one untouched. Nothing is invented — only links that were already there are kept.
+  let styleLinksKept = 0;
+  if (styleUnreached.size) {
+    Object.keys(prevStyleIndex).forEach(tok => {
+      (prevStyleIndex[tok] || []).forEach(ref => {
+        if (!styleUnreached.has(ref)) return;
+        if (!index[tok]) index[tok] = [];
+        if (!index[tok].includes(ref)) { index[tok].push(ref); styleLinksKept++; }
+      });
+    });
+  }
   styleIndex = index;
   await checkpointStyleIndex(index, true);
   await checkpointStyleFileCache(true);
@@ -5868,10 +5902,24 @@ async function buildStyleIndex(opts) {
   const chNote = challanResult && (challanResult.reusedFiles || challanResult.skippedKnownBad)
     ? ` ${challanResult.readNow} challan document(s) needed reading; ${challanResult.reusedFiles} were unchanged${challanResult.skippedKnownBad ? ` and ${challanResult.skippedKnownBad} already known unreadable` : ''}.`
     : '';
+  // v139: say it when part of the tree could not be reached. Nothing was dropped, but anything
+  // new in those folders is not in the index yet, and "Done" on its own would hide that.
+  const chUnlisted = (challanResult && challanResult.listFailed && challanResult.listFailed.length) || 0;
+  const unreachedNote =
+    (styleUnreached.size
+      ? ` ${styleUnreached.size} PI folder(s) could not be listed or downloaded this time (PI ${[...styleUnreached].slice(0, 6).join(', ')}${styleUnreached.size > 6 ? '\u2026' : ''}) \u2014 the ${styleLinksKept} style link(s) already indexed for them were kept.`
+      : '')
+    + (chUnlisted
+      ? ` ${chUnlisted} challan folder(s) could not be listed \u2014 ${challanResult.keptFromLast || 0} challan(s) already indexed there were kept.`
+      : '')
+    + ((styleUnreached.size || chUnlisted) ? ' Rebuild on a steady connection to refresh them.' : '');
+  if (auto && (styleUnreached.size || chUnlisted) && typeof notify === 'function') {
+    notify('info', `Automatic index: part of the folder could not be reached (${styleUnreached.size} PI folder(s), ${chUnlisted} challan folder(s)). What was already indexed for them was kept; it will be read again on the next run.`, true);
+  }
   setProgress(progressText, `Done \u2014 indexed ${Object.keys(index).length} style(s) across ${foldersScanned} PI folder(s); PI Qty read for ${withPi} PI(s); `
     + (challanError ? `challan copies NOT read (${challanError})`
        : challanResult ? `${challanResult.challans} challan copies read from ${challanResult.files} document(s)`
-       : 'no challan copies found') + '.' + reuseNote + chNote, true);
+       : 'no challan copies found') + '.' + reuseNote + chNote + unreachedNote, true);
   if (!auto) renderPiIndexDiagnostics(piFolders.length, withPi, b, sweep);
   indexBuilding = false;
   if (!auto) releaseBuildWakeLock();
@@ -5880,7 +5928,8 @@ async function buildStyleIndex(opts) {
   // What the caller needs to know, and nothing more: did this build actually change the index, and
   // how would you say that to a person.
   return { changed: !!diff.changed, summary: describeIndexDiff(diff), diff,
-           read: unreadCount, challanError, listedAt };
+           read: unreadCount, challanError, listedAt,
+           unreached: [...styleUnreached], styleLinksKept, challanFoldersUnlisted: chUnlisted };
 }
 // One challan read at a time. The full build waits here for a "Read my challan copies now" that got
 // in first, rather than the two of them writing one index between them.
@@ -7659,6 +7708,31 @@ function parseDMY(s) {
     const d = new Date(Date.UTC(1899, 11, 30) + (+m[1]) * 86400000);
     return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()).getTime();
   }
+  // ==================== v139: THE REMAINING TEXT-DATE SHAPES ====================
+  // Everything below runs only after every form above has failed, so no date that was already
+  // understood can change its meaning. The Master File is typed by more than one office, and a
+  // date entered year-first with slashes, dots or 年月日 — 2026/11/15, 2026.11.15 — came back
+  // as 0 exactly the way "27-SEP-26" did before v137, with the same consequence: a line with no
+  // readable date is skipped by the settling pass and its short stays red with nothing to say why.
+  // The year may not be glued to an earlier number or separator: "5/11/2026-12/11/2026" is a
+  // range whose first date was already taken above, not a year-first date.
+  m = str.match(/(?:^|[^\d\/\-.])(\d{4})\s*[\/.年]\s*(\d{1,2})\s*[\/.月]\s*(\d{1,2})(?!\d)/);
+  if (m && +m[2] >= 1 && +m[2] <= 12 && +m[3] >= 1 && +m[3] <= 31) return new Date(+m[1], +m[2] - 1, +m[3]).getTime();
+  // 20261115 — eight digits, no separators at all.
+  m = str.match(/^(20\d{2})(\d{2})(\d{2})$/);
+  if (m && +m[2] >= 1 && +m[2] <= 12 && +m[3] >= 1 && +m[3] <= 31) return new Date(+m[1], +m[2] - 1, +m[3]).getTime();
+  // "15th November 2026" and "15-Nov-'26": an ordinal on the day, or an apostrophe before the year.
+  m = str.match(/(\d{1,2})(?:st|nd|rd|th)?\s*[\/\-. ]\s*([A-Za-z]{3,9})\.?[\s\/\-.,']*(\d{4}|\d{2})\b/i);
+  if (m) {
+    const mo = MON[m[2].toUpperCase().slice(0, 4)] ?? MON[m[2].toUpperCase().slice(0, 3)];
+    if (mo !== undefined) return new Date(yr(m[3]), mo, +m[1]).getTime();
+  }
+  // "Nov 15, 2026" / "November 15 2026": month first, four-digit year.
+  m = str.match(/\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*,\s*|\s+)(\d{4})\b/);
+  if (m) {
+    const mo = MON[m[1].toUpperCase().slice(0, 4)] ?? MON[m[1].toUpperCase().slice(0, 3)];
+    if (mo !== undefined && +m[2] >= 1 && +m[2] <= 31) return new Date(+m[3], mo, +m[2]).getTime();
+  }
   return 0;
 }
 function fmtNoteDate(d) { return String(d || '').trim().replace(/\//g, '-'); }
@@ -8102,10 +8176,24 @@ async function buildChallanIndex(onProgress, opts) {
     // extra Drive round trip waiting on the last. With the tree pre-listed above these are cache
     // hits, but the concurrency still matters on a local disk folder.
     await runPool(subs, 6, async ([name, handle]) => {
-      try { await walk(handle, prefix + name + '/', depth + 1); } catch (e) { /* unreadable subfolder */ }
+      try { await walk(handle, prefix + name + '/', depth + 1); }
+      catch (e) { listFailed.push({ prefix: prefix + name + '/', why: (e && e.message) || String(e) }); }
     });
   }
+  // ==================== v139: A FOLDER THAT WOULD NOT LIST IS NOT AN EMPTY FOLDER ====================
+  // The catch above used to be empty. A subfolder whose listing failed — one Drive error, a
+  // connection that dropped for ten seconds — simply contributed no files, and because this
+  // function REPLACES the index with what it found, every challan already indexed from that
+  // subfolder disappeared: no error, no line in the report, and deliveries booked against those
+  // challans suddenly read as having no copy. The folders that failed are remembered here and what
+  // was already known about them is carried forward untouched at the end. They are read again on
+  // the next build, because nothing about them is recorded as checked.
+  const listFailed = [];
+  const readFailedPaths = new Set();   // documents that were listed but could not be downloaded
   await walk(root, '', 0);
+  if (!pdfs.length && listFailed.length) {
+    throw new Error(`${listFailed.length} folder(s) inside "${root.name}" could not be listed (${listFailed[0].why}). Nothing already indexed was changed — check the connection and try again.`);
+  }
   if (!pdfs.length) throw new Error(`The "${root.name}" folder has no challan documents (PDF or .doc) in it.`);
 
   const next = {};
@@ -8200,7 +8288,7 @@ async function buildChallanIndex(onProgress, opts) {
     try {
       file = await f.handle.getFile();
       if (!fp) { fp = `${f.path}|${file.size}|${file.lastModified}`; if (useCached()) { done++; await yieldSoon(); return; } }
-    } catch (e) { failed++; done++; return; }
+    } catch (e) { failed++; done++; readFailedPaths.add(f.path); return; }
     try {
       const found = await scanChallanDoc(file, f.path, f.handle.meta && f.handle.meta.id);
       found.forEach(c => { next[c.no] = { ...c, fp }; challans++; });
@@ -8270,6 +8358,22 @@ async function buildChallanIndex(onProgress, opts) {
     // they are NOT recorded as OCR-tried, so the next online build will give each one its chance.
     needOcr.forEach(({ f, fp, why }) => { if (fp) freshMisses[fp] = { path: f.path, why, at: Date.now() }; });
   }
+  // v139: carry forward what was already known about anything this run could not reach — a
+  // subfolder that would not list, or a document that would not download. Only entries this run
+  // did not replace are kept, and only for those paths: a file that was genuinely deleted from a
+  // folder that DID list still drops out exactly as before.
+  let keptFromLast = 0;
+  if (listFailed.length || readFailedPaths.size) {
+    const unreached = p => !!p && (readFailedPaths.has(p) || listFailed.some(x => String(p).indexOf(x.prefix) === 0));
+    Object.keys(challanIndex).forEach(k => {
+      const e = challanIndex[k];
+      if (e && unreached(e.path) && !next[k]) { next[k] = e; keptFromLast++; }
+    });
+    Object.keys(challanMisses).forEach(fp => {
+      const miss = challanMisses[fp];
+      if (miss && unreached(miss.path) && !freshMisses[fp]) freshMisses[fp] = miss;
+    });
+  }
   challanMisses = freshMisses;   // rebuilt from this run: a file deleted or fixed leaves no trace
   await saveChallanMisses();
   challanIndex = next;
@@ -8277,7 +8381,8 @@ async function buildChallanIndex(onProgress, opts) {
   await checkpointChallanIndex(next, true);
   const unverified = Object.values(next).filter(c => Array.isArray(c.lines) && c.lines.length && !c.verified).map(c => c.no);
   const withLines = Object.values(next).filter(c => Array.isArray(c.lines) && c.lines.length).length;
-  return { files: pdfs.length, challans, failed, skipped, binaryDoc, scanned, noFont, unverified, withLines, improved, improveFailed, folder: root.name, folderId: root.id || null, reusedFiles, skippedKnownBad, readNow: pdfs.length - reusedFiles - skippedKnownBad, fpMismatch: challanFpMismatch, indexedBefore: indexedCount, ocrJunk };
+  return { files: pdfs.length, challans, failed, skipped, binaryDoc, scanned, noFont, unverified, withLines, improved, improveFailed, folder: root.name, folderId: root.id || null, reusedFiles, skippedKnownBad, readNow: pdfs.length - reusedFiles - skippedKnownBad, fpMismatch: challanFpMismatch, indexedBefore: indexedCount, ocrJunk,
+           listFailed: listFailed.map(x => x.prefix), listFailedWhy: listFailed.length ? listFailed[0].why : '', keptFromLast };
 }
 let lastChallanCheckpoint = 0;
 // ==================== MAKING AN UNREADABLE CHALLAN READABLE ====================
@@ -8966,6 +9071,11 @@ async function runChallanIndexBuild(retryChallan, opts) {
       (res.scanned.length && !res.improved.length ? `<br><span class="sub-note" style="color:var(--bad);">${res.scanned.length} file(s) are pictures of a challan with no text in them. Connect Drive and go online to have them read automatically:<br>${res.scanned.slice(0, 6).map(escHtml).join('<br>')}</span>` : '') +
       (res.noFont.length && !res.improved.length ? `<br><span class="sub-note" style="color:var(--bad);">${res.noFont.length} file(s) have text but no usable font encoding, so nothing in them can be read \u2014 not even the challan number:<br>${res.noFont.slice(0, 6).map(escHtml).join('<br>')}</span>` : '') +
       (res.unverified.length ? `<br><span class="sub-note" style="color:var(--bad);">${res.unverified.length} challan(s) were read but did not add up to their own printed Total Line / Total Qty, so nothing on them will be claimed: ${escHtml(res.unverified.slice(0, 12).join(', '))}.</span>` : '') +
+      // v139: folders that would not list, and what was kept for them. Shown in the warning colour:
+      // nothing was lost, but anything NEW inside those folders has not been read yet.
+      ((res.listFailed && res.listFailed.length) || res.keptFromLast
+        ? `<br><span class="sub-note" style="color:var(--warn);">${res.listFailed && res.listFailed.length ? `<b>${res.listFailed.length}</b> folder(s) could not be listed this time${res.listFailedWhy ? ` (${escHtml(res.listFailedWhy)})` : ''}: ${res.listFailed.slice(0, 4).map(escHtml).join(', ')}${res.listFailed.length > 4 ? ' \u2026' : ''}. ` : ''}<b>${res.keptFromLast || 0}</b> challan(s) already indexed from what could not be reached were kept exactly as they were. Rebuild once the connection is steady to pick up anything new there.</span>`
+        : '') +
       (res.failed ? `<br><span class="sub-note" style="color:var(--bad);">${res.failed} file(s) could not be read (scanned image, corrupt, or still a cloud placeholder).</span>` : '') +
       (res.binaryDoc.length ? `<br><span class="sub-note" style="color:var(--bad);">${res.binaryDoc.length} file(s) are old binary Word documents, which no browser can open. Re-save these as PDF and rebuild:<br>${res.binaryDoc.slice(0, 6).map(escHtml).join('<br>')}</span>` : '') +
       (res.skipped.length ? `<br><span class="sub-note">${res.skipped.length} file(s) opened but had no challan number printed inside (cover pages, gate passes).</span>` : '');
@@ -12804,11 +12914,20 @@ function requestDriveTokenInner(interactive) {
     await restoreDriveSession(); // even when expired, this recovers the account hint
     try { await loadGis(); } catch (e) { return reject(e); }
     if (!driveTokenClient) {
-      driveTokenClient = google.accounts.oauth2.initTokenClient({
-        client_id: DRIVE_CLIENT_ID,
-        scope: DRIVE_SCOPE,
-        callback: () => {}
-      });
+      // v139: this executor is async, so anything thrown in it does NOT reject the promise — it is
+      // lost, and the caller waits forever. The 45-second guard below is only armed after this
+      // point, so a Google library that loaded half-way (google.accounts missing) left the Connect
+      // button spinning with no error at all. Thrown here now becomes an ordinary, visible failure.
+      try {
+        driveTokenClient = google.accounts.oauth2.initTokenClient({
+          client_id: DRIVE_CLIENT_ID,
+          scope: DRIVE_SCOPE,
+          callback: () => {}
+        });
+      } catch (e) {
+        driveTokenClient = null;
+        return reject(new Error('Google sign-in could not start (' + (e && e.message ? e.message : e) + '). Reload the page and try again.'));
+      }
     }
     // Belt and braces: even with the in-flight guard above, never let a stuck Google callback
     // hang a caller indefinitely. 45s is far longer than a real sign-in ever takes.
@@ -12834,7 +12953,8 @@ function requestDriveTokenInner(interactive) {
     driveTokenClient.error_callback = err => finish(reject, new Error(err && err.message || 'Sign-in failed.'));
     const req = { prompt: interactive ? 'consent' : '' };
     if (driveHint) req.hint = driveHint;
-    driveTokenClient.requestAccessToken(req);
+    try { driveTokenClient.requestAccessToken(req); }
+    catch (e) { finish(reject, new Error('Google sign-in could not start (' + (e && e.message ? e.message : e) + ').')); }
   });
 }
 // Fetch with auth. Handles the two ways Drive pushes back: an expired token (401 → silent refresh,
@@ -12912,6 +13032,11 @@ async function driveFetch(url, asBlob) {
       if (r.status === 403 && !refreshed) { refreshed = true; try { driveToken = null; await requestDriveToken(false); } catch (e) { /* keep backing off */ } }
       if (attempt < 5) { await sleep(800 * Math.pow(2, attempt)); continue; }
     }
+    // v139: a 5xx is Google saying "not right now", never "this file is broken". It used to fall
+    // straight through to the throw below on the FIRST one, and the callers that list folders
+    // swallow that error — so a single 503 in the middle of a build read as "this folder is
+    // empty". Same back-off as a rate limit, and the same honest error once the attempts run out.
+    if (r.status >= 500 && r.status <= 599 && attempt < 5) { await sleep(800 * Math.pow(2, attempt)); continue; }
     throw new Error(`Google Drive error ${r.status}${r.status === 401 || r.status === 403 ? ' — sign in again with the Connect Google Drive button' : ''} (${url.slice(0, 80)})`);
   }
   throw new Error('Google Drive kept rate-limiting — wait a minute and try again.');

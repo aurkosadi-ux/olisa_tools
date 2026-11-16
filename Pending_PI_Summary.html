@@ -1471,7 +1471,7 @@ function save(){
       rows:state.rows.map(function(r){
         return{id:r.id,party:r.party,buyer:r.buyer,pi:r.pi,value:r.value,
           date:r.date?r.date.toISOString().slice(0,10):null,concern:r.concern,
-          file:r.file,issues:r.issues,confidence:r.confidence,valueSource:r.valueSource,
+          file:r.file,path:r.path||'',issues:r.issues,confidence:r.confidence,valueSource:r.valueSource,
           touched:r.touched,text:keepText?(r.text||'').slice(0,6000):''};
       })
     });
@@ -1503,8 +1503,33 @@ function load(){
 
 /* ---- ingest ---- */
 var busy=false;
-async function ingest(fileList){
+/* v139 — ONE BATCH AT A TIME.
+   Dropping a second set of PDFs while the first was still being read started a second loop
+   alongside it. Whichever finished first switched `busy` off and reset the progress bar while
+   the other was still working, so the "you have unsaved reading in progress" guard on closing
+   the tab was gone exactly when it was needed, and the two summaries overwrote each other.
+   Batches are now queued and run in the order they were dropped. The list is copied here, at
+   once, because the file input is cleared the moment this returns. */
+var ingestChain=Promise.resolve();
+function ingest(fileList){
   var files=Array.prototype.slice.call(fileList||[]);
+  var run=function(){ return ingestNow(files); };
+  ingestChain=ingestChain.then(run,run);
+  return ingestChain;
+}
+/* v139 — "THE SAME FILE AGAIN" IS DECIDED BY WHERE IT CAME FROM, NOT ONLY ITS NAME.
+   A row was replaced whenever a PDF with the same file NAME arrived. Picking a folder reads
+   every subfolder in it, and two different invoices called "PI.pdf" in two party folders are
+   two invoices: the second silently replaced the first and was counted as "1 re-read", so one
+   invoice's value was missing from the total with nothing on screen to show it. When both the
+   row and the incoming file know their folder path, the path decides. A loose file dropped on
+   its own still replaces the row of the same name, exactly as before. */
+function sameSource(row,name,path){
+  if(row.file!==name)return false;
+  if(path&&row.path)return row.path===path;
+  return true;
+}
+async function ingestNow(files){
   var pdfs=files.filter(function(f){return /\.pdf$/i.test(f.name)||f.type==='application/pdf';});
   var skipped=files.length-pdfs.length;
   if(!pdfs.length){
@@ -1529,8 +1554,8 @@ async function ingest(fileList){
       }else{
         rec=extractBest(out.lineText,out.flowText,{dateOrder:state.dateOrder,rightColumnLines:out.rightLines,layout:out.layout});
       }
-      rec.file=f.name; rec.text=out.lineText; rec.touched={}; rec.id=++uid;
-      var existing=state.rows.findIndex(function(r){return r.file===f.name;});
+      rec.file=f.name; rec.path=f.webkitRelativePath||''; rec.text=out.lineText; rec.touched={}; rec.id=++uid;
+      var existing=state.rows.findIndex(function(r){return sameSource(r,rec.file,rec.path);});
       if(existing>=0){ rec.id=state.rows[existing].id; state.rows[existing]=rec; replaced++; }
       else{ state.rows.push(rec); added++; }
     }catch(err){
@@ -1890,7 +1915,7 @@ function drawAge(bar,lg,ag){
   });
 }
 function openDrawer(r){
-  $('drawerTitle').textContent=r.file||'Typed in by hand';
+  $('drawerTitle').textContent=r.path||r.file||'Typed in by hand';
   var head=[];
   head.push('Party          '+(r.party||'— not found'));
   head.push('Buyer          '+(r.buyer||'— not found'));
@@ -2352,6 +2377,16 @@ document.addEventListener('keydown',function(e){if(e.key==='Escape')$('drawer').
 window.addEventListener('beforeunload',function(e){ if(busy){e.preventDefault();e.returnValue='';} });
 
 render();
+
+/* v139: only olisa.html ever registered the service worker. The app's start page is the tool
+   menu, so a phone that installed "Sadi's Universe" and opened only this tool never got an
+   offline copy of anything. Each page now registers the same worker itself; it is one shared
+   worker for the whole folder, so registering it from several pages changes nothing.
+   It lives inside this script, not in a block of its own, because the tests take "the last
+   script on the page" to be the page's own code. */
+if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  navigator.serviceWorker.register('sw.js').catch(function () { /* offline shell is optional */ });
+}
 </script>
 </body>
 </html>

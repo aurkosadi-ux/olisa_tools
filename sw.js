@@ -4,7 +4,7 @@
 /* Bump this on EVERY release. The name is the only thing that evicts the old cache: the activate
    handler deletes every cache whose key isn't this one. It sat on v24 through three releases,
    which left anyone opening the app offline on a stale build. */
-const CACHE = 'olisa-tools-v138';
+const CACHE = 'olisa-tools-v139';
 /* The libraries are now OURS, served from this repo, so they belong in the shell alongside the
    pages. Before this they were fetched from cdnjs on every cold start: the app only worked offline
    AFTER a successful online launch had populated the cache, and a blocked or slow cdnjs stopped it
@@ -22,10 +22,17 @@ self.addEventListener('install', e => {
   // never activates, and offline support silently stops existing — with nothing to indicate why.
   // Caching each entry independently means a single renamed or missing icon costs that one file
   // instead of the entire offline capability.
+  //
+  // v139: every entry is fetched with cache:'reload'. A plain c.add('./olisa.html') is allowed to
+  // be answered by the browser's own HTTP cache, and GitHub Pages lets a page be reused for ten
+  // minutes. Installing a new release inside that window therefore filled the NEW cache with the
+  // OLD page — and that stale copy is exactly what the app falls back to when it is opened
+  // offline. 'reload' goes to the network every time, so the shell that gets stored is the one
+  // that was just published.
   e.waitUntil(
     caches.open(CACHE)
-      .then(c => Promise.all(SHELL.map(u =>
-        c.add(u).catch(err => { console.warn('[sw] skipped (not cached):', u, err && err.message); })
+      .then(c => Promise.all(SHELL.map(path => new Request(path, { cache: 'reload' })).map(u =>
+        c.add(u).catch(err => { console.warn('[sw] skipped (not cached):', u.url, err && err.message); })
       )))
       .then(() => self.skipWaiting())
   );
@@ -42,14 +49,37 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET') return;
-  if (url.hostname.includes('googleapis.com') || url.hostname.includes('accounts.google.com')) return; // live only
-  if (url.hostname.includes('cdnjs.cloudflare.com') || url.hostname.includes('fonts.g')) {
-    // libraries/fonts: cache-first (they're versioned URLs)
-    e.respondWith(caches.open(CACHE).then(async c =>
-      (await c.match(e.request)) || fetch(e.request).then(r => { if (r.status === 200) c.put(e.request, r.clone()); return r; })
-    ));
+  // ==================== v139: THE FONTS WERE NEVER ACTUALLY CACHED ====================
+  // Two separate things stopped it, and either one alone was enough:
+  //   1. fonts.googleapis.com CONTAINS "googleapis.com", so the live-only rule just below returned
+  //      before the font rule was ever reached. The stylesheet went to the network every time.
+  //   2. A <link rel="stylesheet"> to another origin is a no-cors request. Its answer is opaque:
+  //      status 0, unreadable. The old test was `r.status === 200`, which an opaque answer can
+  //      never pass, so even with (1) fixed nothing would have been stored.
+  // The result offline was the fallback typeface on every page, and font files sitting in the
+  // cache that no stylesheet ever asked for. The font hosts are now matched by exact name BEFORE
+  // the live-only rule, and a cache miss is fetched in CORS mode (both hosts allow it), which
+  // gives a real 200 that can be checked before it is kept. Same treatment for the cdnjs fallback.
+  const assetHost = url.hostname === 'fonts.googleapis.com' || url.hostname === 'fonts.gstatic.com'
+                 || url.hostname === 'cdnjs.cloudflare.com';
+  if (assetHost) {
+    // fonts/fallback libraries: cache-first (their URLs are versioned)
+    e.respondWith(caches.open(CACHE).then(async c => {
+      // ignoreVary: the font stylesheet is answered with a Vary header, and a stored copy must
+      // still be found for the next page that asks for the same address.
+      const hit = await c.match(e.request.url, { ignoreVary: true });
+      if (hit) return hit;
+      try {
+        const r = await fetch(e.request.url, { mode: 'cors', credentials: 'omit' });
+        if (r && r.status === 200) c.put(e.request.url, r.clone()).catch(() => {});
+        return r;
+      } catch (err) {
+        return fetch(e.request);   // CORS refused for some reason: behave exactly as the browser would
+      }
+    }));
     return;
   }
+  if (url.hostname.includes('googleapis.com') || url.hostname.includes('accounts.google.com')) return; // live only
   // The libraries carry their version in the file itself and never change between releases, so
   // they are served cache-first. Leaving them on the shell's network-first path would mean asking
   // the network for 3 MB on every single launch — which would make self-hosting SLOWER on a weak
@@ -80,7 +110,21 @@ self.addEventListener('fetch', e => {
           }
           return r;
         })
-        .catch(() => caches.match(e.request).then(m => m || caches.match('./index.html')))
+        .catch(async () => {
+          // Offline. The exact cached copy first, always.
+          const exact = await caches.match(e.request);
+          if (exact) return exact;
+          // v139: the landing page used to be handed back for ANYTHING that was not cached — an
+          // icon, the manifest, a script — so the browser received a page of HTML where it asked
+          // for an image or JSON. That fallback only makes sense for a page being opened. A page
+          // opened with something after a "?" is also the same page, so the cached copy is found
+          // without the query before giving up and showing the tool menu.
+          if (e.request.mode === 'navigate') {
+            const samePage = await caches.match(e.request, { ignoreSearch: true });
+            return samePage || (await caches.match('./index.html')) || Response.error();
+          }
+          return Response.error();
+        })
     );
   }
 });

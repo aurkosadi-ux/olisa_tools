@@ -227,7 +227,9 @@ const tick = (ms = 80) => new Promise(r => setTimeout(r, ms));
   console.log('\n16. One version everywhere');
   const v = (rawHtml.match(/const APP_VERSION = (\d+);/) || [])[1];
   const c = (fs.readFileSync(path.join(dir, 'sw.js'), 'utf8').match(/olisa-tools-v(\d+)/) || [])[1];
-  t('page and service worker are both v138', v === '138' && c === '138', `page ${v}, sw ${c}`);
+  // Was pinned to exactly 138, which made this file fail on every release after its own. The
+  // guard that matters is that the two numbers move together and never go backwards.
+  t('page and service worker carry the same version, v138 or later', v === c && Number(v) >= 138, `page ${v}, sw ${c}`);
 
   console.log(`\n${fail ? 'FAILED' : 'PASSED'} — ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

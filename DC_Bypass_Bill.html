@@ -683,15 +683,37 @@ function dmy(d){
   return p(d.getDate()) + "-" + p(d.getMonth()+1) + "-" + String(d.getFullYear()).slice(2);
 }
 function rateText(r){
+  /* v139: was toFixed(2), which turned a rate of 117.125 into "117.13" — and that text is not
+     only the label on the bill, it is the number inside the sheet's own ROUND() formula. The
+     bill then said one total and Excel recalculated another. Up to four decimals are kept and
+     trailing zeros dropped, so 122 / 122.5 / 122.85 print exactly as they always did. */
   var s = Number(r);
-  return (s === Math.floor(s)) ? String(s) : s.toFixed(2).replace(/0$/,"").replace(/\.$/,"");
+  if(!isFinite(s)) return String(r);
+  return String(parseFloat(s.toFixed(4)));
+}
+function priceText(p){
+  /* v139: unit prices were always shown to three decimals. A price of 0.8525 printed as 0.853
+     next to a line total worked out from 0.8525, so the two figures on the bill did not multiply
+     out. Three decimals stay the normal look; a price that needs more keeps what it needs. */
+  var n = Number(p), s = n.toFixed(3);
+  return Math.abs(Number(s) - n) > 1e-9 ? String(parseFloat(n.toFixed(6))) : s;
 }
 function round2(x){ return Math.round(x*100)/100; }
 function roundBdt(usd, rate){
   /* Excel ROUND(x,0) rounds a half AWAY from zero: 141277.50 -> 141278.
-     The tiny epsilon absorbs binary float drift (…49999 that should be …5)
-     so the browser, the worksheet and the work order all agree. */
-  return Math.round(round2(usd*rate) + 1e-9);
+     v139: this used to round to two decimals first and THEN to a whole taka. Rounding twice is
+     not the same as rounding once: 1,135.62 x 119.75 = 135,990.495, which Excel's ROUND() makes
+     135,990 — but two decimals first gives ...990.50, and that rounds UP to 135,991. About one
+     bill in four hundred came out a taka above the sheet's own formula. The sum is now done in
+     whole numbers (cents x rate in ten-thousandths), where there is no float drift to absorb
+     and exactly one rounding step, so the browser, the worksheet and the PDF agree every time. */
+  var cents = Math.round(Number(usd) * 100), r4 = Math.round(Number(rate) * 10000);
+  var prod = cents * r4;
+  if(!isFinite(prod) || prod < 0 || prod > 9007199254740991){
+    return Math.round(Number(usd) * Number(rate) + 1e-9);   /* out of exact range: best effort */
+  }
+  var rem = prod % 1000000, whole = (prod - rem) / 1000000;
+  return whole + (rem * 2 >= 1000000 ? 1 : 0);
 }
 function esc(s){
   return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;")
@@ -860,15 +882,92 @@ function shiftRows(xml, from, delta){
       return '<mergeCell ref="' + c1 + (a >= from ? a + delta : a) + ":" +
              c2 + (b >= from ? b + delta : b) + '"/>';
     });
-  xml = xml.replace(/<brk ([^>]*?)max="(\d+)"/g, function(_m, pre, mx){
-    return "<brk " + pre + 'max="' + (+mx + delta) + '"';
+  /* v139: a manual page break lives in <rowBreaks> as <brk id="49" max="16383" man="1"/>. The ROW
+     is `id`; `max` is how far across the columns the break runs (16383 = the last column). This
+     used to add the row shift to `max`, which did nothing to the break and pushed `max` past the
+     last column that exists. A bill with extra carton lines kept its break where it was while its
+     print area grew, so the last line spilled onto a second page. The break now moves with the
+     rows it sits under, and only row breaks are touched — a column break has no row to shift. */
+  xml = xml.replace(/<rowBreaks\b[^>]*>[\s\S]*?<\/rowBreaks>/, function(block){
+    return block.replace(/<brk ([^>]*?)id="(\d+)"/g, function(_m, pre, id){
+      var n = +id; return "<brk " + pre + 'id="' + (n >= from ? n + delta : n) + '"';
+    });
   });
+  return xml;
+}
+
+/* ==================================================================
+   v139 — THE SHEET BEING COPIED MAY ALREADY HAVE SEVERAL CARTON LINES
+   A new bill is cloned from the newest Bill-N sheet in the workbook, and everything below
+   assumed that sheet has exactly ONE carton line on row 20 with its TOTAL on row 21. That is
+   true of the hand-made original — and stops being true the first time this tool writes a bill
+   with two lines, because that sheet is then the newest one and becomes the pattern for every
+   bill after it. Cloning it put the next bill's TOTAL formula on top of the old second carton
+   line, left the old totals underneath, and looked for "Taka In Word" three rows too high.
+   So the copy is first brought back to a single carton line, whatever it started with.
+   ================================================================== */
+function cellXmlOf(xml, ref){
+  var m = xml.match(new RegExp('<c r="'+ref+'"(?:[^>]*?/>|[^>]*?>[\\s\\S]*?</c>)'));
+  return m ? m[0] : null;
+}
+/* the formula text in a cell: null = no formula, "" = a shared formula with no text of its own */
+function cellFormula(xml, ref){
+  var c = cellXmlOf(xml, ref);
+  if(!c) return null;
+  var f = c.match(/<f[^>]*>([\s\S]*?)<\/f>/);
+  if(f) return f[1].replace(/\s+/g,"").replace(/\$/g,"");
+  return /<f[^>]*\/>/.test(c) ? "" : null;
+}
+/* how many carton lines the sheet carries, counted from the sheet itself */
+function templateItemRows(xml){
+  var R = CFG.firstItemRow, r, f;
+  /* the TOTAL row is the first row under the carton lines whose quantity cell is a SUM() */
+  for(r = R + 1; r <= R + 60; r++){
+    f = cellFormula(xml, "F" + r);
+    if(f && /^SUM\(/i.test(f)) return r - R;
+  }
+  /* no SUM there: count the rows whose value cell multiplies quantity by price on its own row */
+  var k = 0;
+  for(r = R; r <= R + 60; r++){
+    f = cellFormula(xml, "I" + r);
+    if(f === null) break;
+    if(f !== "" && !new RegExp("^(?:F"+r+"\\*H"+r+"|H"+r+"\\*F"+r+")$","i").test(f)) break;
+    k++;
+  }
+  return k >= 1 ? k : 1;
+}
+/* take a sheet with k carton lines back to one, closing the gap underneath */
+function collapseItemRows(xml, k){
+  var R = CFG.firstItemRow, r, gone = 0;
+  if(!(k > 1)) return xml;
+  for(r = R + 1; r <= R + k - 1; r++){
+    xml = xml.replace(new RegExp('<row r="' + r + '"(?:[^>]*?/>|[^>]*?>[\\s\\S]*?</row>)'), "");
+  }
+  xml = xml.replace(/<mergeCell ref="[A-Z]+(\d+):[A-Z]+(\d+)"\/>/g, function(m, a, b){
+    if(+a > R && +b < R + k){ gone++; return ""; }
+    return m;
+  });
+  if(gone){
+    xml = xml.replace(/<mergeCells count="(\d+)"/, function(_m, n){
+      return '<mergeCells count="' + Math.max(0, +n - gone) + '"';
+    });
+  }
+  xml = shiftRows(xml, R + k, -(k - 1));
+  var dim = xml.match(/<dimension ref="([A-Z]+\d+):([A-Z]+)(\d+)"\/>/);
+  if(dim){
+    xml = xml.replace(dim[0], '<dimension ref="' + dim[1] + ":" + dim[2] +
+                              Math.max(R, +dim[3] - (k - 1)) + '"/>');
+  }
   return xml;
 }
 
 /* fill one cloned sheet with one bill */
 function fillSheet(xml, bill){
   var n = bill.items.length, extra = n - 1, R = CFG.firstItemRow;
+
+  /* v139: start from exactly one carton line, however many the copied sheet had */
+  var had = templateItemRows(xml);
+  if(had > 1) xml = collapseItemRows(xml, had);
 
   if(extra > 0){
     var rowRe = new RegExp('<row r="' + R + '"[^>]*>[\\s\\S]*?</row>');
@@ -944,9 +1043,10 @@ return {
   excelSerial: excelSerial, roundBdt: roundBdt, round2: round2,
   billNoFromName: billNoFromName, parseWorkOrder: parseWorkOrder,
   totals: totals, checkWorkOrder: checkWorkOrder, typeLabel: typeLabel,
-  plyFromGrade: plyFromGrade,
+  plyFromGrade: plyFromGrade, priceText: priceText,
   setNum: setNum, setStr: setStr, setFormula: setFormula,
-  shiftRows: shiftRows, fillSheet: fillSheet, uuid4: uuid4, esc: esc
+  shiftRows: shiftRows, fillSheet: fillSheet, uuid4: uuid4, esc: esc,
+  templateItemRows: templateItemRows, collapseItemRows: collapseItemRows
 };
 })();
 </script>
@@ -1075,6 +1175,9 @@ Book.prototype.addSheet = function(templateName, newName, fill, extraRows){
 
     sheetXml = sheetXml.replace(/xr:uid="\{[^}]*\}"/, 'xr:uid="{' + CORE.uuid4() + '}"');
     sheetXml = sheetXml.split(' tabSelected="1"').join("");
+    /* v139: how many carton lines the copied sheet had BEFORE it is refilled — the print area
+       below has to grow or shrink by the difference, not by "new lines minus one" */
+    var tplRows = CORE.templateItemRows(sheetXml);
     sheetXml = fill(sheetXml);
 
     var chain = Promise.resolve();
@@ -1148,7 +1251,7 @@ Book.prototype.addSheet = function(templateName, newName, fill, extraRows){
       var am = self.book.match(areaRe);
       var area = am ? am[1] : "$A$1:$K$49";
       area = area.replace(/(\$[A-Z]+\$)(\d+)$/, function(_m,c,n){
-        return c + (+n + (extraRows||0)); });
+        return c + (+n + (extraRows||0) - (tplRows - 1)); });
       var dn = '<definedName name="_xlnm.Print_Area" localSheetId="' + localId + '">' +
                "'" + CORE.esc(newName) + "'!" + area + "</definedName>";
       if(self.book.indexOf("<definedNames>") >= 0){
@@ -1324,7 +1427,7 @@ function make(bill){
     T(it.ply, mid(4), ty, 8.7, false, "center");
     T(CORE.commas(it.qty), mid(5), ty, 8.7, false, "center");
     T(CORE.CFG.unit, mid(6), ty, 8.7, false, "center");
-    T(Number(it.price).toFixed(3), mid(7), ty, 8.7, false, "center");
+    T(CORE.priceText(it.price), mid(7), ty, 8.7, false, "center");
     acct(CORE.round2(it.qty * it.price), 8, y, 8.7, false);
   }
 
@@ -1747,7 +1850,7 @@ function refresh(){
         h += "<tr><td>" + CORE.esc(it.type) + "</td><td>" +
              it.L + " \u00d7 " + it.W + " \u00d7 " + it.H + '</td><td class="num">' + it.ply +
              '</td><td class="num">' + CORE.commas(it.qty) + '</td><td class="num">' +
-             Number(it.price).toFixed(3) + '</td><td class="num">' +
+             CORE.priceText(it.price) + '</td><td class="num">' +
              CORE.money(CORE.round2(it.qty*it.price)) + "</td></tr>";
       });
       h += "</tbody></table>";
@@ -2050,7 +2153,12 @@ $("btnGo").addEventListener("click", function(){
     alert("Something went wrong:\n\n" + msg);
   }).then(function(){
     btn.innerHTML = old;
+    /* v139: refresh() ends by writing its own status line ("2 bills ready ..."), which replaced
+       "Downloaded ... .zip" — or the error — the instant it appeared. The outcome of the button
+       that was just pressed is what belongs on the bar, so it is put back after the redraw. */
+    var st = $("status"), keepHtml = st.innerHTML, keepClass = st.className;
     refresh();
+    st.innerHTML = keepHtml; st.className = keepClass;
   });
 });
 
@@ -2064,6 +2172,16 @@ $("billDate").addEventListener("change", refresh);
 
 refresh();
 })();
+
+/* v139: only olisa.html ever registered the service worker. The app's start page is the tool
+   menu, so a phone that installed "Sadi's Universe" and opened only this tool never got an
+   offline copy of anything. Each page now registers the same worker itself; it is one shared
+   worker for the whole folder, so registering it from several pages changes nothing.
+   It lives inside this script, not in a block of its own, because the tests take "the last
+   script on the page" to be the page's own code. */
+if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  navigator.serviceWorker.register('sw.js').catch(function () { /* offline shell is optional */ });
+}
 </script>
 </body>
 </html>

@@ -249,6 +249,9 @@
                 <button onclick="App.copyMultipleQuotes()" id="copyMultipleButton" class="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-2 px-4 rounded-lg transition-colors duration-200 shadow-lg mb-4">
                     Copy
                 </button>
+                <!-- v139: the Multiple Prices view had nowhere to say anything. Its messages were
+                     written into #copyMessage, which sits inside the price box that this view hides. -->
+                <div id="multiCopyMessage" role="status" aria-live="polite" class="mb-4 text-xs text-center text-emerald-600 opacity-0 transition-opacity duration-300" style="min-height:1.25rem;"></div>
             </div>
             <!-- --- END MULTIPLE PRICES CALCULATOR VIEW --- -->
 
@@ -281,22 +284,31 @@
         }
         return bad;
     }
+    // ==================== v139: ONE PLACE THAT SAYS WHAT HAPPENED TO A COPY ====================
+    // Three separate faults lived in the old feedback code, all of them silent:
+    //   1. In the Multiple Prices view the refusal was written into #copyMessage — which is inside
+    //      the price box that view hides. "Nothing copied" was on the page and nobody could see it,
+    //      so the clipboard still held whatever was copied before.
+    //   2. A refusal left an inline `opacity: 0` behind when it faded. Inline style beats a class,
+    //      so every "Quote Copied!" after the first refusal was invisible for the rest of the session.
+    //   3. A copy that FAILED said nothing at all in the single view, and in the multiple view added
+    //      a hidden element to the button that was never removed.
+    // Every message now goes through here: it picks the line that is visible in the current view,
+    // drives visibility one way only (inline opacity), and restarts its own timer so two messages
+    // close together cannot hide each other early.
+    let feedbackTimer = null;
+    function showCopyFeedback(text, ok) {
+        const el = document.getElementById(App.viewMode === 'multiple' ? 'multiCopyMessage' : 'copyMessage');
+        if (!el) { if (!ok) alert(text); return; }
+        el.textContent = text;
+        el.classList.toggle('text-emerald-600', !!ok);
+        el.classList.toggle('text-red-600', !ok);
+        el.style.opacity = '1';
+        clearTimeout(feedbackTimer);
+        feedbackTimer = setTimeout(() => { el.style.opacity = '0'; }, ok ? 2000 : 4500);
+    }
     function refuseQuote(bad) {
-        // Reuses the existing "Quote Copied!" line under the price, in red. It is already positioned
-        // and already fades, so the refusal appears exactly where the confirmation would have.
-        const el = document.getElementById('copyMessage');
-        const msg = 'Nothing copied \u2014 ' + bad.join(', ') + ' must be greater than zero.';
-        if (el) {
-            el.textContent = msg;
-            el.classList.remove('text-emerald-600');
-            el.classList.add('text-red-600');
-            el.style.opacity = '1';
-            setTimeout(() => {
-                el.style.opacity = '0';
-                el.classList.remove('text-red-600');
-                el.classList.add('text-emerald-600');
-            }, 4500);
-        } else { alert(msg); }
+        showCopyFeedback('Nothing copied \u2014 ' + bad.join(', ') + ' must be greater than zero.', false);
     }
     const formatSqm = (value) => value.toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 4 });
     const formatCurrency = (value) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 4, maximumFractionDigits: 4 }).format(value);
@@ -305,6 +317,15 @@
     // --- Core Calculation Function ---
     function calculateArea(itemName, L_cm, W_cm, H_cm, wastageWidth = 0, wastageHeight = 0) {
         let areaCm2 = 0;
+
+        // v139: a carton that has not been fully measured has no area and no price. The formulas
+        // below add wastage (and, for a U-Divider, fixed allowances) to whatever has been typed,
+        // so an EMPTY form priced the wastage alone \u2014 $0.0038 on a blank Master Carton, where the
+        // start-up code expects 0.0000 \u2014 and a form with only the length typed showed a price
+        // built from one side. Copying was already refused, but the box still showed a number
+        // that looked like a quote. Until every measurement the item needs is above zero, it is 0.
+        const needsHeight = itemName !== 'Top/Bottom';
+        if (!(L_cm > 0) || !(W_cm > 0) || (needsHeight && !(H_cm > 0))) return 0;
 
         if (itemName === 'Master Carton') {
             // Formula: 2 * (l+w+width wastage) * (w+h+height wastage)
@@ -459,7 +480,7 @@
             
             newRow.innerHTML = `
                 <div class="flex justify-between items-center mb-2 pb-1 border-b border-gray-100">
-                    <h4 class="text-sm font-bold text-indigo-600">Item #${index + 1}</h4>
+                    <h4 data-row-title class="text-sm font-bold text-indigo-600">Item #${index + 1}</h4>
                     <button onclick="App.removeRow(${index})" class="text-red-500 hover:text-red-700 text-xs font-semibold">
                         Remove
                     </button>
@@ -514,6 +535,7 @@
             `;
             
             container.appendChild(newRow);
+            this.renumberRows();
             this.handleMultiItemChange(index); // Initialize visibility
             this.calculateAllMultiPrices(); // Calculate price for the new row
         },
@@ -526,8 +548,23 @@
             const row = document.getElementById(`row-${index}`);
             if (row) {
                 row.remove();
+                this.renumberRows();
                 this.calculateAllMultiPrices(); // Recalculate prices
             }
+        },
+
+        /**
+         * v139: the heading on each row is its POSITION in the list, because that is the number the
+         * copied quote and the "item 2 (Length)" refusal use. It used to be the row's internal id,
+         * which never changes: remove the middle one of three and the screen read "Item #1, Item #3"
+         * while the quote said 1 and 2 — and a refusal pointed at an item number that was not there.
+         */
+        renumberRows: function() {
+            const container = document.getElementById('multipleRowsContainer');
+            Array.from(container.children).forEach((rowElement, position) => {
+                const title = rowElement.querySelector('[data-row-title]');
+                if (title) title.textContent = `Item #${position + 1}`;
+            });
         },
 
         /**
@@ -750,8 +787,10 @@
             } else {
                 try {
                     tempInput.select();
-                    document.execCommand('copy');
-                    success = true;
+                    // v139: execCommand RETURNS whether it worked. The result was ignored and success
+                    // set to true regardless, so a browser that refuses the command (most of them,
+                    // increasingly) still showed "Quote Copied!" over an unchanged clipboard.
+                    success = !!document.execCommand('copy');
                 } catch (err) {
                     console.error('Copy failed with execCommand fallback:', err);
                     success = false;
@@ -760,46 +799,19 @@
 
             document.body.removeChild(tempInput);
 
-            // Determine which confirmation elements to target based on view mode
-            let targetButton, targetMessage;
-            if (this.viewMode === 'multiple') {
-                targetButton = document.getElementById('copyMultipleButton');
-                // For the multiple view, we use the button itself to show feedback
-                targetMessage = document.createElement('div');
-                targetMessage.className = 'absolute inset-0 flex items-center justify-center text-sm font-bold bg-indigo-700 text-white rounded-lg opacity-0 transition-opacity duration-300 pointer-events-none';
-                targetMessage.textContent = success ? confirmationMessage : 'Copy failed.';
-                
-                if (targetButton) {
-                    targetButton.style.position = 'relative';
-                    targetButton.appendChild(targetMessage);
-                }
-                
-            } else {
-                targetButton = document.getElementById('copyButton'); // The smaller button next to the price
-                targetMessage = document.getElementById('copyMessage'); // The dedicated message div below the price
-            }
-
-
+            // v139: success and failure are both SAID, in the line that is visible in this view.
             if (success) {
-                if (this.viewMode === 'multiple' && targetMessage) {
-                    targetMessage.classList.add('opacity-100');
-                    setTimeout(() => {
-                        targetMessage.classList.remove('opacity-100');
-                        if (targetButton) targetButton.removeChild(targetMessage);
-                    }, 2000);
-                } else if (targetMessage && targetButton) {
-                    targetMessage.textContent = confirmationMessage;
-                    targetMessage.classList.add('opacity-100');
-                    targetButton.classList.add('copy-button-flash');
-                    
-                    setTimeout(() => {
-                        targetMessage.classList.remove('opacity-100');
-                        targetButton.classList.remove('copy-button-flash');
-                    }, 2000);
+                showCopyFeedback(confirmationMessage, true);
+                const flashButton = document.getElementById(this.viewMode === 'multiple' ? 'copyMultipleButton' : 'copyButton');
+                if (flashButton) {
+                    flashButton.classList.add('copy-button-flash');
+                    setTimeout(() => flashButton.classList.remove('copy-button-flash'), 2000);
                 }
             } else {
-                 console.error('Copy failed.');
+                console.error('Copy failed.');
+                showCopyFeedback('Copy failed \u2014 nothing reached the clipboard. Try again, or select the text and copy it by hand.', false);
             }
+            return success;
         },
     };
 
@@ -841,6 +853,15 @@
         App.viewMode = 'single'; 
     };
 
+/* v139: only olisa.html ever registered the service worker. The app's start page is the tool
+   menu, so a phone that installed "Sadi's Universe" and opened only this tool never got an
+   offline copy of anything. Each page now registers the same worker itself; it is one shared
+   worker for the whole folder, so registering it from several pages changes nothing.
+   It lives inside this script, not in a block of its own, because the tests take "the last
+   script on the page" to be the page's own code. */
+if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  navigator.serviceWorker.register('sw.js').catch(function () { /* offline shell is optional */ });
+}
 </script>
 </body>
 </html>

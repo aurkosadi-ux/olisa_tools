@@ -34,7 +34,7 @@ t('buildChallanIndex exists and was found', bci.length > 200);
 t('subfolder recursion (e.g. one folder per month) runs through runPool', /await runPool\(subs, 6,/.test(bci));
 t('reading and parsing every PDF runs through runPool', /await runPool\(pdfs, 5,/.test(bci));
 t('a file that fails to download does not stop the rest from being read',
-  /catch \(e\) \{ failed\+\+; done\+\+; return; \}/.test(bci));
+  /catch \(e\) \{ failed\+\+; done\+\+; (?:readFailedPaths\.add\(f\.path\); )?return; \}/.test(bci));   // v139 also notes the path, so what was indexed for it is kept
 // Was pinned to `const reused = Object.values(challanIndex).filter(...)`, which is the O(n x n)
 // scan that used to run inside the per-file loop. The reuse itself is the point, not the
 // expression: assert the behaviour and, separately, that the quadratic form has not come back.
