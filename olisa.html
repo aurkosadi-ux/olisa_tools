@@ -1260,7 +1260,7 @@ function switchTab(which) {
 // immediately, so the whole script threw on load. Evaluation stopped there, which meant every
 // `let` below it never initialised either, and the first thing to notice was an unrelated
 // "cannot access 'piIndex' before initialization". One misplaced constant, entire tool dead.
-const APP_VERSION = 139;
+const APP_VERSION = 140;
 // ==================== A QUANTITY CELL, READ THE SAME WAY EVERYWHERE (v138) ====================
 // The challan and PI readers already stripped thousands separators, but the Master File, PO Summary
 // and Undelivered readers did not. A quantity that reached them as TEXT — pasted from another
@@ -4112,7 +4112,9 @@ const AUTOIDX = {
   phoneMaxReadsCell: 25,   // on mobile data a phone reads at most this many work orders unasked
   phoneMaxReadsWifi: 150,  // on Wi-Fi more, but a whole cold catch-up still waits for the laptop
   maxPages: 20,            // pages of the feed read in one poll (up to 1,000 changes each)
-  ancestryPerPoll: 12,     // "which folder is this in?" questions put to Drive in one poll
+  ancestryPerPoll: 40,     // "which folder is this in?" questions put to Drive in one poll (v140: was 12)
+  stallPolls: 5,           // v140: polls in a row that could not get past the same page before starting over
+  staleResetMs: 6 * 3600000, // v140: ...or at once, if the index has not matched Drive for this long
   selfWriteMs: 30 * 60000  // the tool's own OCR output is not news for this long
 };
 const AUTO_DOC_RE = /\.(xlsx|xls|xlsm|pdf|docx?|rtf|png|jpe?g)$/i;
@@ -4121,6 +4123,21 @@ const AUTO_DOC_RE = /\.(xlsx|xls|xlsm|pdf|docx?|rtf|png|jpe?g)$/i;
 // every change after that. Everything below keeps that true, or leaves it untouched.
 let autoFeed = { rootId: null, token: null, syncedAt: 0, sharedOk: false };
 let autoWatch = { rootId: null, chRootId: null, folders: {}, files: {} };   // Drive id -> 'wo' | 'ch'
+// ==================== v140: FOLDERS ALREADY PROVEN TO BE OUTSIDE OLISA ====================
+// THE BUG: automatic indexing stopped for good once Drive received a batch of PDF/Excel/Word files
+// in folders that have nothing to do with Olisa (the office move of work files into Drive is
+// exactly that). Each poll may ask Drive "which folder is this in?" only 12 times. Every such
+// file used one of those 12 questions, EVEN when the answer was already known, and the 13th was
+// put off "until the next poll". A put-off file makes the cursor stay on its page — correctly,
+// so it cannot be lost — but the next poll re-read the same page, spent the same 12 questions
+// on the same 12 unrelated files, and put off the same 13th. Forever. No new work order or
+// challan behind that page was ever seen again, and "checked with Drive" stopped moving.
+// Folders proven to be outside both Work Orders and Challans are now remembered, so each is
+// asked about once, ever, and costs nothing afterwards. Kept in memory only: it is rebuilt in a
+// few polls after a restart, and a remembered "outside" can never hide a file in a folder that
+// has since been moved in — the move itself is a change that is checked afresh.
+const autoOutside = new Set();
+let autoStallPolls = 0;
 let autoPending = null;      // { firstAt, lastAt, dueAt, items: { id: { kind, name, removed, at } } }
 let autoTimer = null;
 let autoPollBusy = false;
@@ -4173,7 +4190,8 @@ function autoFeedAdvanced(token, syncedAt, fromShared) {
 // how a change is recognised as ours without asking Drive where it lives.
 function refreshAutoWatch(chRootId) {
   if (!autoIndexActive()) return;
-  if (autoWatch.rootId !== savedRootHandle.id) autoWatch = { rootId: savedRootHandle.id, chRootId: null, folders: {}, files: {} };
+  if (autoWatch.rootId !== savedRootHandle.id) { autoWatch = { rootId: savedRootHandle.id, chRootId: null, folders: {}, files: {} }; autoOutside.clear(); }
+  if (chRootId && chRootId !== autoWatch.chRootId) autoOutside.clear();   // v140: "outside" was judged against the old one
   if (chRootId) autoWatch.chRootId = chRootId;
   const folders = {}, files = {};
   const walk = (id, kind, depth) => {
@@ -4188,6 +4206,7 @@ function refreshAutoWatch(chRootId) {
   // Added to, never replaced: a folder the listing cache has since let go of is still ours.
   autoWatch.folders = { ...autoWatch.folders, ...folders };
   autoWatch.files = { ...autoWatch.files, ...files };
+  Object.keys(folders).forEach(id => autoOutside.delete(id));   // v140
   const fk = Object.keys(autoWatch.files);
   if (fk.length > 30000) fk.slice(0, fk.length - 30000).forEach(k => { delete autoWatch.files[k]; });
   persistAutoWatch();
@@ -4227,6 +4246,11 @@ async function classifyDriveChange(c, budget) {
       if (autoWatch.folders[p]) { kind = autoWatch.folders[p]; break; }
     }
   }
+  // v140: a folder already proven to be outside Olisa (or inside one that is) costs nothing.
+  if (!kind && parents.length && parents.every(p => autoKnownOutside(p))) {
+    if (isFolder) autoOutside.add(id);
+    return null;
+  }
   if (!kind && parents.length) {
     if (budget.left <= 0) return { id, kind: 'defer', name: f.name || '', at };
     budget.left--;
@@ -4237,13 +4261,44 @@ async function classifyDriveChange(c, budget) {
     if (inWo === true) kind = 'wo';
     else if (inCh === true) kind = 'ch';
     else if (inWo === 'unproven' || inCh === 'unproven') kind = 'maybe';
-    if (kind === 'wo' || kind === 'ch') parents.forEach(p => { autoWatch.folders[p] = kind; });
+    if (kind === 'wo' || kind === 'ch') parents.forEach(p => { autoWatch.folders[p] = kind; autoOutside.delete(p); });
+    // v140: a definite "no" for both is remembered — for the parent and every folder above it
+    // that the walk passed through, since nothing under a folder outside Olisa can be inside it.
+    else if (inWo === false && inCh === false && autoWatch.chRootId) autoMarkOutside(parents);
   }
   if (!kind) return null;
   if (kind === 'wo' || kind === 'ch') {
-    if (isFolder) autoWatch.folders[id] = kind; else autoWatch.files[id] = kind;
+    if (isFolder) { autoWatch.folders[id] = kind; autoOutside.delete(id); } else autoWatch.files[id] = kind;
   }
   return { id, kind, name: f.name || '', removed: !!f.trashed, folder: isFolder, at };
+}
+// v140 helpers for the "outside Olisa" memory.
+function autoKnownOutside(folderId) {
+  if (!folderId || autoWatch.folders[folderId]) return false;
+  // Walk up through what is already cached — no requests — looking for a folder proven outside.
+  let id = folderId;
+  for (let depth = 0; depth < 10 && id; depth++) {
+    if (autoWatch.folders[id] || id === (piRootHandle && piRootHandle.id) || id === autoWatch.chRootId) return false;
+    if (autoOutside.has(id)) { if (depth) autoOutside.add(folderId); return true; }
+    const ps = _ancestryCache.get(id);
+    if (!ps || ps.length !== 1) return false;
+    id = ps[0];
+  }
+  return false;
+}
+function autoMarkOutside(parents) {
+  const protectedIds = new Set([piRootHandle && piRootHandle.id, autoWatch.chRootId, savedRootHandle && savedRootHandle.id].filter(Boolean));
+  (parents || []).forEach(p => {
+    let id = p;
+    for (let depth = 0; depth < 10 && id; depth++) {
+      if (protectedIds.has(id) || autoWatch.folders[id]) break;
+      autoOutside.add(id);
+      const ps = _ancestryCache.get(id);
+      if (!ps || ps.length !== 1) break;
+      id = ps[0];
+    }
+  });
+  if (autoOutside.size > 50000) autoOutside.clear();   // a safety cap; it simply relearns
 }
 // One small request, most of the time: "what has changed since the cursor?"
 async function pollDriveChanges() {
@@ -4286,6 +4341,22 @@ async function pollDriveChanges() {
     // Read to the end and nothing of ours: the index still matches Drive, as of this poll.
     if (drained && !sawOurs) autoFeed.syncedAt = Math.max(autoFeed.syncedAt || 0, startedAt);
     persistAutoFeed();
+    // ==================== v140: A CURSOR THAT CANNOT MOVE IS STARTED OVER ====================
+    // "Ours, but put off" with nothing actually found means this poll could not get past the page
+    // the cursor is held on. The memory above makes that rare; this makes it impossible to be
+    // permanent. After a few such polls in a row — or at once if the index has not matched Drive
+    // for hours — the cursor is taken fresh from now and the index is checked against Drive in
+    // full, exactly as on a first run. That check lists Work Orders and Challans directly, so
+    // nothing that arrived while the feed was stuck can be missed, and only changed files are read.
+    if (sawOurs && !found.length) {
+      autoStallPolls++;
+      const staleFor = Date.now() - (autoFeed.syncedAt || 0);
+      if (autoStallPolls >= AUTOIDX.stallPolls || staleFor > AUTOIDX.staleResetMs) {
+        autoStallPolls = 0;
+        await autoResetFeed();
+        return;
+      }
+    } else autoStallPolls = 0;
     if (found.length) { persistAutoWatch(); noteAutoChanges(found); }
     else { renderHealth(); renderIndexStamp(); }
   } catch (e) {
